@@ -16,6 +16,9 @@ import {
 import { customCodeNode } from "./nodes/customCode";
 import { telegramNotifyNode, lineNotifyNode } from "./nodes/notify";
 import { repeatStepsNode } from "./nodes/repeatSteps";
+import { writeFileNode, readFileNode } from "./nodes/fileOps";
+import { webPageNode } from "./nodes/webPage";
+import { desktopNotifyNode } from "./nodes/desktopNotify";
 
 const ALL: NodeDefinition[] = [
   triggerNode,
@@ -25,6 +28,9 @@ const ALL: NodeDefinition[] = [
   excelProcessNode,
   pdfReadNode,
   unzipNode,
+  readFileNode,
+  writeFileNode,
+  webPageNode,
   httpRequestNode,
   templateTextNode,
   setVariableNode,
@@ -34,6 +40,7 @@ const ALL: NodeDefinition[] = [
   repeatStepsNode,
   telegramNotifyNode,
   lineNotifyNode,
+  desktopNotifyNode,
 ];
 
 export const NODE_DEFS: Record<string, NodeDefinition> = Object.fromEntries(

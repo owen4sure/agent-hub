@@ -23,12 +23,16 @@ const RETRY_BACKOFF_MS = [3000, 9000];
 const MAX_ATTEMPTS = 3;
 const NODE_TIMEOUT_MS = 3 * 60 * 1000;
 
+/** manual=使用者按執行；其餘都是無人值守的自動觸發(結果要靠桌面通知讓人知道) */
+export type TriggerSource = "manual" | "schedule" | "watch" | "webhook";
+const TRIGGER_LABEL: Record<TriggerSource, string> = { manual: "手動", schedule: "排程", watch: "資料夾監聽", webhook: "Webhook" };
+
 interface QueueItem {
   runId: string;
   workflowId: string;
   triggerParams: Record<string, unknown>;
   headed: boolean;
-  trigger: "manual" | "schedule";
+  trigger: TriggerSource;
 }
 
 const queue: QueueItem[] = [];
@@ -131,7 +135,7 @@ function topoOrder(wf: Workflow): WorkflowNode[] {
 export function startWorkflowRun(
   workflowId: string,
   triggerParams: Record<string, unknown> = {},
-  options: { headed?: boolean; trigger?: "manual" | "schedule" } = {},
+  options: { headed?: boolean; trigger?: TriggerSource } = {},
 ): string {
   const db = getDb();
   const wf = getWorkflow(workflowId);
@@ -429,7 +433,7 @@ async function executeWorkflow(item: QueueItem) {
   const wf = getWorkflow(workflowId);
   if (!wf) {
     db.prepare(`UPDATE runs SET status='failed', error='找不到 workflow(可能已被刪除)', finished_at=datetime('now') WHERE id=?`).run(runId);
-    if (trigger === "schedule") notifyDesktop("Agent Hub 排程失敗", "排程的流程已被刪除，執行取消");
+    if (trigger !== "manual") notifyDesktop(`Agent Hub ${TRIGGER_LABEL[trigger]}觸發失敗`, "流程已被刪除，執行取消");
     notifyFinished(runId);
     return;
   }
@@ -627,15 +631,15 @@ async function executeWorkflow(item: QueueItem) {
     db.prepare(`UPDATE runs SET status='failed', error=?, reason=?, resolution=?, failed_node=?, finished_at=datetime('now') WHERE id=?`)
       .run(failError, fullReason, resolution, failedNode || null, runId);
     log(runId, null, `❌ 執行失敗：${fullReason}`);
-    // 排程觸發的失敗一定要主動通知——這是無人值守的排程唯一能讓使用者知道「沒跑成功」的管道，不然只能自己想到才會去開網頁看
-    if (trigger === "schedule") {
+    // 無人值守觸發(排程/資料夾監聽/webhook)的失敗一定要主動通知——這是使用者唯一能知道「沒跑成功」的管道，不然只能自己想到才會去開網頁看
+    if (trigger !== "manual") {
       if (resolution === "ai-fixable" && wf.status === "official" && failedNode) {
-        // 正式流程排程失敗且看起來 AI 修得好：在背景讓 AI 想一個修法提案(不自動套用，不影響正式在跑的設定)，
+        // 正式流程無人值守失敗且看起來 AI 修得好：在背景讓 AI 想一個修法提案(不自動套用，不影響正式在跑的設定)，
         // 想好之後通知裡順便講一句「AI 已經想好怎麼修」，使用者開網頁就能一鍵套用+重跑，不用自己動手找問題。
-        notifyDesktop(`「${wf.name}」排程執行失敗`, `${fullReason.slice(0, 150)}｜AI 正在想辦法修…`);
+        notifyDesktop(`「${wf.name}」${TRIGGER_LABEL[trigger]}執行失敗`, `${fullReason.slice(0, 150)}｜AI 正在想辦法修…`);
         proposeFixInBackground(workflowId, runId, failedNode, failedNodeLabel, failError).catch(() => {});
       } else {
-        notifyDesktop(`「${wf.name}」排程執行失敗`, fullReason.slice(0, 200));
+        notifyDesktop(`「${wf.name}」${TRIGGER_LABEL[trigger]}執行失敗`, fullReason.slice(0, 200));
       }
     }
   } else {
@@ -648,7 +652,7 @@ async function executeWorkflow(item: QueueItem) {
       (varWarnings > 0 ? `⚠️ 但有 ${varWarnings} 個設定裡的 {{變數}} 沒有對應到資料，可能讓檔名或內容出現 {{...}} 字樣——請檢查產出結果，不對就在對話裡跟 AI 說。` : "");
     db.prepare(`UPDATE runs SET status='success', reason=?, finished_at=datetime('now') WHERE id=?`).run(reason, runId);
     log(runId, null, varWarnings > 0 ? `✅ 執行完成(有 ${varWarnings} 個變數警告，見上方紀錄)` : "✅ 執行完成");
-    if (trigger === "schedule") notifyDesktop(`「${wf.name}」排程執行完成`, reason);
+    if (trigger !== "manual") notifyDesktop(`「${wf.name}」${TRIGGER_LABEL[trigger]}執行完成`, reason);
   }
   cancelCause.delete(runId); // 讀過(或沒用到)都要清，避免 Map 隨 run 數量無限長大
   notifyFinished(runId); // 一定通知等待者(runWorkflowAndWait)，不會讓 promise 卡住

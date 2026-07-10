@@ -143,6 +143,15 @@ function init(): Database.Database {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_fix_proposals_wf ON fix_proposals(workflow_id, status);
+
+    -- 資料夾監聽觸發的「已處理檔案」記錄：同一顆資料目錄可能有多個進程(daemon+dev)同時掃描，
+    -- 用 PRIMARY KEY + INSERT OR IGNORE 當原子搶佔鎖，誰先插入成功誰觸發，不會重複跑同一個檔案。
+    CREATE TABLE IF NOT EXISTS watch_seen (
+      workflow_id TEXT NOT NULL,
+      file_key TEXT NOT NULL,
+      seen_at TEXT NOT NULL,
+      PRIMARY KEY (workflow_id, file_key)
+    );
   `);
 
   // 無痛升級：schema 有變動時對既有 DB 補欄位，永遠不需要刪 DB(才不會弄丟已存的帳密/設定)。
@@ -162,6 +171,8 @@ function init(): Database.Database {
   addColumnIfMissing(db, "schedules", "last_fired_minute", "last_fired_minute TEXT");
   addColumnIfMissing(db, "schedules", "next_run_at", "next_run_at TEXT");
   addColumnIfMissing(db, "schedules", "params_json", "params_json TEXT");
+  // Webhook 觸發用的秘密 token(每條流程一個)：URL 路徑就是認證，沒有 token 的人打不動
+  addColumnIfMissing(db, "workflows_meta", "webhook_token", "webhook_token TEXT");
 
   // 帳密改成全域共用(依 key)：把舊的「每個 workflow 各存一份」搬進共用區 __shared__，
   // 使用者已填過的帳密不會不見。已有共用值就不覆蓋(第一筆為準)，搬完刪掉舊的各別列。冪等。

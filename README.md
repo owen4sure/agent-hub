@@ -54,11 +54,19 @@ Shows how one task splits into 5 nodes: start → log in to webmail (the image C
 
 ## Node library (extensible)
 
-Triggers, browser (login / find email / download attachment), data (Excel / string templates / PDF reading / zip extraction), integrations (HTTP requests), logic (conditions / variables), AI (decide / generate), and custom code. Each node type is one file in `lib/workflow/nodes/*.ts` — add a file and the AI can use it immediately. Files uploaded to the AI (PDF, Word `.docx/.doc`, Excel `.xlsx/.xls`, PowerPoint `.pptx`, RTF, plain-text family) are converted to text server-side (`lib/textExtract.ts`); images and screenshots go through a vision model that truly *sees* the content (Excel colors/borders/layout, embedded charts, web pages) — not just extracted text.
+Triggers, browser (login / find email / download attachment), data (Excel / string templates / PDF reading / zip extraction), files (read a file as text — PDF/Word/Excel/PPT auto-extracted — / write text files), integrations (HTTP requests / fetch a web page as text / desktop notification), logic (conditions / variables), AI (decide / generate), and custom code. Each node type is one file in `lib/workflow/nodes/*.ts` — add a file and the AI can use it immediately. Files uploaded to the AI (PDF, Word `.docx/.doc`, Excel `.xlsx/.xls`, PowerPoint `.pptx`, RTF, plain-text family) are converted to text server-side (`lib/textExtract.ts`); images and screenshots go through a vision model that truly *sees* the content (Excel colors/borders/layout, embedded charts, web pages) — not just extracted text.
 
-## Scheduling
+## Triggers: schedule / folder watch / webhook
 
-Set a schedule per workflow (daily / monthly / quarterly on Jan-Apr-Jul-Oct / weekly / raw cron) and the whole graph triggers automatically (headless). Requires the engine running as a daemon:
+Besides clicking ▶ Run, every workflow has a ⚡ trigger panel with three ways to run itself:
+
+- **Schedule**: daily / monthly / quarterly on Jan-Apr-Jul-Oct / weekly / raw cron — the whole graph triggers automatically (headless), computing "last period" dates for you.
+- **Folder watch**: point the workflow at a folder; any new file dropped in triggers a run within seconds, with `{{filePath}}` / `{{fileName}}` available to downstream nodes ("drop the report in the inbox folder and it processes itself"). Files already in the folder when you enable watching are ignored; only new arrivals trigger. Watching applies to *production* workflows only, so a draft you're still editing never fires in the background.
+- **Webhook**: enable it to get a private URL (the random token in the URL is the credential). Any local tool — a phone shortcut relaying through your Mac, a script, another app — POSTs JSON to it and the fields become `{{field}}` variables in the flow. Regenerate the URL anytime to revoke the old one.
+
+Unattended runs (all three trigger types) report success/failure via desktop notification — you'll know something broke without opening the app.
+
+Schedules and watchers need the engine running; install it as a daemon so it survives reboots:
 
 ```bash
 scripts/install-daemon.sh     # launchd daemon, starts on boot (macOS)
@@ -94,6 +102,8 @@ lib/aiRetry.ts                 model-call retry (backoff + empty responses count
 lib/claudeCodeClient.ts        when all free models fail, falls back to the local claude CLI
 lib/textExtract.ts             server-side text extraction for uploaded files (Excel/PDF/Word/RTF)
 lib/scheduler.ts               scheduling (cron matching / next_run_at / catch-up runs)
+lib/watchers.ts                folder-watch trigger (10s scan, DB-claimed dedup, silent seeding of pre-existing files)
+lib/webhookStore.ts            webhook token management (constant-time compare); endpoint at app/api/hooks/
 lib/notify.ts                  desktop notifications for schedule success/failure (macOS)
 examples/                      built-in example workflows (read-only)
 data/                          local state (gitignored): DB, workflows, debug screenshots, output files
@@ -103,7 +113,7 @@ docs/ARCHITECTURE_V2.md        the original design document (partially outdated;
 ## Development
 
 ```bash
-npm run test    # unit tests for core logic (relative-date resolution, graph lint, JSON extraction, cron — pure functions)
+npm run test    # unit tests for core logic (relative-date resolution, graph lint, JSON extraction, cron, folder-watch rules — pure functions)
 npm run lint    # ESLint
 ```
 
@@ -116,5 +126,6 @@ npm run lint    # ESLint
 - **This is a single-user local tool, bound to `127.0.0.1` by default** (`npm run dev` / `npm run start` both pass `-H 127.0.0.1`). **Do not change it to `-H 0.0.0.0` or host it publicly** — the `custom-code` node (AI-written custom steps) and the `http-request` node execute code / reach arbitrary URLs on your machine, so exposing them is equivalent to RCE/SSRF.
 - **Built-in cross-site protection** (`proxy.ts`): binding to 127.0.0.1 alone can't stop a malicious web page from making your own browser send requests to localhost. All `/api` requests verify the Host header (against DNS rebinding), and non-GET requests additionally require a local Origin — cross-site requests from external sites get 403.
 - **The `custom-code` node runs AI-generated code on your machine with your user permissions** — that's the nature of the "AI writes a custom step for you" feature. The code is visible before you apply it; if a workflow doesn't feel trustworthy, don't use custom-code nodes in it.
+- **Webhook URLs are credentials**: the random token in the path is compared in constant time, and a wrong token returns the same 404 as a nonexistent workflow (no probing). Since the server only listens on 127.0.0.1, only programs on this machine can reach a webhook at all.
 - **Model fallback**: your configured (often free) API is primary; only when the whole retry chain fails does the local Claude Code CLI step in once (see `lib/aiRetry.ts`) — it's not called on every request and incurs no surprise costs.
 - License: MIT (see `LICENSE`).

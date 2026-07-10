@@ -187,6 +187,7 @@ export function deleteWorkflow(id: string): void {
   db.prepare(`DELETE FROM schedules WHERE workflow_id = ?`).run(id);
   db.prepare(`DELETE FROM fix_proposals WHERE workflow_id = ?`).run(id);
   db.prepare(`DELETE FROM run_files WHERE workflow_id = ?`).run(id);
+  db.prepare(`DELETE FROM watch_seen WHERE workflow_id = ?`).run(id);
   for (const runId of runIds) {
     db.prepare(`DELETE FROM node_runs WHERE run_id = ?`).run(runId);
     db.prepare(`DELETE FROM run_logs WHERE run_id = ?`).run(runId);
