@@ -44,6 +44,56 @@ class EmptyResponseError extends Error {
   constructor() { super("模型回了空內容(可能該模型目前異常)"); }
 }
 
+/**
+ * 「網關劣化」特徵：timeout / 空回應 / 連線中斷。跟一般錯誤不同，這種模式下重試大多也是
+ * 白等一整個 timeout(實測：gateway 劣化時每次嘗試都掛滿 90 秒才斷，4 次重試=6 分鐘,
+ * 偶爾第 4 次成功──「慢速成功」比快速失敗更毒,因為備援永遠不會被觸發)。
+ */
+function isDegradedSignature(err: unknown): boolean {
+  if (err instanceof EmptyResponseError) return true;
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return /timed?\s?out|timeout|connection error|econnreset|econnrefused|fetch failed|socket hang up|network error/i.test(msg);
+}
+
+/* ── 跨呼叫的網關健康斷路器 ──────────────────────────────────────
+ * 單一呼叫內的重試救不了「整個 gateway 劣化」：一條 autorun 迴圈裡有十幾個模型呼叫，
+ * 每個都自己從頭試 2 次(2×90 秒)才切備援=整條迴圈還是慢到不能用。
+ * 所以劣化特徵要跨呼叫累計：連續 DEGRADED_THRESHOLD 次 → 之後 DEGRADED_WINDOW_MS 內
+ * 「有備援的呼叫直接先走備援」，主力反而變成備援的備援；主力只要成功一次立刻復位。
+ * 視窗到期自動恢復主力優先(等於內建的恢復探測，不用背景 job)。 */
+const DEGRADED_THRESHOLD = 3;
+const DEGRADED_WINDOW_MS = 5 * 60_000;
+let consecutiveDegraded = 0;
+let degradedUntil = 0;
+
+/** 目前是否處於「網關劣化模式」(有備援的呼叫會先走備援)。 */
+export function isGatewayDegraded(): boolean {
+  return Date.now() < degradedUntil;
+}
+
+function noteAttempt(ok: boolean, err?: unknown): void {
+  if (ok) {
+    consecutiveDegraded = 0;
+    degradedUntil = 0;
+    return;
+  }
+  if (isDegradedSignature(err)) {
+    consecutiveDegraded++;
+    if (consecutiveDegraded >= DEGRADED_THRESHOLD && degradedUntil === 0) {
+      degradedUntil = Date.now() + DEGRADED_WINDOW_MS;
+      console.warn(`[aiRetry] 主力模型連續 ${consecutiveDegraded} 次 timeout/空回應，接下來 ${DEGRADED_WINDOW_MS / 60_000} 分鐘內有備援的呼叫改為備援優先`);
+    }
+  } else {
+    consecutiveDegraded = 0; // 非劣化特徵的錯誤(4xx 之類)不算 gateway 掛掉
+  }
+}
+
+/** 測試用：重置斷路器狀態(模組層狀態會跨測試殘留)。 */
+export function __resetGatewayHealthForTest(): void {
+  consecutiveDegraded = 0;
+  degradedUntil = 0;
+}
+
 /** 使用者按了「⏹ 停止」——跟一般失敗不同，不重試、不切備援，直接讓整條呼叫鏈中止。 */
 export class CancelledError extends Error {
   constructor() { super("使用者已停止執行"); }
@@ -69,16 +119,34 @@ export async function callAIWithRetry<T>(
     return result;
   };
 
+  // 斷路器開著且有備援：先走備援(本機 Claude Code)，備援失敗才回頭照常試主力——
+  // 劣化的 gateway 每個呼叫都白等 2×90 秒才輪到備援，一條迴圈十幾個呼叫等於整條不能用。
+  if (opts.fallback && isGatewayDegraded()) {
+    try {
+      return await call(opts.fallback);
+    } catch (fbErr) {
+      if (fbErr instanceof CancelledError) throw fbErr;
+      // 備援也失敗就照舊走主力重試鏈(下面)，不能因為開了斷路器反而少了一條路
+    }
+  }
+
   let lastErr: unknown;
+  let degradedInThisCall = 0;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      return await call(fn);
+      const result = await call(fn);
+      noteAttempt(true);
+      return result;
     } catch (err) {
       if (err instanceof CancelledError) throw err; // 使用者主動停止——不重試、不切備援，直接往外拋
       lastErr = err;
+      noteAttempt(false, err);
+      if (isDegradedSignature(err)) degradedInThisCall++;
       if (attempt === MAX_ATTEMPTS || isNonRetryable(err)) break; // 該放棄主力了，往下看有沒有備援可以頂上
       // 504/請求太大這類「重打也一樣」的錯：有備援就直接切過去，別把使用者晾著重試同一包注定失敗的請求
       if (opts.fallback && shouldSkipToFallback(err)) break;
+      // 連續 2 次 timeout/空回應=網關劣化特徵：有備援就別再耗完整條重試鏈(每次都是白等一個 timeout)
+      if (opts.fallback && degradedInThisCall >= 2) break;
       opts.onRetry?.(attempt, err);
       await sleepCancellable(BACKOFF_MS[attempt - 1] ?? 6000, opts.signal);
     }
