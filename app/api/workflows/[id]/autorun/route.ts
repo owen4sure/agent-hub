@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { NextResponse } from "next/server";
 import { getClient } from "@/lib/modelClient";
 import { getWorkflow, saveWorkflow } from "@/lib/workflow/store";
@@ -25,7 +27,7 @@ const MAX_SEMANTIC_FIXES = 2;
 const OVERALL_TIME_BUDGET_MS = 15 * 60_000;
 
 interface Step {
-  kind: "run" | "fix" | "done" | "human" | "giveup";
+  kind: "run" | "fix" | "done" | "human" | "giveup" | "info";
   title: string;
   detail?: string;
   nodeLabel?: string;
@@ -88,8 +90,40 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
   const model = getWorkflowModel(id, wf.defaultModel);
   const client = getClient();
   const triggerParams = resolveParams(wf.triggerParams ?? [], rawParams, new Date());
-
   const steps: Step[] = [];
+
+  // 監聽型流程(trigger 有 watchPath)的自動測試：正常情況下 {{filePath}} 來自「被丟進資料夾的新檔案」，
+  // 手動/自動測試沒有這個來源，下游第一步就會死。拿監聽資料夾裡「最新的一個檔案」當測試樣本；
+  // 資料夾是空的就誠實停下請使用者放一個樣本檔，不進入注定失敗的修復迴圈。
+  const watchTrigger = wf.nodes.find((n) => n.type === "trigger" && String(n.config?.watchPath ?? "").trim());
+  if (watchTrigger && triggerParams.filePath === undefined) {
+    const dir = String(watchTrigger.config.watchPath).trim();
+    const pattern = String(watchTrigger.config.watchPattern ?? "").trim().toLowerCase();
+    let newest: { abs: string; name: string; mtime: number } | null = null;
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        if (name.startsWith(".")) continue;
+        if (pattern && !name.toLowerCase().includes(pattern)) continue;
+        const abs = path.join(dir, name);
+        const st = fs.statSync(abs);
+        if (!st.isFile()) continue;
+        if (!newest || st.mtimeMs > newest.mtime) newest = { abs, name, mtime: st.mtimeMs };
+      }
+    } catch { /* 資料夾不存在等同空——走下面的誠實停下 */ }
+    if (!newest) {
+      return NextResponse.json({
+        ok: false,
+        steps: [{
+          kind: "human",
+          title: "需要一個測試檔案",
+          detail: `這條流程由「資料夾監聽」觸發，測試需要一個樣本檔——請先放一個${pattern ? `檔名含「${pattern}」的` : ""}檔案到 ${dir}，再按一次「測到會跑」。`,
+        }],
+      });
+    }
+    triggerParams.filePath = newest.abs;
+    triggerParams.fileName = newest.name;
+    steps.push({ kind: "info", title: "用監聽資料夾裡的檔案當測試樣本", detail: newest.name });
+  }
   const fixCountByNode: Record<string, number> = {};
   const labelOf = (nodeId: string | null | undefined) => (nodeId && wf.nodes.find((n) => n.id === nodeId)?.label) || nodeId || "某一步";
 

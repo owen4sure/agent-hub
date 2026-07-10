@@ -6,7 +6,7 @@ import { PageHeader, EmptyState, formatDate, humanizeCron } from "@/components/u
 import { SCHEDULE_MODES, WEEKDAY_NAMES, buildCron, parseCron, timeValid, type ScheduleForm } from "@/lib/cron";
 
 interface ScheduleRow { id: string; workflowId: string; workflowName: string; enabled: number; cron: string; nextRunAt: string | null; orphan: boolean }
-interface WorkflowRow { id: string; name: string; status: string; nodeCount: number }
+interface WorkflowRow { id: string; name: string; status: string; nodeCount: number; triggers?: { schedule: boolean; watch: boolean; webhook: boolean } }
 
 export default function SchedulesPage() {
   const [schedules, setSchedules] = useState<ScheduleRow[] | null>(null);
@@ -110,6 +110,21 @@ export default function SchedulesPage() {
           </div>
         ))}
       </section>
+
+      {/* 其他自動觸發(監聽/Webhook)——這頁自稱「集中管理」，不能只看得到排程 */}
+      {officialWorkflows.some((w) => w.triggers?.watch || w.triggers?.webhook) && (
+        <section className="space-y-3">
+          <h2 className="font-medium">監聽 / Webhook 啟用中</h2>
+          {officialWorkflows.filter((w) => w.triggers?.watch || w.triggers?.webhook).map((w) => (
+            <div key={w.id} className="card p-3 flex items-center gap-3">
+              <Link href={`/workflows/${w.id}`} className="text-sm font-medium hover:underline truncate flex-1">{w.name}</Link>
+              {w.triggers?.watch && <span className="text-xs shrink-0" title="有新檔案丟進監聽資料夾就自動跑">📁 監聽中</span>}
+              {w.triggers?.webhook && <span className="text-xs shrink-0" title="外部工具 POST 專屬網址就觸發">🔗 Webhook</span>}
+              <Link href={`/workflows/${w.id}`} className="btn btn-ghost text-xs shrink-0" title="到流程頁的 ⚡ 觸發面板調整">設定</Link>
+            </div>
+          ))}
+        </section>
+      )}
 
       {/* 一鍵執行任何流程 */}
       <section className="space-y-3">

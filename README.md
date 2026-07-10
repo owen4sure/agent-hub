@@ -46,9 +46,13 @@ Open http://127.0.0.1:3000 (bound to localhost only — other devices can't reac
 
 ![A failed node turns red: the error message is in plain words, with a one-click "Let AI fix this step"](docs/screenshots/ai-fix.png)
 
-## Built-in example: monthly inventory Excel digest
+## Built-in examples (duplicate & adapt)
 
-Shows how one task splits into 5 nodes: start → log in to webmail (the image CAPTCHA is read by a vision model automatically) → find the exact email by date + report name → download the attachment → filter an Excel date range, highlight rows, save a new file. Duplicate it and adapt it to your own task. Date parameters support relative tokens (`{{yesterday}}`, `{{last-quarter-start}}`) that resolve to concrete dates at trigger time; before each run you pick the accounting period and all dates are computed for you to confirm.
+Three read-only examples show the main patterns — duplicate one and tell the AI how yours differs:
+
+- **Monthly inventory Excel digest** — 5 nodes: log in to webmail (the image CAPTCHA is read by a vision model automatically) → find the exact email by date + report name → download the attachment → filter an Excel date range, highlight, save. Date parameters use relative tokens (`{{yesterday}}`, `{{last-quarter-start}}`) resolved at trigger time; before each run you pick the accounting period and all dates are computed for you to confirm.
+- **Drop a file, get a summary** — folder-watch trigger: drop a PDF/Word/txt into a watched folder → contents extracted → AI writes a 3-point summary → saved as a file + desktop notification.
+- **Morning web digest by email** — fetch a web page → AI picks the top 3 items in Chinese → emails them to you; add a daily schedule and it becomes an automatic morning briefing.
 
 ![Pre-run form: pick the period — filter range, report date, and output filename are all computed automatically](docs/screenshots/run-form.png)
 

@@ -126,15 +126,20 @@ export const repeatStepsNode: NodeDefinition = {
     // 還是空殼，會導致同一步驟在每次引擎層重試時都重新呼叫模型產一次碼(persistStepCode 本來就是為了
     // 「產一次、之後都共用」，但沒接到「引擎重試用同一份 ctx」這個角度，實測會導致節點反覆逾時)。
     // 用磁碟最新版的 steps(若存在)取代，其餘設定仍照 ctx.config(引擎已解析過 schema 預設值/日期)。
-    let stepsRaw = String(ctx.config.steps ?? "[]");
+    // steps 可能是「真陣列」(AI 建圖直接給 JSON 陣列)或「JSON 字串」(schema 是 textarea)——
+    // 兩種都要接。以前只接字串,真陣列被 String() 成 "[object Object]" 直接炸(實測踩過,
+    // 還得靠修復迴圈燒一輪 AI 呼叫救回來,這種確定性問題不該浪費模型)。
+    const coerceSteps = (v: unknown): unknown => (Array.isArray(v) ? v : JSON.parse(String(v ?? "[]")));
+    let stepsRaw: unknown = ctx.config.steps;
     const wfLatest = getWorkflow(ctx.workflowId);
     const latestSteps = wfLatest?.nodes.find((n) => n.id === ctx.nodeId)?.config.steps;
-    if (typeof latestSteps === "string") stepsRaw = latestSteps;
+    if (latestSteps !== undefined) stepsRaw = latestSteps;
 
     let steps: StepSpec[];
     try {
-      steps = JSON.parse(stepsRaw);
-      if (!Array.isArray(steps) || steps.length === 0) throw new Error("steps 必須是非空陣列");
+      const parsed = coerceSteps(stepsRaw);
+      if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("steps 必須是非空陣列");
+      steps = parsed as StepSpec[];
     } catch (err) {
       throw new PermanentError(`「重複步驟」設定不是合法的步驟清單：${err instanceof Error ? err.message : String(err)}`);
     }

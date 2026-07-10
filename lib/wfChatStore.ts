@@ -25,7 +25,7 @@ export function isSystemErrorMsg(m: ChatMsg): boolean {
   if (m.isError) return true;
   return m.role === "assistant" && m.parts.some((p) => p.kind === "text" && ERROR_TEXT_PATTERNS.some((r) => r.test(p.text.trim())));
 }
-export interface AutoStep { kind: "run" | "fix" | "done" | "human" | "giveup"; title: string; detail?: string; nodeLabel?: string; runId?: string }
+export interface AutoStep { kind: "run" | "fix" | "done" | "human" | "giveup" | "info"; title: string; detail?: string; nodeLabel?: string; runId?: string }
 export interface PendingGraph { nodes: WorkflowNode[]; edges: WorkflowEdge[]; message: string; triggerParams?: ParamField[] }
 export interface AutoTestState { running: boolean; steps: AutoStep[]; ok?: boolean; needsHuman?: boolean }
 

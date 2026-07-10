@@ -967,7 +967,7 @@ export default function WorkflowPage() {
                 </div>
               )}
               {autoTest.steps.map((s, i) => {
-                const icon = s.kind === "done" ? "✅" : s.kind === "human" ? "🙋" : s.kind === "giveup" ? "⚠️" : s.kind === "fix" ? "🔧" : "▶";
+                const icon = s.kind === "done" ? "✅" : s.kind === "human" ? "🙋" : s.kind === "giveup" ? "⚠️" : s.kind === "fix" ? "🔧" : s.kind === "info" ? "📁" : "▶";
                 return (
                   <div key={i} className="flex gap-3 text-sm">
                     <span className="shrink-0">{icon}</span>

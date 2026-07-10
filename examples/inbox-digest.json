@@ -1,0 +1,62 @@
+{
+  "id": "inbox-digest",
+  "name": "丟進資料夾就自動摘要",
+  "status": "official",
+  "builtin": true,
+  "description": "監聽一個資料夾，丟進文件(PDF/Word/txt)就自動讀內容、AI 摘要成三個重點、存檔＋桌面通知",
+  "longDescription": "示範「資料夾監聽」觸發：把檔案丟進指定資料夾，流程就自己跑，完全不用開網頁按執行。\n1. 開始(由資料夾監聽觸發，檔案路徑自動變成 {{filePath}})\n2. 讀取檔案內容(PDF/Word/Excel/txt 都會自動抽成文字)\n3. AI 把內容摘要成三個重點\n4. 摘要存成文字檔(產出檔案頁可下載)\n5. 桌面通知你「摘要好了」\n\n用法：按「⧉ 複製」→ 到 ⚡ 觸發面板填你要監聽的資料夾 → 按「⋯ → 設為正式」就開始生效。想先試跑，按 ▶ 執行時選一個測試檔案即可。",
+  "defaultModel": "minimax-m3",
+  "requiresSecrets": [],
+  "triggerParams": [],
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "trigger",
+      "label": "開始(監聽資料夾)",
+      "config": {},
+      "position": { "x": 80, "y": 200 }
+    },
+    {
+      "id": "n2",
+      "type": "read-file",
+      "label": "讀取新檔案",
+      "config": { "path": "{{filePath}}", "maxChars": "20000" },
+      "position": { "x": 340, "y": 200 }
+    },
+    {
+      "id": "n3",
+      "type": "llm-decide",
+      "label": "AI 摘要三重點",
+      "config": {
+        "prompt": "用繁體中文把下面這份文件摘要成三個重點，一行一點、直接寫重點不要開場白：\n\n{{fileText}}",
+        "outputKey": "summary",
+        "choices": ""
+      },
+      "position": { "x": 600, "y": 200 }
+    },
+    {
+      "id": "n4",
+      "type": "write-file",
+      "label": "存摘要檔",
+      "config": {
+        "fileName": "摘要-{{fileName}}.txt",
+        "content": "來源檔案：{{fileName}}\n\n{{summary}}",
+        "extraDir": ""
+      },
+      "position": { "x": 860, "y": 200 }
+    },
+    {
+      "id": "n5",
+      "type": "desktop-notify",
+      "label": "通知我",
+      "config": { "title": "摘要完成", "message": "「{{fileName}}」的三點摘要已存好，到產出檔案頁看" },
+      "position": { "x": 1120, "y": 200 }
+    }
+  ],
+  "edges": [
+    { "from": "n1", "to": "n2" },
+    { "from": "n2", "to": "n3" },
+    { "from": "n3", "to": "n4" },
+    { "from": "n4", "to": "n5" }
+  ]
+}

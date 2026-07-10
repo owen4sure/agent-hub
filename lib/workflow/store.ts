@@ -124,7 +124,16 @@ export function saveWorkflow(wf: Workflow): void {
   assertValidId(wf.id);
   ensureUserDir();
   backupWorkflow(wf.id);
-  const toSave: Workflow = { ...wf, builtin: false, requiresSecrets: deriveRequiresSecrets(wf) };
+  // repeat-steps 的 steps 全系統的不變量是「JSON 字串」(lint/說明/截短/persistStepCode 都這樣讀)，
+  // 但 AI 建圖常直接給真陣列——在唯一的存檔入口正規化成字串，下游全部不用各自防
+  // (實測踩過：真陣列被 String() 成 "[object Object]"，節點直接炸，還得靠修復迴圈燒一輪 AI 救)。
+  const nodes = wf.nodes.map((n) =>
+    n.type === "repeat-steps" && Array.isArray(n.config?.steps)
+      ? { ...n, config: { ...n.config, steps: JSON.stringify(n.config.steps) } }
+      : n,
+  );
+  const normalized: Workflow = { ...wf, nodes };
+  const toSave: Workflow = { ...normalized, builtin: false, requiresSecrets: deriveRequiresSecrets(normalized) };
   // 原子寫入：先寫暫存檔再 rename(同一檔案系統內 rename 是原子的)。
   // 直接 writeFileSync 寫到一半程式崩潰/斷電，會留下半截 JSON，整個 workflow 檔就毀了。
   // 暫存檔名必須帶 pid+隨機值：同一顆資料目錄可能有兩個進程(daemon 常駐 + 使用者又開 dev)同時存
