@@ -73,7 +73,7 @@ scripts/install-daemon.sh     # launchd daemon, starts on boot (macOS)
 scripts/uninstall-daemon.sh
 ```
 
-![Schedule dialog: settings are echoed back in plain words — "every quarter (Jan, Apr, Jul, Oct) on the 1st at 9:00 AM"](docs/screenshots/schedule.png)
+![The trigger panel: schedule (echoed back in plain words), folder watch with an honest "production-only" note, and webhook — all in one place](docs/screenshots/triggers.png)
 
 **Schedules don't fire while the computer is off or asleep** (an inherent limit of local-first).
 

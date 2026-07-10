@@ -71,7 +71,7 @@ scripts/install-daemon.sh     # launchd 常駐，開機自動啟動
 scripts/uninstall-daemon.sh
 ```
 
-![排程設定：白話顯示「每季（1、4、7、10 月）1 號 早上 9:00 自動執行」](docs/screenshots/schedule.png)
+![觸發面板：排程白話顯示「每季（1、4、7、10 月）1 號 早上 9:00」、資料夾監聽含「只對正式流程生效」的誠實提示、Webhook 一鍵啟用](docs/screenshots/triggers.png)
 
 **電腦關機/睡眠時排程不會觸發**(本機常駐的本質限制)。
 

@@ -225,8 +225,10 @@ h1, h2, h3 { letter-spacing: -0.018em; }
   overflow: hidden;
 }
 .react-flow__minimap svg { background: var(--surface); }
-.react-flow__minimap-mask { fill: color-mix(in srgb, var(--surface-2) 72%, transparent); }
-.react-flow__minimap-node { fill: color-mix(in srgb, var(--accent) 65%, var(--text-faint)); }
+/* React Flow 把 maskColor/nodeColor 寫成 inline style，不加 !important 蓋不掉——
+   預設亮灰遮罩(240,240,240)在深色主題會浮出一塊亮板(截圖驗過) */
+.react-flow__minimap-mask { fill: color-mix(in srgb, var(--surface-2) 72%, transparent) !important; }
+.react-flow__minimap-node { fill: color-mix(in srgb, var(--accent) 65%, var(--text-faint)) !important; }
 .react-flow__handle {
   transition: background 0.13s var(--ease), box-shadow 0.13s var(--ease);
 }
