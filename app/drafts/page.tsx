@@ -12,6 +12,7 @@ interface WorkflowSummary {
   builtin: boolean;
   description: string;
   nodeCount: number;
+  triggers?: { schedule: boolean; watch: boolean; webhook: boolean };
 }
 
 export default function DraftsPage() {
@@ -117,7 +118,13 @@ export default function DraftsPage() {
                 <span className="font-medium tracking-tight">{w.name}</span>
                 <span className="badge badge-amber">草稿</span>
               </div>
-              <p className="text-sm muted mt-1">{w.nodeCount} 個節點</p>
+              <p className="text-sm muted mt-1 flex items-center gap-1.5 flex-wrap">
+                <span>{w.nodeCount} 個節點</span>
+                {/* 排程/Webhook 對草稿也會真的觸發；監聽只對正式生效——標示要照實區分 */}
+                {w.triggers?.schedule && <span className="text-xs" title="排程對草稿也會觸發">⏰ 排程</span>}
+                {w.triggers?.webhook && <span className="text-xs" title="Webhook 對草稿也會觸發">🔗 Webhook</span>}
+                {w.triggers?.watch && <span className="text-xs faint" title="資料夾監聽只對「正式」流程生效，設為正式後才開始盯資料夾">📁 監聽(待設為正式)</span>}
+              </p>
             </Link>
           ))}
         </div>
