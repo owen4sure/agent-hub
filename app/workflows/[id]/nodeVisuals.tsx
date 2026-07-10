@@ -8,7 +8,7 @@ export const ICONS: Record<string, string> = {
   "excel-process": "📊", "pdf-read": "📄", unzip: "🗜️", "http-request": "🌐", "template-text": "📝", "set-variable": "🔧",
   "if-condition": "🔀", "llm-decide": "🧠", "custom-code": "⚙️", "repeat-steps": "🔁",
   "telegram-notify": "✈️", "line-notify": "💬",
-  "write-file": "💾", "read-file": "📂", "web-page": "🕸️", "desktop-notify": "🔔",
+  "write-file": "💾", "read-file": "📂", "web-page": "🕸️", "desktop-notify": "🔔", "send-email": "✉️",
 };
 
 /** 節點型別 → 類別色 token + 白話型別名(卡片副標)。新增節點型別記得補一行，沒補會退回 custom 灰。 */
@@ -33,6 +33,7 @@ const TYPE_META: Record<string, { cat: string; label: string }> = {
   "read-file": { cat: "file", label: "讀檔案" },
   "web-page": { cat: "integration", label: "抓網頁" },
   "desktop-notify": { cat: "integration", label: "桌面通知" },
+  "send-email": { cat: "integration", label: "寄 Email" },
 };
 
 export function catColor(type: string): string {

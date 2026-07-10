@@ -105,7 +105,7 @@ export default function SettingsPage() {
     setNotifyInputs((prev) => { const next = { ...prev }; for (const k of keys) delete next[k]; return next; });
     return true;
   }
-  async function notifyAction(platform: "telegram" | "line", action: string, saveKeys: string[]) {
+  async function notifyAction(platform: "telegram" | "line" | "email", action: string, saveKeys: string[]) {
     setNotifyBusy(action);
     setNotifyMsg((p) => ({ ...p, [platform]: { ok: true, text: "處理中…" } }));
     try {
@@ -269,7 +269,7 @@ export default function SettingsPage() {
           <details className="text-sm">
             <summary className="cursor-pointer muted">📖 怎麼串接 LINE？(點開看教學，約 5 分鐘)</summary>
             <ol className="list-decimal ml-5 mt-2 space-y-1 muted">
-              <li>用電腦打開 <a href="https://developers.line.biz/console/" target="_blank" rel="noreferrer" className="underline">developers.line.biz/console</a>，用你自己的 LINE 帳號登入。</li>
+              <li>用電腦打開 <a href="https://developers.line.biz/console/" target="_blank" rel="noreferrer" className="underline break-all">developers.line.biz/console</a>，用你自己的 LINE 帳號登入。</li>
               <li>建立一個 <b>Provider</b>(名字隨意)，再建立 <b>Messaging API channel</b>(過程會要你順便建立一個 LINE 官方帳號，照著指示走完即可)。</li>
               <li>進入剛建立的 channel → <b>Messaging API</b> 分頁 → 拉到最下面 <b>Channel access token</b> 按「Issue」發行，複製貼到下面欄位。</li>
               <li>切到 <b>Basic settings</b> 分頁 → 拉到最下面複製 <b>Your user ID</b>(U 開頭的一長串)，貼到下面欄位。</li>
@@ -294,6 +294,49 @@ export default function SettingsPage() {
             </button>
           </div>
           {notifyMsg.line && <p className="text-sm" style={{ color: notifyMsg.line.ok ? "var(--green)" : "var(--red)" }}>{notifyMsg.line.text}</p>}
+        </div>
+
+        <div className="card p-5 space-y-3">
+          <h3 className="text-sm font-medium">✉️ Email {secretsSet.smtpHost && secretsSet.smtpAccount && secretsSet.smtpPassword && <span style={{ color: "var(--green)" }}>· 已串接</span>}</h3>
+          <p className="text-sm muted">串好之後，流程就能用「寄 Email」步驟把結果或附件(例如做好的 Excel)寄到任何信箱。</p>
+          <details className="text-sm">
+            <summary className="cursor-pointer muted">📖 用 Gmail 怎麼填？(點開看教學，約 2 分鐘)</summary>
+            <ol className="list-decimal ml-5 mt-2 space-y-1 muted">
+              <li>SMTP 主機填 <code>smtp.gmail.com</code>，連接埠填 <code>465</code>。</li>
+              <li>Email 帳號填你的 Gmail 地址。</li>
+              <li><b>密碼不能填登入密碼</b>：到 <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noreferrer" className="underline break-all">myaccount.google.com/apppasswords</a>(需先開啟兩步驟驗證)產生一組「應用程式密碼」，把那 16 碼貼進來。</li>
+              <li>按「測試發送」，會寄一封測試信給你自己，收到就完成了！其他信箱服務(Outlook/公司信箱)照它們的 SMTP 資訊填即可。</li>
+            </ol>
+          </details>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block text-sm">
+              <span className="muted">SMTP 主機 {secretsSet.smtpHost && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
+              <input type="text" className="input mt-1" placeholder={secretsSet.smtpHost ? "（已設定，留空不變）" : "smtp.gmail.com"}
+                value={notifyInputs.smtpHost ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, smtpHost: e.target.value }))} />
+            </label>
+            <label className="block text-sm">
+              <span className="muted">連接埠 {secretsSet.smtpPort && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
+              <input type="text" className="input mt-1" placeholder={secretsSet.smtpPort ? "（已設定，留空不變）" : "465"}
+                value={notifyInputs.smtpPort ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, smtpPort: e.target.value }))} />
+            </label>
+          </div>
+          <label className="block text-sm">
+            <span className="muted">Email 帳號(寄件人) {secretsSet.smtpAccount && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
+            <input type="text" className="input mt-1" placeholder={secretsSet.smtpAccount ? "（已設定，留空不變）" : "you@gmail.com"}
+              value={notifyInputs.smtpAccount ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, smtpAccount: e.target.value }))} />
+          </label>
+          <label className="block text-sm">
+            <span className="muted">Email 密碼 {secretsSet.smtpPassword && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
+            <input type="password" className="input mt-1" placeholder={secretsSet.smtpPassword ? "••••••••（已設定，留空不變）" : "Gmail 填 16 碼應用程式密碼"}
+              value={notifyInputs.smtpPassword ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, smtpPassword: e.target.value }))} />
+          </label>
+          <div className="flex items-center gap-2">
+            <button className="btn btn-primary" disabled={notifyBusy !== null}
+              onClick={() => notifyAction("email", "email-test", ["smtpHost", "smtpPort", "smtpAccount", "smtpPassword"])}>
+              {notifyBusy === "email-test" ? "發送中…" : "測試發送(寄給自己)"}
+            </button>
+          </div>
+          {notifyMsg.email && <p className="text-sm" style={{ color: notifyMsg.email.ok ? "var(--green)" : "var(--red)" }}>{notifyMsg.email.text}</p>}
         </div>
       </section>
     </div>

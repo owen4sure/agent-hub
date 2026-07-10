@@ -7,11 +7,14 @@ import type { ParamField } from "./types";
 export function RunForm({
   triggerParams,
   isDraft,
+  watchMode,
   onClose,
   onRun,
 }: {
   triggerParams: ParamField[];
   isDraft: boolean;
+  /** 監聽型流程手動執行：要選一個測試檔案去代替「被丟進資料夾的新檔案」 */
+  watchMode?: boolean;
   onClose: () => void;
   onRun: (params: Record<string, string>, headed?: boolean) => void;
 }) {
@@ -20,6 +23,17 @@ export function RunForm({
     Object.fromEntries(triggerParams.map((f) => [f.key, f.default ?? ""])),
   );
   const [headed, setHeaded] = useState(isDraft);
+  const [testFile, setTestFile] = useState("");
+
+  function submit() {
+    const params = { ...values };
+    if (watchMode && testFile.trim()) {
+      // 手動測試時模擬監聽觸發：把選的檔案當成「剛被丟進資料夾的新檔案」餵給下游的 {{filePath}}/{{fileName}}
+      params.filePath = testFile.trim();
+      params.fileName = testFile.trim().split("/").pop() ?? testFile.trim();
+    }
+    onRun(params, headed);
+  }
 
   function parseOption(o: string): { value: string; label: string } {
     const i = o.indexOf("=");
@@ -61,6 +75,13 @@ export function RunForm({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6" style={{ background: "rgba(0,0,0,0.4)" }} onClick={onClose}>
       <div className="card p-6 w-[460px] max-w-full space-y-4" style={{ boxShadow: "var(--shadow-lg)" }} onClick={(e) => e.stopPropagation()}>
         <h2 className="font-semibold">執行設定</h2>
+        {watchMode && (
+          <label className="block text-sm">
+            <span className="muted">測試用檔案(完整路徑)</span>
+            <input value={testFile} onChange={(e) => setTestFile(e.target.value)} className="input mt-1 font-mono text-xs" placeholder="/Users/你的名字/Desktop/測試檔.txt" />
+            <span className="text-xs faint">這條流程平常由「資料夾監聽」觸發——手動測試時，選一個檔案代替「剛丟進資料夾的新檔案」。留空的話，用到 {"{{filePath}}"} 的步驟會失敗。</span>
+          </label>
+        )}
         <div className="space-y-3">
           {visible.map((f) => (
             <label key={f.key} className="block text-sm">
@@ -98,7 +119,7 @@ export function RunForm({
 
         <div className="flex gap-2 justify-end">
           <button onClick={onClose} className="btn btn-ghost">取消</button>
-          <button onClick={() => onRun(values, headed)} className="btn btn-primary">▶ 執行</button>
+          <button onClick={submit} className="btn btn-primary">▶ 執行</button>
         </div>
       </div>
     </div>

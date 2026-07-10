@@ -599,7 +599,9 @@ export default function WorkflowPage() {
 
   function onClickRun() {
     const visible = (wf!.triggerParams ?? []).filter((f) => !f.derived);
-    if (visible.length > 0) setShowRunForm(true);
+    // 監聽型流程手動執行時，下游會引用 {{filePath}}——不給選測試檔直接跑一定失敗，所以也要開表單
+    const watching = wf!.nodes.some((n) => n.type === "trigger" && String(n.config?.watchPath ?? "").trim());
+    if (visible.length > 0 || watching) setShowRunForm(true);
     else run({}, wf!.status === "draft");
   }
 
@@ -1163,6 +1165,7 @@ export default function WorkflowPage() {
         <RunForm
           triggerParams={wf.triggerParams ?? []}
           isDraft={wf.status === "draft"}
+          watchMode={wf.nodes.some((n) => n.type === "trigger" && String(n.config?.watchPath ?? "").trim().length > 0)}
           onClose={() => setShowRunForm(false)}
           onRun={(params, headed) => { setShowRunForm(false); run(params, headed); }}
         />

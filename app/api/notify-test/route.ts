@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSharedSecrets, setSharedSecrets } from "@/lib/settingsStore";
 import { sendTelegram, sendLine } from "@/lib/workflow/nodes/notify";
+import { sendEmailSmtp } from "@/lib/workflow/nodes/sendEmail";
 
 /**
  * 通知串接的「測試發送」與 Telegram Chat ID「自動偵測」。
@@ -50,6 +51,17 @@ export async function POST(req: Request) {
       }
       await sendLine(secrets.lineChannelAccessToken, secrets.lineUserId, "✅ Agent Hub 測試訊息：LINE 串接成功！之後流程就能發通知到這裡。");
       return NextResponse.json({ ok: true, message: "已發送！去 LINE 看看有沒有收到" });
+    }
+
+    if (action === "email-test") {
+      if (!secrets.smtpHost || !secrets.smtpAccount || !secrets.smtpPassword) {
+        return NextResponse.json({ ok: false, message: "請先填好 SMTP 主機/帳號/密碼再測試(Gmail 要用「應用程式密碼」，不是登入密碼)" });
+      }
+      await sendEmailSmtp(
+        { host: secrets.smtpHost, port: secrets.smtpPort ?? "", account: secrets.smtpAccount, password: secrets.smtpPassword },
+        { to: secrets.smtpAccount, subject: "Agent Hub 測試信", text: "✅ Email 串接成功！之後流程就能用「寄 Email」步驟把結果或附件寄出。" },
+      );
+      return NextResponse.json({ ok: true, message: `已寄出測試信到 ${secrets.smtpAccount}，去收信匣看看(也檢查垃圾信)` });
     }
 
     return NextResponse.json({ ok: false, message: "不認識的動作" }, { status: 400 });

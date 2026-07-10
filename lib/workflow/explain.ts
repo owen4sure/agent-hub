@@ -52,8 +52,17 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
   // 讀設定並把裡面的 {{token}} 換成白話
   const hstr = (key: string, fallback = "") => h(str(c, key, fallback));
   switch (node.type) {
-    case "trigger":
-      return { text: "流程的起點。手動按「執行」或排程時間到，就從這裡開始跑。", settings: [] };
+    case "trigger": {
+      const watchPath = str(c, "watchPath").trim();
+      const pattern = str(c, "watchPattern").trim();
+      if (watchPath) {
+        return {
+          text: `流程的起點。監聽「${watchPath}」資料夾，有新檔案${pattern ? `(檔名含「${pattern}」)` : ""}丟進來就自動跑(也可手動執行/排程/Webhook 觸發)。`,
+          settings: [["監聽資料夾", watchPath], ["檔名條件", pattern || "（任何檔案）"]],
+        };
+      }
+      return { text: "流程的起點。手動按「執行」、排程時間到、或 Webhook 被呼叫，就從這裡開始跑(監聽/Webhook 在 ⚡ 觸發面板設定)。", settings: [] };
+    }
 
     case "browser-login": {
       const url = hstr("url", "登入頁");
@@ -182,6 +191,49 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
       return {
         text: `對「${itemsRef}」裡的每一項，重複執行：${stepLabels}。全部跑完後彙整成一份清單。`,
         settings: [["重複清單", itemsRef], ["每項步驟", stepLabels]],
+      };
+    }
+
+    case "read-file": {
+      const p = hstr("path", "上游的檔案");
+      return {
+        text: `讀取「${p}」的內容成文字(PDF/Word/Excel/PPT 會自動抽出文字)，給後面的步驟用。`,
+        settings: [["檔案路徑", p]],
+      };
+    }
+
+    case "write-file": {
+      const name = hstr("fileName", "output.txt");
+      const extra = str(c, "extraDir").trim();
+      return {
+        text: `把內容存成「${name}」放到產出檔案${extra ? `，並額外複製一份到「${extra}」` : ""}。`,
+        settings: [["檔名", name], ...(extra ? ([["額外存到", extra]] as [string, string][]) : [])],
+      };
+    }
+
+    case "web-page": {
+      const url = hstr("url", "（未填網址）");
+      return {
+        text: `打開「${url}」這個網頁，把內容抓成文字給後面的步驟用(不用登入的公開頁面)。`,
+        settings: [["網址", url]],
+      };
+    }
+
+    case "desktop-notify": {
+      const title = hstr("title", "通知");
+      return {
+        text: `在這台電腦跳一則桌面通知「${title}」。`,
+        settings: [["標題", title]],
+      };
+    }
+
+    case "send-email": {
+      const to = hstr("to").trim();
+      const subject = hstr("subject", "（未設主旨）");
+      const attach = hstr("attachPath").trim();
+      return {
+        text: `寄一封主旨「${subject}」的 email 給「${to || "自己(SMTP 帳號)"}」${attach ? `，附上「${attach}」` : ""}。SMTP 要先在設定頁串好。`,
+        settings: [["收件人", to || "（寄給自己）"], ["主旨", subject], ...(attach ? ([["附件", attach]] as [string, string][]) : [])],
       };
     }
 

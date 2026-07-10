@@ -13,6 +13,7 @@ interface WorkflowSummary {
   description: string;
   nodeCount: number;
   lastRun?: { status: string; started_at: string } | null;
+  triggers?: { schedule: boolean; watch: boolean; webhook: boolean };
 }
 interface Overview {
   officialCount: number;
@@ -219,7 +220,12 @@ export default function HomePage() {
                   <span className="font-medium tracking-tight truncate">{w.name}</span>
                   {w.builtin && <span className="badge badge-neutral shrink-0">內建範例</span>}
                 </div>
-                <p className="text-xs faint mt-0.5">{w.nodeCount} 個步驟</p>
+                <p className="text-xs faint mt-0.5 flex items-center gap-1.5">
+                  <span>{w.nodeCount} 個步驟</span>
+                  {w.triggers?.schedule && <span title="有啟用的排程，時間到自動執行">⏰ 排程</span>}
+                  {w.triggers?.watch && <span title="正在監聽資料夾，新檔案會自動觸發">📁 監聽</span>}
+                  {w.triggers?.webhook && <span title="Webhook 已啟用，外部工具可觸發">🔗 Webhook</span>}
+                </p>
               </div>
             </div>
             <p className="text-sm muted line-clamp-2 min-h-[2.5rem]">{w.description || <span className="faint">（還沒有說明——點進去跟 AI 對話時會自動補上）</span>}</p>

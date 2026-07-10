@@ -19,6 +19,7 @@ import { repeatStepsNode } from "./nodes/repeatSteps";
 import { writeFileNode, readFileNode } from "./nodes/fileOps";
 import { webPageNode } from "./nodes/webPage";
 import { desktopNotifyNode } from "./nodes/desktopNotify";
+import { sendEmailNode } from "./nodes/sendEmail";
 
 const ALL: NodeDefinition[] = [
   triggerNode,
@@ -40,6 +41,7 @@ const ALL: NodeDefinition[] = [
   repeatStepsNode,
   telegramNotifyNode,
   lineNotifyNode,
+  sendEmailNode,
   desktopNotifyNode,
 ];
 
