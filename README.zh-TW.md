@@ -56,7 +56,7 @@ npm run dev
 
 ## 節點庫(可持續擴充)
 
-觸發、瀏覽器(登入/找信/下載附件)、資料(Excel/組字串/PDF讀取/zip解壓縮)、檔案(讀檔案成文字——PDF/Word/Excel/PPT 自動抽取——/寫文字檔)、整合(打API/抓網頁內容/寄Email可帶附件/Telegram/LINE/桌面通知)、邏輯(條件/變數)、AI(判斷/產生)、自訂程式碼。每種節點是一個 `lib/workflow/nodes/*.ts` 檔，加一個檔 AI 立刻就會用。上傳給 AI 的檔案(PDF、Word `.docx/.doc`、Excel `.xlsx/.xls`、PowerPoint `.pptx`、RTF、純文字家族)會在伺服器端直接抽成文字讓 AI 讀懂(`lib/textExtract.ts`)；圖片/截圖走視覺模型。
+觸發、瀏覽器(登入/找信/下載附件)、資料(Excel/組字串/PDF讀取/zip解壓縮)、檔案(讀檔案成文字——PDF/Word/Excel/PPT 自動抽取——/寫文字檔)、整合(打API/抓網頁內容/讀連結分享的Google試算表免授權/寄Email可帶附件/Telegram/LINE/Slack/桌面通知)、邏輯(條件/變數)、AI(判斷/產生)、自訂程式碼。每種節點是一個 `lib/workflow/nodes/*.ts` 檔，加一個檔 AI 立刻就會用。上傳給 AI 的檔案(PDF、Word `.docx/.doc`、Excel `.xlsx/.xls`、PowerPoint `.pptx`、RTF、純文字家族)會在伺服器端直接抽成文字讓 AI 讀懂(`lib/textExtract.ts`)；圖片/截圖走視覺模型。
 
 ## 觸發：排程 / 資料夾監聽 / Webhook
 

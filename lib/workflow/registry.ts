@@ -14,7 +14,8 @@ import {
   llmDecideNode,
 } from "./nodes/general";
 import { customCodeNode } from "./nodes/customCode";
-import { telegramNotifyNode, lineNotifyNode } from "./nodes/notify";
+import { telegramNotifyNode, lineNotifyNode, slackNotifyNode } from "./nodes/notify";
+import { googleSheetReadNode } from "./nodes/googleSheet";
 import { repeatStepsNode } from "./nodes/repeatSteps";
 import { writeFileNode, readFileNode } from "./nodes/fileOps";
 import { webPageNode } from "./nodes/webPage";
@@ -32,6 +33,7 @@ const ALL: NodeDefinition[] = [
   readFileNode,
   writeFileNode,
   webPageNode,
+  googleSheetReadNode,
   httpRequestNode,
   templateTextNode,
   setVariableNode,
@@ -41,6 +43,7 @@ const ALL: NodeDefinition[] = [
   repeatStepsNode,
   telegramNotifyNode,
   lineNotifyNode,
+  slackNotifyNode,
   sendEmailNode,
   desktopNotifyNode,
 ];

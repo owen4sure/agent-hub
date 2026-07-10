@@ -237,6 +237,21 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
       };
     }
 
+    case "google-sheet-read": {
+      const url = hstr("sheetUrl", "（未貼網址）");
+      return {
+        text: `讀取這份 Google 試算表(要開「知道連結的任何人可檢視」)，第一列當欄位名，資料變成清單給後面的步驟用。`,
+        settings: [["試算表網址", url.length > 60 ? url.slice(0, 60) + "…" : url]],
+      };
+    }
+
+    case "slack-notify": {
+      return {
+        text: "把訊息發到 Slack 頻道。Webhook 網址要先在設定頁「通知串接」填好(有測試發送)。",
+        settings: [],
+      };
+    }
+
     default: {
       const def = getNodeDef(node.type);
       return { text: def?.description ?? "（這個步驟沒有額外說明）", settings: [] };

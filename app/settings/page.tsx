@@ -105,7 +105,7 @@ export default function SettingsPage() {
     setNotifyInputs((prev) => { const next = { ...prev }; for (const k of keys) delete next[k]; return next; });
     return true;
   }
-  async function notifyAction(platform: "telegram" | "line" | "email", action: string, saveKeys: string[]) {
+  async function notifyAction(platform: "telegram" | "line" | "email" | "slack", action: string, saveKeys: string[]) {
     setNotifyBusy(action);
     setNotifyMsg((p) => ({ ...p, [platform]: { ok: true, text: "處理中…" } }));
     try {
@@ -294,6 +294,30 @@ export default function SettingsPage() {
             </button>
           </div>
           {notifyMsg.line && <p className="text-sm" style={{ color: notifyMsg.line.ok ? "var(--green)" : "var(--red)" }}>{notifyMsg.line.text}</p>}
+        </div>
+
+        <div className="card p-5 space-y-3">
+          <h3 className="text-sm font-medium">📣 Slack {secretsSet.slackWebhookUrl && <span style={{ color: "var(--green)" }}>· 已串接</span>}</h3>
+          <details className="text-sm">
+            <summary className="cursor-pointer muted">📖 怎麼拿到 Webhook 網址？(點開看教學，約 2 分鐘)</summary>
+            <ol className="list-decimal ml-5 mt-2 space-y-1 muted">
+              <li>用瀏覽器打開 <a href="https://api.slack.com/apps" target="_blank" rel="noreferrer" className="underline break-all">api.slack.com/apps</a>，按「Create New App」→「From scratch」，取個名字、選你的工作區。</li>
+              <li>左側選 <b>Incoming Webhooks</b>，把開關打開，按最下面「Add New Webhook to Workspace」，選要發到哪個頻道。</li>
+              <li>複製產生的網址(<code>https://hooks.slack.com/services/…</code>)貼到下面欄位，按「測試發送」，頻道收到訊息就完成了！</li>
+            </ol>
+          </details>
+          <label className="block text-sm">
+            <span className="muted">Incoming Webhook 網址 {secretsSet.slackWebhookUrl && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
+            <input type="password" className="input mt-1" placeholder={secretsSet.slackWebhookUrl ? "••••••••（已設定，留空不變）" : "https://hooks.slack.com/services/…"}
+              value={notifyInputs.slackWebhookUrl ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, slackWebhookUrl: e.target.value }))} />
+          </label>
+          <div className="flex items-center gap-2">
+            <button className="btn btn-primary" disabled={notifyBusy !== null}
+              onClick={() => notifyAction("slack", "slack-test", ["slackWebhookUrl"])}>
+              {notifyBusy === "slack-test" ? "發送中…" : "測試發送"}
+            </button>
+          </div>
+          {notifyMsg.slack && <p className="text-sm" style={{ color: notifyMsg.slack.ok ? "var(--green)" : "var(--red)" }}>{notifyMsg.slack.text}</p>}
         </div>
 
         <div className="card p-5 space-y-3">

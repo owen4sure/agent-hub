@@ -62,6 +62,24 @@ export async function sendLine(channelAccessToken: string, userId: string, text:
   if (r.status !== 200) throw new PermanentError(`LINE 發送失敗(${r.status})：${r.text.slice(0, 150)}`);
 }
 
+/** 送一則 Slack 訊息(Incoming Webhook；給節點與設定頁的「測試發送」共用) */
+export async function sendSlack(webhookUrl: string, text: string, signal?: AbortSignal): Promise<void> {
+  let host = "";
+  try { host = new URL(webhookUrl).hostname; } catch { /* 下面統一報錯 */ }
+  if (host !== "hooks.slack.com") {
+    throw new PermanentError("Slack Webhook 網址格式不對——應該是 https://hooks.slack.com/services/… 開頭，請到設定頁照教學重新貼上");
+  }
+  const r = await postJson(webhookUrl, {}, { text: text.slice(0, 4000) }, signal);
+  if (r.status === 404 || /no_service|invalid_token/i.test(r.text)) {
+    throw new PermanentError("Slack Webhook 已失效(404)——可能被刪除或重新產生過，請到 Slack 的 Incoming Webhooks 頁面重新複製網址到設定頁");
+  }
+  if (r.status === 403 || /action_prohibited/i.test(r.text)) {
+    throw new PermanentError("Slack 拒絕了這個 Webhook(403)——請確認 App 還在工作區裡、Webhook 沒被管理員停用");
+  }
+  if (r.status >= 500) throw new RetryableError(`Slack 伺服器暫時錯誤(${r.status})`);
+  if (r.status !== 200) throw new PermanentError(`Slack 發送失敗(${r.status})：${r.text.slice(0, 150)}`);
+}
+
 const NEED_SETUP = "請到「設定」頁最下面的「通知串接」區，照教學一步一步填好(有「測試發送」可以先驗證)";
 
 export const telegramNotifyNode: NodeDefinition = {
@@ -87,6 +105,31 @@ export const telegramNotifyNode: NodeDefinition = {
     if (!message) throw new PermanentError("沒有設定要發送的訊息內容");
     await sendTelegram(token, chatId, message, ctx.cancelSignal);
     ctx.log(`已發送 Telegram 訊息(${message.length} 字)`);
+    return { output: { ...ctx.input, sent: true } };
+  },
+};
+
+export const slackNotifyNode: NodeDefinition = {
+  type: "slack-notify",
+  category: "integration",
+  label: "發 Slack 通知",
+  description: "把訊息發到 Slack 頻道(例如「報表做好了」或把結果內容直接傳過去)。需要先在設定頁貼上 Slack Incoming Webhook 網址(有教學，2 分鐘)。",
+  icon: "📣",
+  outputs: "sent(是否已送出)",
+  configSchema: [
+    { key: "message", label: "訊息內容(可用 {{欄位}} 帶入上游資料)", type: "textarea", default: "" },
+  ],
+  secretFields: () => [
+    { key: "slackWebhookUrl", label: "Slack Incoming Webhook 網址", type: "password" },
+  ],
+  retryable: true,
+  async execute(ctx) {
+    const url = ctx.secrets.slackWebhookUrl;
+    if (!url) throw new PermanentError(`尚未填入 Slack Webhook 網址——${NEED_SETUP}`);
+    const message = cfgStr(ctx, "message").trim();
+    if (!message) throw new PermanentError("沒有設定要發送的訊息內容");
+    await sendSlack(url, message, ctx.cancelSignal);
+    ctx.log(`已發送 Slack 訊息(${message.length} 字)`);
     return { output: { ...ctx.input, sent: true } };
   },
 };

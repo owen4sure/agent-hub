@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSharedSecrets, setSharedSecrets } from "@/lib/settingsStore";
-import { sendTelegram, sendLine } from "@/lib/workflow/nodes/notify";
+import { sendTelegram, sendLine, sendSlack } from "@/lib/workflow/nodes/notify";
 import { sendEmailSmtp } from "@/lib/workflow/nodes/sendEmail";
 
 /**
@@ -51,6 +51,14 @@ export async function POST(req: Request) {
       }
       await sendLine(secrets.lineChannelAccessToken, secrets.lineUserId, "✅ Agent Hub 測試訊息：LINE 串接成功！之後流程就能發通知到這裡。");
       return NextResponse.json({ ok: true, message: "已發送！去 LINE 看看有沒有收到" });
+    }
+
+    if (action === "slack-test") {
+      if (!secrets.slackWebhookUrl) {
+        return NextResponse.json({ ok: false, message: "請先貼上 Slack Incoming Webhook 網址再測試" });
+      }
+      await sendSlack(secrets.slackWebhookUrl, "✅ Agent Hub 測試訊息：Slack 串接成功！之後流程就能發通知到這個頻道。");
+      return NextResponse.json({ ok: true, message: "已發送！去 Slack 頻道看看有沒有收到" });
     }
 
     if (action === "email-test") {
