@@ -39,6 +39,21 @@ export function setMaxConcurrent(n: number) {
   db.prepare(`INSERT INTO settings (key, value) VALUES ('maxConcurrent', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(v);
 }
 
+/**
+ * 「AI 建流程偏好」：使用者用白話寫的固定習慣(檔名格式/報表慣例/慣用通知管道…)，
+ * builder 每次建圖注入 system prompt 當高優先指示——同一句話不用每條流程重講一次。
+ */
+export function getBuilderPrefs(): string {
+  const row = getDb().prepare(`SELECT value FROM settings WHERE key = 'builderPrefs'`).get() as { value: string } | undefined;
+  return row?.value ?? "";
+}
+
+export function setBuilderPrefs(text: string) {
+  // 上限防止整篇文章塞進來吃光 prompt 預算(2000 字的偏好已經非常多)
+  const v = text.slice(0, 2000);
+  getDb().prepare(`INSERT INTO settings (key, value) VALUES ('builderPrefs', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(v);
+}
+
 /** 取 workflow 選用的模型；沒設定過就用 workflow 自己的 defaultModel(由呼叫端傳入) */
 export function getWorkflowModel(workflowId: string, fallback = DEFAULT_MODEL): string {
   const db = getDb();

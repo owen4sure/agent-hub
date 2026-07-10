@@ -26,6 +26,9 @@ export default function SettingsPage() {
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [testing, setTesting] = useState(false);
   const [loadError, setLoadError] = useState(false);
+  const [prefs, setPrefs] = useState("");
+  const [prefsSaved, setPrefsSaved] = useState("");
+  const [prefsMsg, setPrefsMsg] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -33,6 +36,8 @@ export default function SettingsPage() {
         const d = await (await fetch("/api/settings")).json();
         setBaseUrl(d.baseUrl ?? "");
         setHasApiKey(Boolean(d.hasApiKey));
+        setPrefs(d.builderPrefs ?? "");
+        setPrefsSaved(d.builderPrefs ?? "");
       } catch {
         setLoadError(true);
       }
@@ -186,6 +191,34 @@ export default function SettingsPage() {
             <button onClick={runTest} disabled={testing} className="btn btn-ghost">{testing ? "測試中…" : "測試連線"}</button>
             {testResult && <span className="text-sm" style={{ color: testResult.ok ? "var(--green)" : "var(--red)" }}>{testResult.ok ? `✅ ${testResult.message}` : `❌ ${testResult.message}`}</span>}
           </div>
+        </div>
+      </section>
+
+      <section className="card p-5 space-y-3">
+        <div>
+          <h2 className="font-medium">🧠 AI 建流程偏好</h2>
+          <p className="text-sm muted mt-0.5">
+            用白話寫下你的固定習慣，AI 每次建流程都會遵守——同一句話不用每條流程重講。
+            例如：「檔名一律加當天日期後綴」「Excel 標題列深藍底白字」「通知一律用 Telegram」「輸出檔都放桌面的『報表』資料夾」。
+          </p>
+        </div>
+        <textarea
+          value={prefs}
+          onChange={(e) => setPrefs(e.target.value)}
+          rows={4}
+          maxLength={2000}
+          placeholder="一行一條，寫你希望 AI 建流程時固定遵守的事…"
+          className="input w-full font-normal"
+          style={{ resize: "vertical", minHeight: 90 }}
+        />
+        <div className="flex items-center gap-2">
+          <button onClick={async () => {
+            await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ builderPrefs: prefs }) });
+            setPrefsSaved(prefs);
+            setPrefsMsg(true);
+            setTimeout(() => setPrefsMsg(false), 2000);
+          }} disabled={prefs === prefsSaved} className="btn btn-primary">儲存偏好</button>
+          {prefsMsg && <span className="text-sm" style={{ color: "var(--green)" }}>已儲存，下次跟 AI 對話就生效</span>}
         </div>
       </section>
 

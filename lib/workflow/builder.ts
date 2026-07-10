@@ -7,6 +7,7 @@ import { z } from "zod";
 import { listNodeDefsForAI, getNodeDef } from "./registry";
 import { lintGraph, lintVarRefWarnings, validateConfigTypes } from "./graphLint";
 import { DATE_TOKENS } from "../relativeDate";
+import { getBuilderPrefs } from "../settingsStore";
 import { autoLayout } from "./layout";
 import { callAIWithRetry } from "../aiRetry";
 import { extractJsonObject, stripCodeFences } from "../jsonExtract";
@@ -240,9 +241,20 @@ ${lines.join("\n")}
 - 使用者反映「日期/期間不會跟著選的跑」時，第一件事就是檢查節點設定裡是不是有寫死的具體日期，改回引用參數。`;
 }
 
+/** 使用者在設定頁寫的「AI 建流程偏好」——每次建圖都注入,當成僅次於本次需求的優先指示 */
+function prefsSection(): string {
+  const prefs = getBuilderPrefs().trim();
+  if (!prefs) return "";
+  return `
+【使用者的固定偏好(除非這次需求明講不同,一律遵守)】
+${prefs}
+`;
+}
+
 function systemPrompt(currentGraph: string, rc?: RuntimeContext, triggerParams?: ParamField[], graph?: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }): string {
   const defs = listNodeDefsForAI();
   return `你是一個自動化流程(workflow)建構助理。使用者只會用白話描述需求，不懂程式。你的工作是把需求變成一張「節點圖」。
+${prefsSection()}
 
 可用的節點型別(只能用這些；真的都不適合才用 custom-code)：
 ${defs
