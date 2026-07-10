@@ -1,5 +1,7 @@
 # Agent Hub 🤖
 
+[![CI](https://github.com/owen4sure/agent-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/owen4sure/agent-hub/actions/workflows/ci.yml)
+
 [繁體中文](./README.zh-TW.md) | **English**
 
 A local-first visual workflow automation platform — **like n8n**, your task becomes a graph of nodes on a canvas, but **you build and modify everything by chatting with AI in plain language. You never write or read code.**

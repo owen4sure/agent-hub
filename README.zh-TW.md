@@ -1,5 +1,7 @@
 # Agent Hub 🤖
 
+[![CI](https://github.com/owen4sure/agent-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/owen4sure/agent-hub/actions/workflows/ci.yml)
+
 **繁體中文** | [English](./README.md)
 
 企業級的視覺化 workflow 自動化平台——**像 n8n 一樣**在畫布上把一件事拆成一個個節點串成流程，但**整個建構與修改都用白話跟 AI 完成，你永遠不寫、不看程式碼**。
