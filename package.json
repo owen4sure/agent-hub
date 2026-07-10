@@ -1,0 +1,63 @@
+{
+  "name": "agent-hub",
+  "version": "0.1.0",
+  "private": true,
+  "description": "本地自架的視覺化 workflow 自動化平台，用白話跟 AI 建立、修改、修復流程 (local-first AI workflow automation)",
+  "license": "MIT",
+  "keywords": [
+    "automation",
+    "workflow",
+    "ai",
+    "no-code",
+    "playwright",
+    "local-first"
+  ],
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1",
+    "build": "next build",
+    "start": "next start -H 127.0.0.1",
+    "lint": "eslint",
+    "test": "tsx --test \"lib/**/*.test.ts\"",
+    "doctor": "tsx scripts/doctor.ts",
+    "postinstall": "playwright install chromium"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/owen4sure/agent-hub.git"
+  },
+  "homepage": "https://github.com/owen4sure/agent-hub#readme",
+  "bugs": {
+    "url": "https://github.com/owen4sure/agent-hub/issues"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.11.1",
+    "adm-zip": "^0.5.18",
+    "better-sqlite3": "^12.11.1",
+    "exceljs": "^4.4.0",
+    "mammoth": "^1.11.0",
+    "next": "16.2.10",
+    "openai": "^6.45.0",
+    "pdf-parse": "^1.1.4",
+    "pdfjs-dist": "^3.11.174",
+    "playwright": "^1.61.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "tsx": "^4.23.0",
+    "word-extractor": "^1.0.4",
+    "xlsx": "^0.18.5",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/adm-zip": "^0.5.8",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^20",
+    "@types/pdf-parse": "^1.1.5",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.10",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

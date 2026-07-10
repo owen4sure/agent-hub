@@ -1,0 +1,65 @@
+import { NextResponse } from "next/server";
+import { isPrivateHost, privateUrlsAllowed } from "@/lib/urlGuard";
+
+/**
+ * 讓 dashboard 的 AI「看得到網址/網站」：用內建 chromium 打開網址 → 截整頁圖 + 抽出可見文字，
+ * 回傳給對話。這樣使用者貼一個網址，AI 就能像人一樣看到那個網頁長什麼樣、寫了什麼。
+ * 只允許 http/https，擋掉 file:// 之類的本機協定。
+ *
+ * SSRF 防護：這是「打開任意網址並把內容(含截圖)回傳」的功能，部署在雲端 VM 時若不擋內部位址，
+ * 貼 http://169.254.169.254/... 就能整頁讀走雲端憑證、貼 192.168.x.x 能讀內網管理介面。
+ * 除了進門先驗一次主機名，還要攔截頁面發出的「每一個請求」——不然對方網頁一個 302 轉址或
+ * 一張 <img> 就繞過了進門檢查。內網有合法需求可設 AGENT_HUB_ALLOW_PRIVATE_URLS=1 關閉。
+ */
+export async function POST(req: Request) {
+  const body = (await req.json().catch(() => null)) as { url?: string } | null;
+  const url = body?.url?.trim();
+  if (!url || !/^https?:\/\//i.test(url)) {
+    return NextResponse.json({ error: "請提供正確的網址(要以 http:// 或 https:// 開頭)" }, { status: 400 });
+  }
+  const guardOn = !privateUrlsAllowed();
+  if (guardOn && (await isPrivateHost(new URL(url).hostname))) {
+    return NextResponse.json({ error: "這個網址指向內部網路位址，基於安全考量不開放讀取(自家內網有需要可設定環境變數 AGENT_HUB_ALLOW_PRIVATE_URLS=1)" }, { status: 400 });
+  }
+
+  try {
+    const { chromium } = await import("playwright");
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1.5 });
+      if (guardOn) {
+        await page.route("**/*", async (route) => {
+          try {
+            const host = new URL(route.request().url()).hostname;
+            if (await isPrivateHost(host)) return route.abort();
+          } catch {
+            return route.abort();
+          }
+          return route.continue();
+        });
+      }
+      await page.goto(url, { waitUntil: "networkidle", timeout: 25000 }).catch(async () => {
+        // networkidle 有些站永遠等不到，退而求其次等 DOM 載完
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
+      });
+      await page.waitForTimeout(1200); // 給前端渲染一點時間
+      const title = await page.title().catch(() => "");
+      // 抽可見文字(去掉 script/style)，截斷避免太長
+      const text = await page.evaluate(() => {
+        const b = document.body;
+        return b ? (b.innerText || "").replace(/\n{3,}/g, "\n\n").slice(0, 8000) : "";
+      }).catch(() => "");
+      // 整頁截圖(有上限，太長的頁面只截前面一大段)
+      const shot = await page.screenshot({ type: "png", fullPage: true }).catch(() => page.screenshot({ type: "png" }));
+      return NextResponse.json({
+        title,
+        text: `【網頁「${title || url}」的內容】\n${text}`,
+        image: Buffer.from(shot).toString("base64"),
+      });
+    } finally {
+      await browser.close().catch(() => {});
+    }
+  } catch (err) {
+    return NextResponse.json({ error: `打不開這個網址：${err instanceof Error ? err.message.slice(0, 200) : "未知錯誤"}` }, { status: 502 });
+  }
+}
