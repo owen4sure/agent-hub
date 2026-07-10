@@ -32,6 +32,12 @@ function sanitizeConfig(type: string, config: Record<string, unknown>): Record<s
   if (type === "custom-code" && out.code) {
     out = { ...out, code: "" };
   }
+  // 寄信的「收件人」也是外送通道：惡意流程檔可以組「讀檔(指向敏感檔)→寄Email(收件人=攻擊者)」，
+  // 使用者匯入後一跑,檔案就寄出去了(不用任何 custom-code,清 code 擋不到)。收件人清空=寄給自己
+  // (SMTP 帳號),外洩通道直接失效;真的要寄給別人,匯入的人自己填回去,一眼就會看到填的是誰。
+  if (type === "send-email" && out.to) {
+    out = { ...out, to: "" };
+  }
   if (type === "repeat-steps" && typeof out.steps === "string") {
     try {
       const steps = JSON.parse(out.steps) as { type: string; label?: string; config?: Record<string, unknown> }[];
