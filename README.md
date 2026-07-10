@@ -6,7 +6,7 @@
 
 A local-first visual workflow automation platform — **like n8n**, your task becomes a graph of nodes on a canvas, but **you build and modify everything by chatting with AI in plain language. You never write or read code.**
 
-![Workflow canvas: node graph on the left, plain-language AI chat on the right](docs/screenshots/canvas.png)
+![Live demo: a node graph executing step by step — each node lights up as it runs, with the plain-language AI chat on the right](docs/screenshots/demo.gif)
 
 > The product UI is currently in Traditional Chinese. The screenshots below show the real product; captions explain what you're looking at.
 
@@ -35,7 +35,7 @@ Open http://127.0.0.1:3000 (bound to localhost only — other devices can't reac
 3. The AI asks about details first, and only draws the node graph once everything is clear → you click **Apply** → the flow appears on the canvas.
 4. Click **▶ Run**: each node lights up in real time as execution progresses. Click any node to inspect the data flowing through it, tweak it in plain language, or have the AI fix it when it fails.
 
-![A live run: nodes light up in real time — green means done, amber means running](docs/screenshots/run-live.png)
+![Workflow canvas: node graph on the left, plain-language AI chat on the right](docs/screenshots/canvas.png)
 
 ## Building flows in plain language
 

@@ -1023,6 +1023,7 @@ export default function WorkflowPage() {
         ) : showHistory ? (
           <HistoryPanel
             runs={runs}
+            nodeLabels={Object.fromEntries(wf.nodes.map((n) => [n.id, n.label]))}
             onClose={() => setShowHistory(false)}
             onPickFailedNode={(nodeId, runId) => { setShowHistory(false); loadHistoricalRunNode(runId); setSelectedNode(nodeId); }}
           />
