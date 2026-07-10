@@ -12,12 +12,25 @@ export function PageHeader({ title, subtitle, actions }: { title: string; subtit
   );
 }
 
-export function StatCard({ label, value, tone }: { label: string; value: ReactNode; tone?: "green" | "red" | "accent" }) {
+export function StatCard({ label, value, tone, icon }: { label: string; value: ReactNode; tone?: "green" | "red" | "accent"; icon?: string }) {
   const color = tone === "green" ? "var(--green)" : tone === "red" ? "var(--red)" : tone === "accent" ? "var(--accent)" : "var(--text)";
   return (
-    <div className="card px-4 py-3 flex-1 min-w-[120px]">
-      <div className="text-xs faint">{label}</div>
-      <div className="text-2xl font-semibold mt-1 tracking-tight" style={{ color }}>{value}</div>
+    <div className="card px-4 py-3 flex-1 min-w-[130px] flex items-center gap-3">
+      {icon && (
+        <span
+          className="grid place-items-center w-9 h-9 rounded-lg text-base shrink-0"
+          style={{
+            background: tone ? `color-mix(in srgb, ${color} 12%, transparent)` : "var(--surface-2)",
+            border: `1px solid ${tone ? `color-mix(in srgb, ${color} 25%, transparent)` : "var(--border)"}`,
+          }}
+        >
+          {icon}
+        </span>
+      )}
+      <div>
+        <div className="text-xs faint">{label}</div>
+        <div className="text-xl font-semibold mt-0.5 tracking-tight" style={{ color }}>{value}</div>
+      </div>
     </div>
   );
 }

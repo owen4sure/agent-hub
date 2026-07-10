@@ -133,10 +133,10 @@ export default function HomePage() {
 
       {overview && (
         <div className="flex flex-wrap gap-3 mb-6">
-          <StatCard label="正式流程" value={overview.officialCount} />
-          <StatCard label="草稿" value={overview.draftCount} />
-          <StatCard label="今日成功" value={overview.todayCounts.success ?? 0} tone="green" />
-          <StatCard label="今日失敗" value={overview.todayCounts.failed ?? 0} tone={overview.todayCounts.failed ? "red" : undefined} />
+          <StatCard label="正式流程" value={overview.officialCount} icon="◈" tone="accent" />
+          <StatCard label="草稿" value={overview.draftCount} icon="✎" />
+          <StatCard label="今日成功" value={overview.todayCounts.success ?? 0} tone="green" icon="✓" />
+          <StatCard label="今日失敗" value={overview.todayCounts.failed ?? 0} tone={overview.todayCounts.failed ? "red" : undefined} icon={overview.todayCounts.failed ? "✕" : "—"} />
         </div>
       )}
 
@@ -207,18 +207,30 @@ export default function HomePage() {
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {official.map((w) => (
           <Link key={w.id} href={`/workflows/${w.id}`} className="card card-hover p-5 block">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="font-medium tracking-tight">{w.name}</span>
-              {w.builtin && <span className="badge badge-neutral">內建範例</span>}
+            <div className="flex items-start gap-3 mb-2">
+              <span
+                className="grid place-items-center w-9 h-9 rounded-lg text-base shrink-0"
+                style={{ background: "var(--accent-soft)", border: "1px solid color-mix(in srgb, var(--accent) 22%, transparent)" }}
+              >
+                ◈
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium tracking-tight truncate">{w.name}</span>
+                  {w.builtin && <span className="badge badge-neutral shrink-0">內建範例</span>}
+                </div>
+                <p className="text-xs faint mt-0.5">{w.nodeCount} 個步驟</p>
+              </div>
             </div>
-            <p className="text-sm muted line-clamp-2 min-h-[2.5rem]">{w.description}</p>
-            <div className="flex items-center gap-2 mt-4 pt-3 border-t text-xs faint">
-              <span>{w.nodeCount} 節點</span>
-              {w.lastRun && (
-                <span className="flex items-center gap-1">
+            <p className="text-sm muted line-clamp-2 min-h-[2.5rem]">{w.description || <span className="faint">（還沒有說明——點進去跟 AI 對話時會自動補上）</span>}</p>
+            <div className="flex items-center gap-2 mt-4 pt-3 border-t text-xs">
+              {w.lastRun ? (
+                <span className="flex items-center gap-1.5" style={{ color: w.lastRun.status === "failed" ? "var(--red)" : w.lastRun.status === "success" ? "var(--green)" : "var(--text-faint)" }}>
                   <StatusDot status={w.lastRun.status} size={6} />
                   {statusLabel(w.lastRun.status)} · {formatDate(w.lastRun.started_at)}
                 </span>
+              ) : (
+                <span className="faint">還沒執行過</span>
               )}
               <button onClick={(e) => runNow(e, w.id)} disabled={running[w.id]} title="用預設參數立即執行(有可調參數的流程會用預設值；要指定請點進流程頁按執行)" className="btn btn-ghost text-xs ml-auto shrink-0">{running[w.id] ? "已開始" : "▶ 執行"}</button>
             </div>

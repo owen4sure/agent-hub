@@ -5,7 +5,9 @@ import { useParams, useRouter } from "next/navigation";
 import {
   ReactFlow,
   Background,
+  BackgroundVariant,
   Controls,
+  MiniMap,
   useNodesState,
   useEdgesState,
   addEdge,
@@ -69,6 +71,8 @@ export default function WorkflowPage() {
   const [showExplain, setShowExplain] = useState(false);
   const [showVersions, setShowVersions] = useState(false);
   const [showRunForm, setShowRunForm] = useState(false);
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const moreMenuRef = useRef<HTMLDivElement>(null);
   const [notFound, setNotFound] = useState(false);
   const [renamingWf, setRenamingWf] = useState(false);
   const [wfNameDraft, setWfNameDraft] = useState("");
@@ -88,6 +92,16 @@ export default function WorkflowPage() {
   const rfInstance = useRef<ReactFlowInstance | null>(null);
   const chatInputRef = useRef("");
   chatInputRef.current = chatInput;
+
+  // 工具列「⋯」選單：點選單以外任何地方就關閉
+  useEffect(() => {
+    if (!showMoreMenu) return;
+    function onDown(e: MouseEvent) {
+      if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as HTMLElement)) setShowMoreMenu(false);
+    }
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [showMoreMenu]);
 
   const fileToBase64 = (f: File) =>
     new Promise<string>((res) => {
@@ -343,7 +357,7 @@ export default function WorkflowPage() {
         target: e.to,
         label: e.fromPort,
         animated: nodeRuns[e.from]?.status === "running",
-        style: { stroke: "var(--border-strong)" },
+        style: { stroke: "var(--edge)", strokeWidth: 1.75 },
       })),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -468,7 +482,7 @@ export default function WorkflowPage() {
       // 擋掉自己連自己(會形成環)和重複連線(同一對節點拉兩次會存兩條，執行走兩遍)
       if (!conn.source || !conn.target || conn.source === conn.target) return;
       if (cur?.edges.some((e) => e.from === conn.source && e.to === conn.target)) return;
-      setEdges((eds) => addEdge({ ...conn, style: { stroke: "var(--border-strong)" } }, eds));
+      setEdges((eds) => addEdge({ ...conn, style: { stroke: "var(--edge)", strokeWidth: 1.75 } }, eds));
       if (cur && conn.source && conn.target) {
         const newEdges = [...cur.edges, { from: conn.source, to: conn.target }];
         setWf({ ...cur, edges: newEdges });
@@ -734,7 +748,7 @@ export default function WorkflowPage() {
     <div className="flex h-screen">
       {/* 左：畫布 */}
       <div className="flex-1 flex flex-col min-w-0">
-        <div className="h-14 border-b px-5 flex items-center gap-2.5 shrink-0" style={{ background: "var(--surface)" }}>
+        <div className="h-14 border-b px-4 flex items-center gap-2 shrink-0" style={{ background: "var(--surface)" }}>
           <button onClick={() => router.push("/")} aria-label="回首頁" className="faint hover:text-[var(--text)] text-sm mr-1">←</button>
           {renamingWf ? (
             <input
@@ -749,15 +763,15 @@ export default function WorkflowPage() {
           ) : (
             <button
               onClick={() => { if (!wf.builtin) { setWfNameDraft(wf.name); setRenamingWf(true); } }}
-              className={`font-semibold tracking-tight truncate max-w-[220px] flex items-center gap-1 ${wf.builtin ? "cursor-default" : "hover:text-[var(--accent)]"}`}
+              className={`font-semibold tracking-tight truncate max-w-[110px] min-[1400px]:max-w-[180px] min-[1600px]:max-w-[260px] shrink-0 flex items-center gap-1 ${wf.builtin ? "cursor-default" : "hover:text-[var(--accent)]"}`}
               title={wf.builtin ? "內建範例不能改名，請先複製" : "點一下改名字"}
             >
-              {wf.name}
+              <span className="truncate">{wf.name}</span>
               {!wf.builtin && <span className="faint text-xs">✎</span>}
             </button>
           )}
-          {wf.status === "draft" && <span className="badge badge-amber">草稿</span>}
-          {wf.builtin && <span className="badge badge-neutral">內建範例</span>}
+          {wf.status === "draft" && <span className="badge badge-amber shrink-0 whitespace-nowrap">草稿</span>}
+          {wf.builtin && <span className="badge badge-neutral shrink-0 whitespace-nowrap">內建範例</span>}
           {showCustomModel || !(MODELS as readonly string[]).includes(wf.model) ? (
             <input
               key={wf.id}
@@ -773,7 +787,7 @@ export default function WorkflowPage() {
             <select
               value={wf.model}
               onChange={(e) => changeModel(e.target.value)}
-              className="input text-xs py-1 shrink-0"
+              className="input text-xs py-1 min-w-[80px] max-w-[110px] min-[1400px]:max-w-[190px]"
               style={{ width: "auto" }}
               title="這個流程實際執行時用的模型(✓=內建免費服務實測穩定可用；🖼️=能看圖，流程裡有「登入網站」要辨識圖形驗證碼的話一定要選有 🖼️ 的模型，否則會自動改用其他能看圖的模型頂上)。接的是自己的 API 服務就按旁邊「自訂」直接輸入代號。"
             >
@@ -784,21 +798,21 @@ export default function WorkflowPage() {
           )}
           <button
             onClick={() => setShowCustomModel((v) => !v)}
-            className="text-xs faint hover:text-[var(--text)] shrink-0"
+            className="text-xs faint hover:text-[var(--text)] shrink-0 hidden min-[1400px]:inline"
             title="切換成清單選擇/自訂輸入模型代號"
           >
             {showCustomModel ? "清單" : "自訂"}
           </button>
           {wf.nodes.some((n) => n.type === "browser-login") && !supportsVision(wf.model) && (
             <span
-              className="text-xs shrink-0"
+              className="text-xs truncate max-w-[230px] hidden min-[1500px]:inline"
               style={{ color: "var(--amber, #b45309)" }}
               title="這個流程有「登入網站」步驟(可能要辨識圖形驗證碼)，但目前選的模型不能看圖。系統會自動改用能看圖的模型讀驗證碼，但如果只是想確定選對，建議直接換成有 🖼️ 標記的模型。"
             >
-              ⚠️ 此流程需辨識驗證碼，目前模型不能看圖(系統會自動代讀)
+              ⚠️ 模型不能看圖(驗證碼會自動代讀)
             </span>
           )}
-          <div className="ml-auto flex items-center gap-2 overflow-x-auto">
+          <div className="ml-auto flex items-center gap-1.5">
             {/* AI 對話還在處理中，但目前右側面板顯示的是別的東西(節點/紀錄/說明…)——不加這個提示的話，
                 點一下節點看內容會讓「AI 正在想…」整個從畫面消失，使用者以為 AI 停下來了。
                 其實 fetch 在 store 層跑，切哪個面板都不受影響，這裡只是把「還在跑」的視覺線索找補回來。
@@ -815,8 +829,8 @@ export default function WorkflowPage() {
               </button>
             )}
             {wf.status === "draft" && (
-              <button onClick={runAutoTest} disabled={autoTest?.running} className="btn shrink-0" style={{ background: "var(--accent)", color: "#fff" }} title="跑一輪，失敗的話 AI 自動修再跑，直到會動">
-                {autoTest?.running ? "測試中…" : "🪄 幫我測到會跑"}
+              <button onClick={runAutoTest} disabled={autoTest?.running} className="btn shrink-0" style={{ background: "var(--accent)", color: "#fff" }} title="幫我測到會跑：跑一輪，失敗的話 AI 自動修再跑，直到會動">
+                {autoTest?.running ? "測試中…" : "🪄 測到會跑"}
               </button>
             )}
             {activeRunStatus === "running" || activeRunStatus === "queued" ? (
@@ -826,15 +840,53 @@ export default function WorkflowPage() {
             ) : (
               <button onClick={onClickRun} disabled={starting} className="btn btn-primary shrink-0">{starting ? "啟動中…" : "▶ 執行"}</button>
             )}
-            <button onClick={() => { setShowExplain((v) => !v); setShowHistory(false); setShowSchedule(false); setShowVersions(false); setSelectedNode(null); }} className="btn btn-ghost shrink-0" style={showExplain ? { borderColor: "var(--accent)", color: "var(--accent)" } : undefined} title="這個流程每一步在做什麼">📖 說明</button>
-            <button onClick={() => { setShowHistory((v) => !v); setShowSchedule(false); setShowExplain(false); setShowVersions(false); setSelectedNode(null); loadRuns(); }} className="btn btn-ghost shrink-0" style={showHistory ? { borderColor: "var(--accent)", color: "var(--accent)" } : undefined}>📋 紀錄</button>
-            <button onClick={() => { setShowSchedule((v) => !v); setShowHistory(false); setShowExplain(false); setShowVersions(false); setSelectedNode(null); }} className="btn btn-ghost shrink-0" style={showSchedule ? { borderColor: "var(--accent)", color: "var(--accent)" } : undefined}>⏰ 排程</button>
-            <button onClick={() => { setShowVersions((v) => !v); setShowHistory(false); setShowSchedule(false); setShowExplain(false); setSelectedNode(null); }} className="btn btn-ghost shrink-0" style={showVersions ? { borderColor: "var(--accent)", color: "var(--accent)" } : undefined} title="AI 每次改動前的版本備份，可還原">🕓 版本</button>
-            <button onClick={arrange} className="btn btn-ghost shrink-0" title="由左到右自動對齊排列">⌗ 排列</button>
-            <button onClick={copy} className="btn btn-ghost shrink-0">⧉ 複製</button>
-            {wf.status === "draft" && <button onClick={promote} className="btn btn-ghost shrink-0" style={{ color: "var(--green)" }}>設為正式</button>}
-            <a href={`/api/workflows/${id}/export`} className="btn btn-ghost shrink-0">⬆ 匯出</a>
-            {!wf.builtin && <button onClick={deleteWorkflow} className="btn btn-ghost shrink-0" style={{ color: "var(--red)" }} aria-label="刪除">🗑</button>}
+            <button onClick={() => { setShowExplain((v) => !v); setShowHistory(false); setShowSchedule(false); setShowVersions(false); setSelectedNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showExplain ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="說明：這個流程每一步在做什麼" aria-label="說明">📖</button>
+            <button onClick={() => { setShowHistory((v) => !v); setShowSchedule(false); setShowExplain(false); setShowVersions(false); setSelectedNode(null); loadRuns(); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showHistory ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="紀錄：最近的執行結果" aria-label="紀錄">📋</button>
+            <button onClick={() => { setShowSchedule((v) => !v); setShowHistory(false); setShowExplain(false); setShowVersions(false); setSelectedNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showSchedule ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="排程：設定自動執行時間" aria-label="排程">⏰</button>
+            {/* 次要動作收進「⋯」：工具列擠到溢出要橫向捲(1440 寬就被截斷)是真實踩過的 UX 問題 */}
+            <div className="relative shrink-0" ref={moreMenuRef}>
+              <button
+                onClick={() => setShowMoreMenu((v) => !v)}
+                className="btn btn-ghost"
+                aria-label="更多動作"
+                title="設為正式 / 版本 / 排列 / 複製 / 匯出 / 刪除"
+                style={{ paddingLeft: 10, paddingRight: 10, ...(showMoreMenu ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+              >
+                ⋯
+              </button>
+              {showMoreMenu && (
+                <div className="menu absolute right-0 top-full mt-1.5 z-40">
+                  {wf.status === "draft" && (
+                    <>
+                      <button className="menu-item" style={{ color: "var(--green)" }} onClick={() => { setShowMoreMenu(false); promote(); }}>
+                        <span>✅</span> 設為正式
+                      </button>
+                      <div className="menu-sep" />
+                    </>
+                  )}
+                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); setShowVersions(true); setShowHistory(false); setShowSchedule(false); setShowExplain(false); setSelectedNode(null); }}>
+                    <span>🕓</span> 版本備份
+                  </button>
+                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); arrange(); }}>
+                    <span>⌗</span> 自動排列
+                  </button>
+                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); copy(); }}>
+                    <span>⧉</span> 複製流程
+                  </button>
+                  <a className="menu-item" href={`/api/workflows/${id}/export`} onClick={() => setShowMoreMenu(false)}>
+                    <span>⬆</span> 匯出檔案
+                  </a>
+                  {!wf.builtin && (
+                    <>
+                      <div className="menu-sep" />
+                      <button className="menu-item" style={{ color: "var(--red)" }} onClick={() => { setShowMoreMenu(false); deleteWorkflow(); }}>
+                        <span>🗑</span> 刪除流程
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
         <div className="flex-1 relative" style={{ background: "var(--app-bg)" }}>
@@ -867,9 +919,13 @@ export default function WorkflowPage() {
             multiSelectionKeyCode={["Meta", "Shift"]}
             deleteKeyCode={["Delete", "Backspace"]}
             proOptions={{ hideAttribution: true }}
+            defaultEdgeOptions={{ style: { stroke: "var(--edge)", strokeWidth: 1.75 } }}
           >
-            <Background color="var(--border)" gap={20} />
+            <Background variant={BackgroundVariant.Dots} color="var(--canvas-dot)" gap={22} size={1.6} />
             <Controls showInteractive={false} />
+            {wf.nodes.length > 3 && (
+              <MiniMap pannable zoomable position="bottom-right" style={{ width: 168, height: 112 }} />
+            )}
           </ReactFlow>
         </div>
       </div>
@@ -990,11 +1046,38 @@ export default function WorkflowPage() {
             </div>
             <div className="flex-1 overflow-auto p-4 space-y-3 text-sm">
               {chat.length === 0 && (
-                <div className="card p-4 muted text-[13px] leading-relaxed">
-                  用白話描述你要的流程，例如：<br />
-                  「每天登入公司信箱，抓每日庫存報表附件，把『待補貨』那欄標橘色再存檔」。<br /><br />
-                  AI 會先問清楚細節，再幫你畫出節點圖。<br />
-                  📎 可以<b>直接拖檔案進來</b>、<b>截圖按 ⌘V 貼上</b>、或<b>貼上網址</b>幫 AI 理解——支援 <b>Excel、PDF、Word、PowerPoint、RTF、照片、網站網址</b>。AI 會像人一樣<b>真的「看到」內容</b>（Excel 的顏色/框線/版型、檔案裡的圖、網頁畫面），不只是讀文字。
+                <div className="pt-6 px-1 space-y-4">
+                  <div className="text-center space-y-1.5">
+                    <div
+                      className="mx-auto grid place-items-center w-11 h-11 rounded-xl text-xl"
+                      style={{ background: "var(--accent-soft)", border: "1px solid color-mix(in srgb, var(--accent) 25%, transparent)" }}
+                    >
+                      💬
+                    </div>
+                    <p className="font-medium">用白話描述你要自動化的事</p>
+                    <p className="text-xs muted">AI 會先問清楚細節，再幫你畫出流程圖</p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <p className="text-[11px] faint px-1">試試這些：</p>
+                    {[
+                      "每天登入公司信箱，抓每日庫存報表附件，把『待補貨』那欄標橘色再存檔",
+                      "查台北明天的天氣，會下雨就寫一個提醒檔案給我",
+                      "抓台積電股價，超過 1500 就發 Telegram 通知我",
+                    ].map((ex) => (
+                      <button
+                        key={ex}
+                        onClick={() => setChatInput(ex)}
+                        className="card card-hover w-full text-left px-3 py-2.5 text-[13px] leading-relaxed cursor-pointer"
+                        style={{ color: "var(--text-muted)" }}
+                        title="點一下放進輸入框，可以再改"
+                      >
+                        {ex}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] leading-relaxed faint px-1">
+                    📎 也可以直接拖檔案進來、⌘V 貼截圖、或貼網址——支援 Excel、PDF、Word、PowerPoint、照片。AI 會像人一樣真的「看到」內容，不只是讀文字。
+                  </p>
                 </div>
               )}
               {chat.map((m, i) => (

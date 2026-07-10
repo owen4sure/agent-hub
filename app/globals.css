@@ -30,6 +30,19 @@
   --radius-md: 8px;
   --radius-lg: 12px;
 
+  /* 節點類別色(深淺共用色相，soft 背景用 color-mix 依主題自動適應) */
+  --cat-trigger: #d97706;
+  --cat-browser: #2563eb;
+  --cat-data: #16a34a;
+  --cat-file: #0d9488;
+  --cat-integration: #0891b2;
+  --cat-logic: #ea580c;
+  --cat-ai: #9333ea;
+  --cat-custom: #64748b;
+
+  --canvas-dot: rgba(9, 9, 11, 0.16);
+  --edge: rgba(9, 9, 11, 0.28);
+
   --shadow-sm: 0 1px 2px rgba(17, 18, 20, 0.04);
   --shadow-md: 0 2px 6px rgba(17, 18, 20, 0.06), 0 1px 2px rgba(17, 18, 20, 0.04);
   --shadow-lg: 0 12px 32px rgba(17, 18, 20, 0.1);
@@ -58,6 +71,16 @@
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-md: rgba(0, 0, 0, 0.4) 0px 2px 6px, 0 0 0 1px rgba(255, 255, 255, 0.04);
     --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.6);
+    --cat-trigger: #f59e0b;
+    --cat-browser: #60a5fa;
+    --cat-data: #4ade80;
+    --cat-file: #2dd4bf;
+    --cat-integration: #22d3ee;
+    --cat-logic: #fb923c;
+    --cat-ai: #c084fc;
+    --cat-custom: #94a3b8;
+    --canvas-dot: rgba(255, 255, 255, 0.22);
+    --edge: rgba(255, 255, 255, 0.28);
   }
 }
 
@@ -80,6 +103,16 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-md: rgba(0, 0, 0, 0.4) 0px 2px 6px, 0 0 0 1px rgba(255, 255, 255, 0.04);
   --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.6);
+  --cat-trigger: #f59e0b;
+  --cat-browser: #60a5fa;
+  --cat-data: #4ade80;
+  --cat-file: #2dd4bf;
+  --cat-integration: #22d3ee;
+  --cat-logic: #fb923c;
+  --cat-ai: #c084fc;
+  --cat-custom: #94a3b8;
+  --canvas-dot: rgba(255, 255, 255, 0.22);
+  --edge: rgba(255, 255, 255, 0.28);
 }
 
 @theme inline {
@@ -184,6 +217,47 @@ h1, h2, h3 { letter-spacing: -0.018em; }
 .react-flow__controls-button { background: var(--surface) !important; border-color: var(--border) !important; color: var(--text) !important; }
 .react-flow__controls-button:hover { background: var(--surface-2) !important; }
 .react-flow__attribution { display: none; }
+.react-flow__minimap {
+  background: var(--surface) !important;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+.react-flow__minimap svg { background: var(--surface); }
+.react-flow__minimap-mask { fill: color-mix(in srgb, var(--surface-2) 72%, transparent); }
+.react-flow__minimap-node { fill: color-mix(in srgb, var(--accent) 65%, var(--text-faint)); }
+.react-flow__handle {
+  transition: background 0.13s var(--ease), box-shadow 0.13s var(--ease);
+}
+.react-flow__handle:hover { background: var(--accent) !important; box-shadow: 0 0 0 3px var(--accent-soft); }
+.react-flow__edge-path { transition: stroke 0.15s var(--ease); }
+.react-flow__edge.selected .react-flow__edge-path { stroke: var(--accent) !important; }
+
+/* 下拉選單(工具列「⋯」等) */
+.menu {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+  min-width: 168px;
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s var(--ease);
+}
+.menu-item:hover { background: var(--surface-2); }
+.menu-sep { height: 1px; background: var(--border); margin: 4px 6px; }
 
 /* 執行中的節點：光圈沿節點邊框跑動，比單純變色更看得出「正在跑」的動態感。
    用 SVG rect + pathLength 正規化路徑長度、虛線等速位移——精準貼合實際矩形/圓角邊框，
