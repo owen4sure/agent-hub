@@ -10,9 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Node 24(npm 11)要跟產生 package-lock.json 的版本一致——npm 10/11 對
+      # 「平台限定可選包的 bundled 依賴」寫進 lock 的格式不同，混用會在 npm ci 假報 out-of-sync
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
       # 單元測試是純函式、next build 也用不到真瀏覽器——跳過 Chromium 下載讓 CI 快很多
       - run: npm ci
