@@ -66,11 +66,13 @@ export function callClaudeCode(opts: { prompt: string; imagePaths?: string[]; si
     const fail = (msg: string) => { if (!settled) { settled = true; reject(new Error(msg)); } };
     const ok = (v: string) => { if (!settled) { settled = true; resolve(v); } };
 
-    // 讀圖+回覆的完整回合常超過 45 秒(冷啟動+工具往返)，備援在關鍵時刻不能因為逾時太短而失敗
+    // 讀圖+回覆的完整回合常超過 45 秒(冷啟動+工具往返)；大型建圖 prompt(整份節點庫+需求規格)
+    // 更常超過 120 秒——備援的存在意義就是「主力全掛時頂上」,那一刻它是唯一的路,逾時掐太緊等於
+    // 讓整次建圖直接失敗(實測:gateway 回 DEGRADED、備援又 120 秒逾時→使用者只拿到錯誤)。放寬到 300 秒。
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      fail("Claude Code 呼叫逾時(120秒)");
-    }, 120_000);
+      fail("Claude Code 呼叫逾時(300秒)");
+    }, 300_000);
 
     // 使用者按「停止執行」要能真的殺掉這個子行程，不能只靠內部 120 秒逾時收尾——
     // 以前這裡完全不接任何 AbortSignal，即使呼叫端把 ctx.cancelSignal 傳進 callAIWithRetry，

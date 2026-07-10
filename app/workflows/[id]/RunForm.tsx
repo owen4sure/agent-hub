@@ -36,8 +36,9 @@ export function RunForm({
   }
 
   function parseOption(o: string): { value: string; label: string } {
+    // 只有「=」前後都有內容才視為 value=label 格式——「==」「>=」這類字面值不能被切壞(跟 graphLint 同規則)
     const i = o.indexOf("=");
-    return i >= 0 ? { value: o.slice(0, i), label: o.slice(i + 1) } : { value: o, label: o };
+    return i > 0 && i < o.length - 1 ? { value: o.slice(0, i), label: o.slice(i + 1) } : { value: o, label: o };
   }
 
   // periodWhich 的選項依「期間單位」動態產生：上一個/這一個 + 最近幾個實際期間(可精準選 Q1 等)

@@ -79,8 +79,16 @@ export function validateConfigTypes(nodeId: string, config: Record<string, unkno
       );
     }
     if (f.type === "select" && f.options && f.options.length > 0) {
-      // options 支援 "value=顯示文字" 格式，比對時只看 value
-      const values = f.options.map((o) => o.split("=")[0]);
+      // options 支援 "value=顯示文字" 格式，比對時只看 value——但「只在真的是這個格式時」才切：
+      // if-condition 的運算子選項是字面的「==」「!=」「>=」「<=」，無腦 split("=") 會把它們切成
+      // 「(空字串)」「!」「>」「<」→ 每個用比較運算子的條件節點都被誤判違規，錯誤訊息還把切壞的
+      // 清單餵回給建圖 AI(實測:AI 直接反問使用者「你的選項清單是不是把=吃掉了」)。
+      // 規則：只有「=」前後都有內容才視為 value=label(index >0 且 <末尾)，否則整串就是 value。
+      const valueOf = (o: string) => {
+        const i = o.indexOf("=");
+        return i > 0 && i < o.length - 1 ? o.slice(0, i) : o;
+      };
+      const values = f.options.map(valueOf);
       if (!values.includes(s)) {
         errors.push(`節點 "${nodeId}" 的設定「${f.key}(${f.label})」只能填這些值之一：${values.join("、")}，但填了「${s.slice(0, 30)}」。`);
       }
