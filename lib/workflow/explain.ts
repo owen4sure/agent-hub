@@ -245,6 +245,14 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
       };
     }
 
+    case "google-sheet-append": {
+      const sheet = str(c, "sheetName").trim();
+      return {
+        text: `在你的 Google 試算表${sheet ? `「${sheet}」分頁` : ""}最下面加一列(各欄內容照設定依序填入)。寫入網址要先在設定頁照教學部署好。`,
+        settings: sheet ? [["分頁", sheet]] : [],
+      };
+    }
+
     case "slack-notify": {
       return {
         text: "把訊息發到 Slack 頻道。Webhook 網址要先在設定頁「通知串接」填好(有測試發送)。",

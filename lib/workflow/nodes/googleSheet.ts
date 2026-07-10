@@ -21,6 +21,93 @@ export function parseSheetUrl(raw: string): { id: string; gid: string } | null {
   return { id: m[1], gid };
 }
 
+/** 寫一列進試算表(給節點與設定頁「測試寫入」共用)。走使用者自己部署的 Apps Script Web App。 */
+export async function appendViaScript(
+  scriptUrl: string,
+  cells: string[],
+  sheetName: string,
+  signal?: AbortSignal,
+): Promise<{ row?: number }> {
+  let host = "";
+  try { host = new URL(scriptUrl).hostname; } catch { /* 下面統一報錯 */ }
+  if (host !== "script.google.com") {
+    throw new PermanentError("寫入網址格式不對——應該是 https://script.google.com/macros/… 開頭(部署 Apps Script 後「複製網頁應用程式網址」那個)，請到設定頁照教學重新貼上");
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  if (signal?.aborted) controller.abort();
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  let res: Response;
+  let text: string;
+  try {
+    // Apps Script 會 302 到 googleusercontent 拿回應——一定要跟隨轉址
+    res = await fetch(scriptUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cells, sheet: sheetName || undefined }),
+      redirect: "follow",
+      signal: controller.signal,
+    });
+    text = await res.text();
+  } catch (err) {
+    if (signal?.aborted) throw new PermanentError("已停止執行");
+    throw new RetryableError(`連不上試算表寫入網址：${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+  if (res.status === 404) throw new PermanentError("寫入網址回 404——部署可能被刪除或網址貼錯，請到 Apps Script 重新「部署 → 管理部署」複製網址");
+  if (res.status >= 500) throw new RetryableError(`Google 暫時錯誤(${res.status})`);
+  // 沒開「任何人」存取權時 Google 回登入頁(HTML)
+  if (text.trimStart().startsWith("<")) {
+    throw new PermanentError("寫入網址需要登入才能執行——部署 Apps Script 時「誰可以存取」要選「任何人」，請重新部署一次再貼新網址");
+  }
+  try {
+    const parsed = JSON.parse(text) as { ok?: boolean; row?: number; error?: string };
+    if (parsed.ok === false) throw new PermanentError(`試算表那端拒絕寫入：${parsed.error ?? "未知原因"}`);
+    return { row: parsed.row };
+  } catch (err) {
+    if (err instanceof PermanentError) throw err;
+    // 不是我們範本的回應格式——大多是使用者自己改過腳本,寫入其實可能成功了,老實講清楚
+    throw new PermanentError(`寫入網址有回應但格式看不懂(${text.slice(0, 80)})——請用設定頁教學裡的官方腳本範本重新部署`);
+  }
+}
+
+export const googleSheetAppendNode: NodeDefinition = {
+  type: "google-sheet-append",
+  category: "integration",
+  label: "寫入 Google 試算表",
+  description:
+    "在你的 Google 試算表最下面加一列(例如把每次流程的結果記成一筆)。不用 OAuth：到設定頁照教學在試算表裡貼一段官方腳本、部署成網址(約 3 分鐘,有「測試寫入」可驗證)。",
+  icon: "📘",
+  outputs: "appendedRow(寫到第幾列)",
+  configSchema: [
+    { key: "cells", label: "要寫入的各欄內容(一行一欄,依序填入 A、B、C…欄,可用 {{欄位}})", type: "textarea", default: "" },
+    { key: "sheetName", label: "分頁名稱(留空=第一個分頁)", type: "text", allowEmpty: true },
+  ],
+  secretFields: () => [
+    { key: "sheetAppendUrl", label: "試算表寫入網址(Apps Script 部署)", type: "password" },
+  ],
+  retryable: true,
+  timeoutMs: 60_000,
+  async execute(ctx) {
+    const scriptUrl = ctx.secrets.sheetAppendUrl;
+    if (!scriptUrl) {
+      throw new PermanentError("尚未填入試算表寫入網址——請到「設定」頁「通知串接」區的 Google 試算表卡片照教學部署(約 3 分鐘,有「測試寫入」可先驗證)");
+    }
+    const cells = cfgStr(ctx, "cells")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (cells.length === 0) throw new PermanentError("沒有設定要寫入的內容——「要寫入的各欄內容」一行填一欄");
+    const sheetName = cfgStr(ctx, "sheetName", "").trim();
+    const r = await appendViaScript(scriptUrl, cells, sheetName, ctx.cancelSignal);
+    ctx.log(`已寫入 ${cells.length} 欄${r.row ? `(第 ${r.row} 列)` : ""}${sheetName ? ` 到分頁「${sheetName}」` : ""}`);
+    return { output: { ...ctx.input, appendedRow: r.row ?? null } };
+  },
+};
+
 export const googleSheetReadNode: NodeDefinition = {
   type: "google-sheet-read",
   category: "integration",

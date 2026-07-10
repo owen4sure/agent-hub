@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSharedSecrets, setSharedSecrets } from "@/lib/settingsStore";
 import { sendTelegram, sendLine, sendSlack } from "@/lib/workflow/nodes/notify";
 import { sendEmailSmtp } from "@/lib/workflow/nodes/sendEmail";
+import { appendViaScript } from "@/lib/workflow/nodes/googleSheet";
 
 /**
  * 通知串接的「測試發送」與 Telegram Chat ID「自動偵測」。
@@ -59,6 +60,14 @@ export async function POST(req: Request) {
       }
       await sendSlack(secrets.slackWebhookUrl, "✅ Agent Hub 測試訊息：Slack 串接成功！之後流程就能發通知到這個頻道。");
       return NextResponse.json({ ok: true, message: "已發送！去 Slack 頻道看看有沒有收到" });
+    }
+
+    if (action === "sheet-append-test") {
+      if (!secrets.sheetAppendUrl) {
+        return NextResponse.json({ ok: false, message: "請先照教學部署 Apps Script、貼上寫入網址再測試" });
+      }
+      const r = await appendViaScript(secrets.sheetAppendUrl, ["Agent Hub 測試寫入", new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" }), "✅ 串接成功"], "");
+      return NextResponse.json({ ok: true, message: `已寫入${r.row ? `第 ${r.row} 列` : "一列"}！打開試算表看最下面(這列測試資料可自行刪除)` });
     }
 
     if (action === "email-test") {

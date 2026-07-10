@@ -105,7 +105,7 @@ export default function SettingsPage() {
     setNotifyInputs((prev) => { const next = { ...prev }; for (const k of keys) delete next[k]; return next; });
     return true;
   }
-  async function notifyAction(platform: "telegram" | "line" | "email" | "slack", action: string, saveKeys: string[]) {
+  async function notifyAction(platform: "telegram" | "line" | "email" | "slack" | "sheet", action: string, saveKeys: string[]) {
     setNotifyBusy(action);
     setNotifyMsg((p) => ({ ...p, [platform]: { ok: true, text: "處理中…" } }));
     try {
@@ -361,6 +361,46 @@ export default function SettingsPage() {
             </button>
           </div>
           {notifyMsg.email && <p className="text-sm" style={{ color: notifyMsg.email.ok ? "var(--green)" : "var(--red)" }}>{notifyMsg.email.text}</p>}
+        </div>
+
+        <div className="card p-5 space-y-3">
+          <h3 className="text-sm font-medium">📘 Google 試算表寫入 {secretsSet.sheetAppendUrl && <span style={{ color: "var(--green)" }}>· 已串接</span>}</h3>
+          <p className="text-sm muted">串好之後，流程就能用「寫入 Google 試算表」步驟把結果一列一列記進你的試算表——不用 OAuth 授權。(「讀取」試算表不用串接：開連結檢視、貼網址就能讀。)</p>
+          <details className="text-sm">
+            <summary className="cursor-pointer muted">📖 怎麼拿到寫入網址？(點開看教學，約 3 分鐘)</summary>
+            <ol className="list-decimal ml-5 mt-2 space-y-1 muted">
+              <li>打開你的 Google 試算表 → 上方選單「擴充功能」→「Apps Script」。</li>
+              <li>把編輯器裡的內容全部換成下面這段(原封不動貼上)：</li>
+            </ol>
+            <pre className="mt-2 p-3 rounded-md text-xs font-mono overflow-x-auto" style={{ background: "var(--surface-2)" }}>{`function doPost(e) {
+  var body = JSON.parse(e.postData.contents);
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = body.sheet ? ss.getSheetByName(body.sheet) : ss.getSheets()[0];
+  if (!sheet) return out({ ok: false, error: "找不到分頁: " + body.sheet });
+  sheet.appendRow(body.cells);
+  return out({ ok: true, row: sheet.getLastRow() });
+}
+function out(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}`}</pre>
+            <ol className="list-decimal ml-5 mt-2 space-y-1 muted" start={3}>
+              <li>按右上「部署」→「新增部署作業」→ 類型選「網頁應用程式」→「誰可以存取」選 <b>任何人</b> → 部署(會要你授權一次，那是授權「你自己的腳本」動「你自己的試算表」)。</li>
+              <li>複製「網頁應用程式」網址(<code>https://script.google.com/macros/…</code>)貼到下面，按「測試寫入」，試算表最下面多一列就完成了！</li>
+            </ol>
+          </details>
+          <label className="block text-sm">
+            <span className="muted">寫入網址 {secretsSet.sheetAppendUrl && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
+            <input type="password" className="input mt-1" placeholder={secretsSet.sheetAppendUrl ? "••••••••（已設定，留空不變）" : "https://script.google.com/macros/…"}
+              value={notifyInputs.sheetAppendUrl ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, sheetAppendUrl: e.target.value }))} />
+          </label>
+          <div className="flex items-center gap-2">
+            <button className="btn btn-primary" disabled={notifyBusy !== null}
+              onClick={() => notifyAction("sheet", "sheet-append-test", ["sheetAppendUrl"])}>
+              {notifyBusy === "sheet-append-test" ? "寫入中…" : "測試寫入(加一列測試資料)"}
+            </button>
+          </div>
+          {notifyMsg.sheet && <p className="text-sm" style={{ color: notifyMsg.sheet.ok ? "var(--green)" : "var(--red)" }}>{notifyMsg.sheet.text}</p>}
         </div>
       </section>
     </div>

@@ -15,7 +15,7 @@ import {
 } from "./nodes/general";
 import { customCodeNode } from "./nodes/customCode";
 import { telegramNotifyNode, lineNotifyNode, slackNotifyNode } from "./nodes/notify";
-import { googleSheetReadNode } from "./nodes/googleSheet";
+import { googleSheetReadNode, googleSheetAppendNode } from "./nodes/googleSheet";
 import { repeatStepsNode } from "./nodes/repeatSteps";
 import { writeFileNode, readFileNode } from "./nodes/fileOps";
 import { webPageNode } from "./nodes/webPage";
@@ -34,6 +34,7 @@ const ALL: NodeDefinition[] = [
   writeFileNode,
   webPageNode,
   googleSheetReadNode,
+  googleSheetAppendNode,
   httpRequestNode,
   templateTextNode,
   setVariableNode,
