@@ -597,11 +597,18 @@ export default function WorkflowPage() {
     }
   }
 
+  // 監聽型(trigger 設了 watchPath)或任何節點引用 {{filePath}}(如內建範例 watchPath 留空給使用者填)
+  // → 手動執行沒有測試檔一定死在讀檔，要開表單讓人選檔案
+  const needsTestFile = () =>
+    wf!.nodes.some(
+      (n) =>
+        (n.type === "trigger" && String(n.config?.watchPath ?? "").trim().length > 0) ||
+        JSON.stringify(n.config ?? {}).includes("{{filePath}}"),
+    ) && !(wf!.triggerParams ?? []).some((f) => f.key === "filePath");
+
   function onClickRun() {
     const visible = (wf!.triggerParams ?? []).filter((f) => !f.derived);
-    // 監聽型流程手動執行時，下游會引用 {{filePath}}——不給選測試檔直接跑一定失敗，所以也要開表單
-    const watching = wf!.nodes.some((n) => n.type === "trigger" && String(n.config?.watchPath ?? "").trim());
-    if (visible.length > 0 || watching) setShowRunForm(true);
+    if (visible.length > 0 || needsTestFile()) setShowRunForm(true);
     else run({}, wf!.status === "draft");
   }
 
@@ -1166,7 +1173,7 @@ export default function WorkflowPage() {
         <RunForm
           triggerParams={wf.triggerParams ?? []}
           isDraft={wf.status === "draft"}
-          watchMode={wf.nodes.some((n) => n.type === "trigger" && String(n.config?.watchPath ?? "").trim().length > 0)}
+          watchMode={needsTestFile()}
           onClose={() => setShowRunForm(false)}
           onRun={(params, headed) => { setShowRunForm(false); run(params, headed); }}
         />

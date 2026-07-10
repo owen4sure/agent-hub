@@ -38,6 +38,7 @@ export const findEmailNode: NodeDefinition = {
   description:
     "在已登入的 webmail 收信匣，用日期加標題關鍵字精準找到某一封信並打開。需要先接在「登入網站」節點後面。只檢查搜尋結果第一頁，若該天信件很多且分頁顯示，建議標題關鍵字要夠精準以確保結果只有一兩筆。",
   icon: "🔍",
+  outputs: "found(找到幾封), subject(信件標題), date(用的日期)",
   configSchema: [
     { key: "date", label: "信件日期(YYYY-MM-DD 或相對變數)", type: "date-or-token", default: "{{targetDate}}" },
     { key: "subjectContains", label: "標題關鍵字", type: "text", default: "" },

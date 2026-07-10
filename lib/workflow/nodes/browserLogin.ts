@@ -25,6 +25,7 @@ export const browserLoginNode: NodeDefinition = {
   description:
     "開啟瀏覽器登入需要帳號密碼的網站，圖形驗證碼會用 AI 自動辨識。適合公司 webmail、後台系統等。帳號密碼從這個 workflow 的「帳密設定」讀取(在設定裡填)。",
   icon: "🔐",
+  outputs: "loggedIn(是否登入成功), url(登入後的頁面網址)",
   configSchema: [
     { key: "url", label: "登入頁網址", type: "text", default: "{{webmailUrl}}" },
     { key: "accountSelector", label: "帳號欄位選擇器", type: "text", default: 'input[name="USERID_show"]' },

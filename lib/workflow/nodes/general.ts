@@ -77,6 +77,7 @@ export const templateTextNode: NodeDefinition = {
   label: "組字串",
   description: "用上游資料組出一段文字或檔名，例如把日期跟名稱拼成「報表_20260701」。可用 {{欄位}} 引用上游資料。",
   icon: "📝",
+  outputs: "依「輸出欄位名」設定(預設 text)——組好的文字放在那個欄位",
   configSchema: [
     { key: "template", label: "文字範本(可用 {{欄位}})", type: "textarea", default: "" },
     { key: "outputKey", label: "輸出欄位名", type: "text", default: "text" },
@@ -96,6 +97,7 @@ export const setVariableNode: NodeDefinition = {
   description:
     "把一個值存進共享變數，後面的節點可以引用。**注意：任何節點(含 custom-code)算出來的欄位，下游本來就能直接用 {{欄位名}} 引用，完全不需要另外接一個 set-variable 節點才能「讓後面看得到」**——上游輸出會自動沿整條鏈往下傳。只有在你要「把某個固定的字面值(不是上游算出來的)存成一個共用變數」這種情境才需要這個節點；把上游已經輸出的欄位重新存一次(value 直接引用同一個 {{欄位名}})是多餘的空節點，不要這樣用。",
   icon: "🔧",
+  outputs: "依「變數名」設定——值放在那個欄位給下游 {{變數名}} 引用",
   configSchema: [
     { key: "name", label: "變數名", type: "text", default: "myVar" },
     { key: "value", label: "值(可用 {{欄位}})", type: "text", default: "" },
@@ -115,6 +117,7 @@ export const ifConditionNode: NodeDefinition = {
   label: "條件判斷",
   description: "依條件決定走 true 或 false 分支。例如「如果找到的資料筆數大於 0」。下游連線的 fromPort 標 true/false。",
   icon: "🔀",
+  outputs: "result(條件是否成立)；成立走「是」的連線,不成立走「否」",
   configSchema: [
     { key: "left", label: "左值(可用 {{欄位}})", type: "text", default: "" },
     { key: "op", label: "比較", type: "select", options: ["==", "!=", ">", "<", ">=", "<=", "contains", "not-empty"], default: "==" },

@@ -23,6 +23,7 @@ export const customCodeNode: NodeDefinition = {
   description:
     "當現有的節點都無法滿足需求時，由 AI 依你的白話描述寫一段自訂程式碼來完成這一步。你不需要看或懂程式碼；如果出錯，讓 AI 再修就好。",
   icon: "⚙️",
+  outputs: "依 intent 決定(程式碼 return 的具名欄位會傳給下游)",
   configSchema: [
     { key: "intent", label: "這個節點要做什麼(白話)", type: "textarea", default: "" },
     { key: "code", label: "程式碼(AI 產生，勿手動改)", type: "code", default: PLACEHOLDER_CODE },

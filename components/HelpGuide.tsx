@@ -50,6 +50,14 @@ export default function HelpGuide() {
     setOpen(false);
   }
 
+  // modal 慣例:Esc 也要能關(只有「開始使用」一個出口,鍵盤使用者會被卡住)
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
   return (
     <>
       <button
@@ -67,8 +75,8 @@ export default function HelpGuide() {
           它就會贏過整個 <aside>(連同裡面的彈窗)，導致彈窗開了卻點不到、看起來像「卡住」。
           用 portal 讓彈窗直接是 body 的子元素，才能真正跟頁面上任何東西公平比較 z-index。 */}
       {open && createPortal(
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.5)" }}>
-          <div className="card w-full max-w-xl max-h-[88vh] flex flex-col" style={{ boxShadow: "var(--shadow-lg)" }}>
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.5)" }} onClick={close}>
+          <div className="card w-full max-w-xl max-h-[88vh] flex flex-col" style={{ boxShadow: "var(--shadow-lg)" }} onClick={(e) => e.stopPropagation()}>
             <div className="px-6 pt-6 pb-4 border-b shrink-0">
               <h2 className="text-lg font-semibold tracking-tight">歡迎使用 Agent Hub 👋</h2>
               <p className="text-sm muted mt-1 leading-relaxed">
