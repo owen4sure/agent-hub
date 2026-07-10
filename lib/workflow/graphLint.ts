@@ -48,6 +48,46 @@ export function lintGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): string[
   const cycle = findCycle(nodes, edges);
   if (cycle) errors.push(`圖裡有環(${cycle.join("→")})——流程必須是由前往後的單向圖，不能繞圈。`);
 
+  // ── 可達性：除了 trigger,每個節點都必須「從 trigger 沿連線走得到」──
+  // 踩過的真實案例:模型漏接了「解析 → 條件」這一條邊,條件節點變成孤兒——引擎照樣執行它
+  // (排在保底順序裡),但它比上游先跑、變數全部拿不到、永遠走 false 分支,整條流程「全綠但全錯」。
+  // 這種圖必須在建圖當下打回去,不能靠執行期發現。
+  if (nodes.length > 1 && nodes.some((n) => n.type === "trigger")) {
+    const adj = new Map<string, string[]>();
+    for (const e of edges) adj.set(e.from, [...(adj.get(e.from) ?? []), e.to]);
+    const reachable = new Set<string>(nodes.filter((n) => n.type === "trigger").map((n) => n.id));
+    const queue = [...reachable];
+    while (queue.length) {
+      for (const next of adj.get(queue.shift()!) ?? []) {
+        if (!reachable.has(next)) { reachable.add(next); queue.push(next); }
+      }
+    }
+    for (const n of nodes) {
+      if (!reachable.has(n.id)) {
+        errors.push(
+          `節點 "${n.id}"(${n.label ?? n.type})沒有從觸發節點連過來的路——它會在錯誤的順序執行、拿不到上游資料。` +
+            `請補上缺的連線(例如它的上游節點 → "${n.id}")。`,
+        );
+      }
+    }
+  }
+
+  // ── 變數引用不能用「節點id.欄位」格式 ──
+  // 資料模型是扁平的:上游輸出的欄位直接用 {{欄位名}} 引用。踩過:模型發明 {{parse.result}}
+  // (parse 是節點 id)——執行期解析不到、條件永遠 false,流程全綠但走錯分支。
+  // 注意 {{period.start}}/{{item.欄位}} 是合法的(period/item 不是節點 id),只擋「前綴=某個節點 id」。
+  for (const n of nodes) {
+    const cfgStr = JSON.stringify(n.config ?? {});
+    for (const m of cfgStr.matchAll(/\{\{\s*([A-Za-z0-9_-]+)\.([A-Za-z0-9_一-鿿-]+)\s*\}\}/g)) {
+      if (ids.has(m[1])) {
+        errors.push(
+          `節點 "${n.id}" 引用了 {{${m[1]}.${m[2]}}}——不能用「節點id.欄位」格式。` +
+            `上游節點輸出的欄位是扁平的,直接寫 {{${m[2]}}} 即可(前提:上游真的有輸出這個欄位)。`,
+        );
+      }
+    }
+  }
+
   return errors;
 }
 
