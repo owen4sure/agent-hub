@@ -1,0 +1,87 @@
+{
+  "id": "code-daily-template-todo",
+  "category": "整合串接",
+  "icon": "📋",
+  "name": "每天早上把例行事項自動建進待辦清單",
+  "description": "在 Todoist 開一個「範本」專案,把每週例行事項寫成「任務名稱 @週一」格式 → 每天早上排程抓範本清單 → 只挑今天該做的 → 自動建進收件匣,建好發 Telegram 跟你說建了幾項。API token 在 Todoist 的「設定 → 整合 → 開發者」頁複製。(改編自 n8n 社群範本庫 0446_Code_Todoist_Create_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配每天早上排程)",
+      "config": {},
+      "position": { "x": 0, "y": 130 }
+    },
+    {
+      "id": "get",
+      "type": "http-request",
+      "label": "抓範本專案的任務清單",
+      "config": {
+        "method": "GET",
+        "url": "https://api.todoist.com/rest/v2/tasks?project_id=請換成範本專案ID",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的Todoist API token\"}",
+        "body": ""
+      },
+      "position": { "x": 260, "y": 130 }
+    },
+    {
+      "id": "parse",
+      "type": "custom-code",
+      "label": "挑出今天該做的",
+      "config": {
+        "intent": "上游 body 是 Todoist API 回的任務清單 JSON 字串(陣列,每筆有 content 欄位)。範本任務的 content 結尾用「@週一」「@週二」…「@週日」標記星期(也可能標「@每天」=每天都要)。取台北時間的今天是星期幾,只保留標記符合今天(或標了@每天)的任務。輸出 todayTasks(陣列,每筆是 {content: 去掉@標記與多餘空白後的任務名稱})與 todayCount(符合的數量)。",
+        "code": ""
+      },
+      "position": { "x": 520, "y": 130 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "今天有事要建嗎?",
+      "config": {
+        "left": "{{todayCount}}",
+        "op": ">",
+        "right": "0"
+      },
+      "position": { "x": 780, "y": 130 }
+    },
+    {
+      "id": "each",
+      "type": "repeat-steps",
+      "label": "逐項建立今日任務",
+      "config": {
+        "items": "{{todayTasks}}",
+        "itemVar": "item",
+        "steps": "[{\"type\": \"http-request\", \"label\": \"建一項任務\", \"config\": {\"method\": \"POST\", \"url\": \"https://api.todoist.com/rest/v2/tasks\", \"headers\": \"{\\\"Authorization\\\": \\\"Bearer 請換成你的Todoist API token\\\", \\\"Content-Type\\\": \\\"application/json\\\"}\", \"body\": \"{\\\"content\\\": \\\"{{item.content}}\\\", \\\"due_string\\\": \\\"today\\\"}\"}}]",
+        "outputKey": "created"
+      },
+      "position": { "x": 1040, "y": 60 }
+    },
+    {
+      "id": "done",
+      "type": "telegram-notify",
+      "label": "通知建好了",
+      "config": {
+        "message": "📋 今日例行任務已建立 {{todayCount}} 項,打開待辦清單就能開工。"
+      },
+      "position": { "x": 1300, "y": 60 }
+    },
+    {
+      "id": "err",
+      "type": "telegram-notify",
+      "label": "抓不到清單告警",
+      "config": {
+        "message": "🆘 例行任務建立失敗:抓不到範本清單({{error}})。請檢查 Todoist API token 跟專案 ID。"
+      },
+      "position": { "x": 520, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "get" },
+    { "from": "get", "to": "parse" },
+    { "from": "parse", "to": "gate" },
+    { "from": "gate", "to": "each", "fromPort": "true" },
+    { "from": "each", "to": "done" },
+    { "from": "get", "to": "err", "fromPort": "error" }
+  ]
+}

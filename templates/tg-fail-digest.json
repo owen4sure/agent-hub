@@ -1,0 +1,96 @@
+{
+  "id": "tg-fail-digest",
+  "category": "開發者工具",
+  "icon": "🩺",
+  "name": "每週彙整自動化任務的失敗紀錄敲我",
+  "description": "每週固定拉一次你自動化平台或 CI 的執行紀錄 API → AI 判斷這週有沒有任何失敗 → 有就把每筆失敗整理成「任務|時間|原因」一行一筆發 Telegram,全部成功也報一聲平安;紀錄 API 連不上走失敗分支告警。把 example.com 換成你家的端點(例如 n8n 的 /api/v1/executions、GitHub Actions 的 runs API),金鑰在平台的 API 設定頁產生後換掉 header 裡的占位字串。(改編自 n8n 社群範本庫 0465_Telegram_Filter_Send_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程:每週五 17:00)",
+      "config": {},
+      "position": { "x": 0, "y": 130 }
+    },
+    {
+      "id": "runs",
+      "type": "http-request",
+      "label": "拉近 7 天執行紀錄",
+      "config": {
+        "method": "GET",
+        "url": "https://example.com/api/executions?days=7",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的平台APIKey\"}",
+        "body": ""
+      },
+      "position": { "x": 260, "y": 130 }
+    },
+    {
+      "id": "judge",
+      "type": "llm-decide",
+      "label": "這週有失敗嗎?",
+      "config": {
+        "prompt": "下面是自動化平台最近 7 天的執行紀錄(JSON)。判斷裡面有沒有任何一筆執行是失敗的(status 是 failed、error、crashed 之類都算失敗)。\n例:所有紀錄的 status 都是 success → 全部成功;其中一筆 status=failed → 有失敗;紀錄是空陣列 → 全部成功。\n\n執行紀錄:\n{{body}}",
+        "outputKey": "verdict",
+        "choices": "有失敗,全部成功"
+      },
+      "position": { "x": 520, "y": 130 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "有失敗才整理清單",
+      "config": {
+        "left": "{{verdict}}",
+        "op": "==",
+        "right": "有失敗"
+      },
+      "position": { "x": 780, "y": 130 }
+    },
+    {
+      "id": "digest",
+      "type": "llm-decide",
+      "label": "整理失敗清單",
+      "config": {
+        "prompt": "從下面的執行紀錄挑出「所有失敗的」,每筆整理成一行「⚠️ 任務名稱|失敗時間|失敗原因(紀錄裡沒有原因欄位就寫 status 的值)」,按時間新到舊排。只回清單本文,不要任何開場白。\n\n執行紀錄:\n{{body}}",
+        "outputKey": "digest"
+      },
+      "position": { "x": 1040, "y": 60 }
+    },
+    {
+      "id": "warn",
+      "type": "telegram-notify",
+      "label": "失敗清單發 Telegram",
+      "config": {
+        "message": "🩺 本週自動化健康檢查:有任務失敗,清單如下\n{{digest}}"
+      },
+      "position": { "x": 1300, "y": 60 }
+    },
+    {
+      "id": "ok",
+      "type": "telegram-notify",
+      "label": "全部成功報平安",
+      "config": {
+        "message": "🩺 本週自動化健康檢查:近 7 天全部成功,安心收工 ✅"
+      },
+      "position": { "x": 1040, "y": 240 }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "拉不到紀錄告警",
+      "config": {
+        "message": "🆘 拉不到執行紀錄:{{error}}——健康檢查本身掛了,請檢查 API 網址與金鑰"
+      },
+      "position": { "x": 260, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "runs" },
+    { "from": "runs", "to": "judge" },
+    { "from": "judge", "to": "gate" },
+    { "from": "gate", "to": "digest", "fromPort": "true" },
+    { "from": "digest", "to": "warn" },
+    { "from": "gate", "to": "ok", "fromPort": "false" },
+    { "from": "runs", "to": "alert", "fromPort": "error" }
+  ]
+}

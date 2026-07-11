@@ -50,7 +50,7 @@ Open http://127.0.0.1:3000 (bound to localhost only — other devices can't reac
 
 ## Template gallery (pick a starting point)
 
-The "▦ Templates" page ships 18 general-purpose templates modeled on the most common shapes in the n8n community workflow library (monitoring & alerts / data intake / AI content / reporting / approval gates…), each gated by deterministic lint in CI. Pick the closest one, click "Use this template" to get your own draft, then tell the AI what's different. As your flows grow: the home page supports search and **groups** (work / personal…) with sectioned display, and the "☰ Runs" page shows every run across all workflows in one place.
+The "▦ Templates" page ships 58 general-purpose templates ported from real workflows in the n8n community library (Zie619/n8n-workflows, 2,000+ flows) with source attribution — monitoring & alerts / integrations / sales & marketing / reporting / file automation / developer tools…, each gated by deterministic lint in CI. On top of that, the AI builder retrieves the closest matches from a **local index of all 2,061 community workflows** as reference blueprints whenever you describe a need — for any common automation, the AI has a real-world structure to consult. Pick the closest one, click "Use this template" to get your own draft, then tell the AI what's different. As your flows grow: the home page supports search and **groups** (work / personal…) with sectioned display, and the "☰ Runs" page shows every run across all workflows in one place.
 
 ![Template gallery: browse by category, preview the steps, one-click copy into a draft](docs/screenshots/templates.png)
 

@@ -1,0 +1,72 @@
+{
+  "id": "sheet-backup-csv",
+  "category": "檔案自動化",
+  "icon": "🗄️",
+  "name": "共用試算表每天自動備份成檔案",
+  "description": "整個團隊都在共編的那份試算表,怕哪天被誤刪誤改回不去?排程每天讀整張表 → 轉成 CSV → 以當天日期命名存檔(可額外複製一份到你指定的備份資料夾,例如接了雲端同步的資料夾) → Telegram 回報備份筆數;讀不到表走告警分支。(改編自 n8n 社群範本庫 0082_GoogleSheets_Interval_Process_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程,每天一次)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "read",
+      "type": "google-sheet-read",
+      "label": "讀整張試算表",
+      "config": {
+        "sheetUrl": "https://docs.google.com/spreadsheets/d/請換成你的試算表ID/edit",
+        "maxRows": "5000"
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "tocsv",
+      "type": "custom-code",
+      "label": "轉成 CSV 文字",
+      "config": {
+        "intent": "把上游 rows 陣列(每筆是 {欄位名:值} 的物件)轉成 CSV 文字:第一行是欄位名(用 headers 陣列的順序),之後每筆資料一行;值裡有逗號、雙引號或換行時要用雙引號包起來並把內部雙引號跳脫成兩個雙引號。輸出具名欄位 csvText(整份 CSV 文字)。",
+        "code": ""
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "save",
+      "type": "write-file",
+      "label": "存成備份檔",
+      "config": {
+        "fileName": "試算表備份_{{today}}.csv",
+        "content": "{{csvText}}",
+        "extraDir": ""
+      },
+      "position": { "x": 780, "y": 120 }
+    },
+    {
+      "id": "done",
+      "type": "telegram-notify",
+      "label": "回報備份完成",
+      "config": {
+        "message": "🗄️ 試算表已備份:{{rowCount}} 筆資料 → {{savedFileName}}"
+      },
+      "position": { "x": 1040, "y": 120 }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "讀表失敗告警",
+      "config": {
+        "message": "🆘 試算表備份失敗:{{error}}(請確認試算表分享設定還是「知道連結的任何人可檢視」)"
+      },
+      "position": { "x": 260, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "read" },
+    { "from": "read", "to": "tocsv" },
+    { "from": "tocsv", "to": "save" },
+    { "from": "save", "to": "done" },
+    { "from": "read", "to": "alert", "fromPort": "error" }
+  ]
+}

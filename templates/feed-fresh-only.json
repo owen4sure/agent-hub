@@ -1,0 +1,90 @@
+{
+  "id": "feed-fresh-only",
+  "category": "監控告警",
+  "icon": "🆕",
+  "name": "RSS 只推「最近一天」的新文章",
+  "description": "排程定時抓一個 RSS 訂閱源 → 用自訂步驟篩掉舊文章、只留最近 24 小時內發佈的 → 真的有新文章才發 Telegram(沒有就安靜不吵你)。追蹤官方公告/新聞源時避免每次都被整包舊文章洗版。(改編自 n8n 社群範本庫 1176_Rssfeedread_Slack_Automation_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 130
+      }
+    },
+    {
+      "id": "rss",
+      "type": "rss-read",
+      "label": "抓 RSS 文章清單",
+      "config": {
+        "url": "https://feeds.bbci.co.uk/news/world/rss.xml",
+        "maxItems": "20"
+      },
+      "position": {
+        "x": 250,
+        "y": 130
+      }
+    },
+    {
+      "id": "filt",
+      "type": "custom-code",
+      "label": "只留最近一天的",
+      "config": {
+        "intent": "上游 rss-read 會輸出 articles 陣列(每篇有 title、link、date、summary)。把發佈時間 date 在最近 24 小時內的文章挑出來。輸出 freshCount(篩選後的篇數,數字)、freshText(把每篇整理成一行「標題 — 連結」的多行文字,沒有新文章就給空字串)。",
+        "code": ""
+      },
+      "position": {
+        "x": 500,
+        "y": 130
+      }
+    },
+    {
+      "id": "chk",
+      "type": "if-condition",
+      "label": "有新文章嗎?",
+      "config": {
+        "left": "{{freshCount}}",
+        "op": ">",
+        "right": "0"
+      },
+      "position": {
+        "x": 750,
+        "y": 130
+      }
+    },
+    {
+      "id": "notify",
+      "type": "telegram-notify",
+      "label": "推播新文章",
+      "config": {
+        "message": "🆕 最近一天的新文章({{freshCount}} 篇):\n{{freshText}}"
+      },
+      "position": {
+        "x": 1000,
+        "y": 70
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "rss"
+    },
+    {
+      "from": "rss",
+      "to": "filt"
+    },
+    {
+      "from": "filt",
+      "to": "chk"
+    },
+    {
+      "from": "chk",
+      "to": "notify",
+      "fromPort": "true"
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "id": "sched-task-sync",
+  "category": "整合串接",
+  "icon": "🔄",
+  "name": "兩個待辦工具每天自動同步",
+  "description": "團隊用 A 工具收任務、你自己習慣在 B 工具做事?排程每天抓 A 工具裡標了「要同步」標籤的任務 → 逐筆建到 B 工具 → 建完把 A 那邊的標籤改成「已同步」,下次不會重複搬 → Telegram 回報;抓不到任務走告警分支。把兩個網址換成你用的工具 API(token 各自在工具的開發者/整合設定頁產生)。(改編自 n8n 社群範本庫 1607_Schedule_Notion_Sync_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程,每天一次)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "fetch",
+      "type": "http-request",
+      "label": "抓 A 工具待同步任務",
+      "config": {
+        "method": "GET",
+        "url": "https://example.com/api/a-tool/tasks?label=sync",
+        "headers": "{\"Authorization\":\"Bearer 請換成你的A工具token\"}",
+        "body": ""
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "loop",
+      "type": "repeat-steps",
+      "label": "逐筆搬到 B 工具+改標籤",
+      "config": {
+        "items": "{{json}}",
+        "itemVar": "item",
+        "steps": "[{\"type\":\"http-request\",\"label\":\"在 B 工具建立任務\",\"config\":{\"method\":\"POST\",\"url\":\"https://example.com/api/b-tool/tasks\",\"headers\":\"{\\\"Authorization\\\":\\\"Bearer 請換成你的B工具token\\\"}\",\"body\":\"{\\\"title\\\":\\\"{{item.title}}\\\",\\\"due\\\":\\\"{{item.due}}\\\"}\"}},{\"type\":\"http-request\",\"label\":\"A 工具標成已同步\",\"config\":{\"method\":\"POST\",\"url\":\"https://example.com/api/a-tool/tasks/{{item.id}}/label\",\"headers\":\"{\\\"Authorization\\\":\\\"Bearer 請換成你的A工具token\\\"}\",\"body\":\"{\\\"label\\\":\\\"synced\\\"}\"}}]",
+        "outputKey": "results"
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "done",
+      "type": "telegram-notify",
+      "label": "回報同步完成",
+      "config": {
+        "message": "🔄 {{today}} 待辦同步完成,標了「要同步」的任務都搬到 B 工具了。"
+      },
+      "position": { "x": 780, "y": 120 }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "抓任務失敗告警",
+      "config": {
+        "message": "🆘 待辦同步流程出錯:{{error}}(出錯步驟:{{errorStep}})"
+      },
+      "position": { "x": 260, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "fetch" },
+    { "from": "fetch", "to": "loop" },
+    { "from": "loop", "to": "done" },
+    { "from": "fetch", "to": "alert", "fromPort": "error" }
+  ]
+}

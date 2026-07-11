@@ -1,0 +1,118 @@
+{
+  "id": "slack-payment-match",
+  "category": "整合串接",
+  "icon": "💳",
+  "name": "收款自動對單,三種情況分頭通知",
+  "description": "金流或收款系統的付款通知打進 Webhook → 有帶訂單編號就去自家系統查那張訂單 → 查得到:自動標記「已付款」並在 Slack 報好消息;查不到:Slack 請人工比對;根本沒帶編號:Slack 提醒人工處理。「收到錢自動銷單、對不上就找人」的完整分支範例,把網址換成你家系統的訂單 API 即可。(改編自 n8n 社群範本庫 0008_Slack_Stripe_Create_Triggered.json)",
+  "triggerParams": [
+    {
+      "key": "amount",
+      "label": "金額",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "orderRef",
+      "label": "訂單編號",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "payer",
+      "label": "付款人",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(Webhook:付款通知)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "hasref",
+      "type": "if-condition",
+      "label": "有帶訂單編號嗎?",
+      "config": {
+        "left": "{{orderRef}}",
+        "op": "not-empty",
+        "right": ""
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "find",
+      "type": "http-request",
+      "label": "查這張訂單",
+      "config": {
+        "method": "GET",
+        "url": "https://example.com/api/orders/{{orderRef}}",
+        "headers": "{\"Authorization\":\"Bearer 請換成你的系統token\"}",
+        "body": ""
+      },
+      "position": { "x": 520, "y": 60 }
+    },
+    {
+      "id": "found",
+      "type": "if-condition",
+      "label": "訂單存在嗎?",
+      "config": {
+        "left": "{{status}}",
+        "op": "==",
+        "right": "200"
+      },
+      "position": { "x": 780, "y": 60 }
+    },
+    {
+      "id": "mark",
+      "type": "http-request",
+      "label": "標記為已付款",
+      "config": {
+        "method": "PATCH",
+        "url": "https://example.com/api/orders/{{orderRef}}",
+        "headers": "{\"Authorization\":\"Bearer 請換成你的系統token\"}",
+        "body": "{\"status\":\"paid\"}"
+      },
+      "position": { "x": 1040, "y": 0 }
+    },
+    {
+      "id": "ok",
+      "type": "slack-notify",
+      "label": "報好消息",
+      "config": {
+        "message": "✅ 收到 {{payer}} 付款 {{amount}} 元,訂單 {{orderRef}} 已自動標記為已付款。"
+      },
+      "position": { "x": 1300, "y": 0 }
+    },
+    {
+      "id": "miss",
+      "type": "slack-notify",
+      "label": "查不到訂單,請人工比對",
+      "config": {
+        "message": "⚠️ 收到 {{payer}} 付款 {{amount}} 元,但系統查不到訂單「{{orderRef}}」——請人工比對這筆錢是哪張單的。"
+      },
+      "position": { "x": 1040, "y": 160 }
+    },
+    {
+      "id": "noref",
+      "type": "slack-notify",
+      "label": "沒帶編號,請人工處理",
+      "config": {
+        "message": "❓ 收到一筆 {{amount}} 元付款({{payer}}),沒帶訂單編號——請人工確認是哪張單。"
+      },
+      "position": { "x": 520, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "hasref" },
+    { "from": "hasref", "to": "find", "fromPort": "true" },
+    { "from": "find", "to": "found" },
+    { "from": "found", "to": "mark", "fromPort": "true" },
+    { "from": "mark", "to": "ok" },
+    { "from": "found", "to": "miss", "fromPort": "false" },
+    { "from": "hasref", "to": "noref", "fromPort": "false" }
+  ]
+}

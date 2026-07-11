@@ -1,0 +1,102 @@
+{
+  "id": "gh-upstream-release",
+  "category": "開發者工具",
+  "icon": "🚀",
+  "name": "上游套件出新版,自動開 issue 追蹤",
+  "description": "每週檢查你依賴的上游開源專案有沒有出新 release → 對照你自己專案的 issue 清單 → 這個版本還沒建過追蹤 issue 就自動開一張「Upstream release: vX.Y.Z」提醒評估升級;已經開過就安靜。把網址裡的上游專案與你的專案換成自己的即可;token 到 GitHub Settings → Developer settings → Personal access tokens 產生(勾 repo 權限)。原始範本是 GitHub release 對 GitLab issue,這裡統一用 GitHub API。(改編自 n8n 社群範本庫 0135_GitHub_Cron_Create_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程,每週)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "rel",
+      "type": "http-request",
+      "label": "查上游最新 release",
+      "config": {
+        "method": "GET",
+        "url": "https://api.github.com/repos/n8n-io/n8n/releases/latest",
+        "headers": "{\"Accept\": \"application/vnd.github+json\", \"User-Agent\": \"agent-hub\"}",
+        "body": ""
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "tag",
+      "type": "llm-decide",
+      "label": "AI 抽版本號",
+      "config": {
+        "prompt": "這是 GitHub release API 回的 JSON,找出 tag_name 欄位的值,只回版本字串本身(例如 n8n@1.99.0),不要任何其他文字:\n{{body}}",
+        "outputKey": "releaseTag"
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "issues",
+      "type": "http-request",
+      "label": "抓我專案的 issue 清單",
+      "config": {
+        "method": "GET",
+        "url": "https://api.github.com/repos/你的帳號/你的專案/issues?state=all&per_page=50",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的GitHub token\", \"Accept\": \"application/vnd.github+json\", \"User-Agent\": \"agent-hub\"}",
+        "body": ""
+      },
+      "position": { "x": 780, "y": 120 }
+    },
+    {
+      "id": "known",
+      "type": "llm-decide",
+      "label": "AI 判斷是否已在追蹤",
+      "config": {
+        "prompt": "下面是 issue 清單的 JSON。判斷裡面有沒有任何 issue 的標題包含版本「{{releaseTag}}」。\n例1:清單裡有標題「Upstream release: v1.2.0」而版本是 v1.2.0 → 回「有」。\n例2:清單是空陣列 [] → 回「沒有」。\n例3:清單有 issue 但標題都不含這個版本 → 回「沒有」。\n{{body}}",
+        "outputKey": "tracked",
+        "choices": "有,沒有"
+      },
+      "position": { "x": 1040, "y": 120 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "還沒建追蹤 issue?",
+      "config": {
+        "left": "{{tracked}}",
+        "op": "==",
+        "right": "沒有"
+      },
+      "position": { "x": 1300, "y": 120 }
+    },
+    {
+      "id": "open",
+      "type": "http-request",
+      "label": "開追蹤 issue",
+      "config": {
+        "method": "POST",
+        "url": "https://api.github.com/repos/你的帳號/你的專案/issues",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的GitHub token\", \"Accept\": \"application/vnd.github+json\", \"User-Agent\": \"agent-hub\"}",
+        "body": "{\"title\": \"Upstream release: {{releaseTag}}\", \"body\": \"上游出新版了,評估要不要跟進升級。\"}"
+      },
+      "position": { "x": 1560, "y": 60 }
+    },
+    {
+      "id": "ping",
+      "type": "telegram-notify",
+      "label": "通知我有新版",
+      "config": {
+        "message": "🚀 上游出新版 {{releaseTag}},已在你的專案開好追蹤 issue。"
+      },
+      "position": { "x": 1820, "y": 60 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "rel" },
+    { "from": "rel", "to": "tag" },
+    { "from": "tag", "to": "issues" },
+    { "from": "issues", "to": "known" },
+    { "from": "known", "to": "gate" },
+    { "from": "gate", "to": "open", "fromPort": "true" },
+    { "from": "open", "to": "ping" }
+  ]
+}

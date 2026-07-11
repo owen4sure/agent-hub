@@ -1,0 +1,98 @@
+{
+  "id": "sheet-file-sorter",
+  "category": "檔案自動化",
+  "icon": "📁",
+  "name": "新檔案自動辨識客戶並登記歸檔",
+  "description": "合約、簽回單、對方寄來的檔案全部堆在同一個資料夾,事後找誰的都靠翻?在觸發節點填一個「收件匣」資料夾路徑,有新檔案掉進去就自動:讀檔案內容 → 對照試算表上的客戶清單,AI 判斷這是哪個客戶的 → 認得出來就在試算表登記一筆(日期/檔名/客戶),認不出來發 Telegram 請你人工歸檔。(改編自 n8n 社群範本庫 0837_GoogleSheets_Gmail_Create_Triggered.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(監聽收件匣資料夾)",
+      "config": {
+        "watchPath": "",
+        "watchPattern": ""
+      },
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "readf",
+      "type": "read-file",
+      "label": "讀新檔案內容",
+      "config": {
+        "path": "{{filePath}}",
+        "maxChars": "8000"
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "refsheet",
+      "type": "google-sheet-read",
+      "label": "讀客戶清單",
+      "config": {
+        "sheetUrl": "https://docs.google.com/spreadsheets/d/請換成你的客戶清單試算表ID/edit",
+        "maxRows": "200"
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "classify",
+      "type": "llm-decide",
+      "label": "AI 判斷是哪個客戶的",
+      "config": {
+        "prompt": "下面是我們的客戶清單:\n{{sheetText}}\n\n這個新檔案:檔名「{{fileName}}」,內容開頭:\n{{fileText}}\n\n判斷這個檔案屬於清單裡哪個客戶,只回清單裡出現的那個客戶名稱,一個字都不要多。例如檔名或內文出現某客戶的公司名、統編或聯絡人,就回那個客戶;跟清單裡每一個都對不上就回「未知」。",
+        "outputKey": "client",
+        "choices": ""
+      },
+      "position": { "x": 780, "y": 120 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "認得出客戶嗎?",
+      "config": {
+        "left": "{{client}}",
+        "op": "!=",
+        "right": "未知"
+      },
+      "position": { "x": 1040, "y": 120 }
+    },
+    {
+      "id": "log",
+      "type": "google-sheet-append",
+      "label": "登記歸檔紀錄",
+      "config": {
+        "cells": "{{today}}\n{{fileName}}\n{{client}}",
+        "sheetName": ""
+      },
+      "position": { "x": 1300, "y": 60 }
+    },
+    {
+      "id": "done",
+      "type": "telegram-notify",
+      "label": "通知已歸檔",
+      "config": {
+        "message": "📁 新檔案「{{fileName}}」已登記為客戶「{{client}}」的檔案。"
+      },
+      "position": { "x": 1560, "y": 60 }
+    },
+    {
+      "id": "ask",
+      "type": "telegram-notify",
+      "label": "認不出來請人工處理",
+      "config": {
+        "message": "❓ 新檔案「{{fileName}}」看不出屬於哪個客戶,請人工歸檔:{{filePath}}"
+      },
+      "position": { "x": 1300, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "readf" },
+    { "from": "readf", "to": "refsheet" },
+    { "from": "refsheet", "to": "classify" },
+    { "from": "classify", "to": "gate" },
+    { "from": "gate", "to": "log", "fromPort": "true" },
+    { "from": "log", "to": "done" },
+    { "from": "gate", "to": "ask", "fromPort": "false" }
+  ]
+}

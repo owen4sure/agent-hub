@@ -1,0 +1,81 @@
+{
+  "id": "http-payment-log",
+  "category": "行銷業務",
+  "icon": "💳",
+  "name": "收款成功自動登記+通知",
+  "description": "金流平台(以 Stripe 為例)結帳完成時把 session id POST 到這條流程的 Webhook → 回頭打 Stripe API 撈完整訂單(顧客、買了什麼、金額) → AI 整理成一行人話摘要 → 寫進 Google 試算表並發 Telegram 慶祝;撈不到明細走失敗分支告警。Stripe 秘鑰在 Dashboard → Developers → API keys;手動測試時直接貼一個 cs_ 開頭的 session id 即可。(改編自 n8n 社群範本庫 1773_HTTP_Stripe_Sync_Webhook.json)",
+  "triggerParams": [
+    {
+      "key": "sessionId",
+      "label": "結帳 Session ID(cs_ 開頭)",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(Webhook 收付款事件)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "fetch",
+      "type": "http-request",
+      "label": "撈完整訂單明細",
+      "config": {
+        "method": "GET",
+        "url": "https://api.stripe.com/v1/checkout/sessions/{{sessionId}}?expand[]=line_items",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的Stripe秘鑰(sk_開頭)\"}",
+        "body": ""
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "sum",
+      "type": "llm-decide",
+      "label": "AI 整理成一行摘要",
+      "config": {
+        "prompt": "這是 Stripe checkout session 的 JSON。整理成一行摘要,格式「顧客姓名|Email|買了什麼|金額 幣別」。注意 amount_total 是最小貨幣單位,要除以 100;品項在 line_items 裡。只回這一行:\n{{body}}",
+        "outputKey": "orderSummary"
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "log",
+      "type": "google-sheet-append",
+      "label": "登記進試算表",
+      "config": {
+        "cells": "{{today}}\n{{orderSummary}}\n{{sessionId}}",
+        "sheetName": ""
+      },
+      "position": { "x": 780, "y": 120 }
+    },
+    {
+      "id": "ping",
+      "type": "telegram-notify",
+      "label": "通知我有新訂單",
+      "config": {
+        "message": "💳 收款成功!{{orderSummary}}"
+      },
+      "position": { "x": 1040, "y": 120 }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "撈不到明細告警",
+      "config": {
+        "message": "⚠️ 收到付款事件但撈不到訂單明細:{{error}}(session: {{sessionId}})"
+      },
+      "position": { "x": 260, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "fetch" },
+    { "from": "fetch", "to": "sum" },
+    { "from": "sum", "to": "log" },
+    { "from": "log", "to": "ping" },
+    { "from": "fetch", "to": "alert", "fromPort": "error" }
+  ]
+}

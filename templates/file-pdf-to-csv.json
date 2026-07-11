@@ -1,0 +1,111 @@
+{
+  "id": "file-pdf-to-csv",
+  "category": "檔案自動化",
+  "icon": "📄",
+  "name": "PDF 一進資料夾就抽成表格 CSV",
+  "description": "監聽一個資料夾,有 PDF 掉進來就自動讀出文字 → 讓 AI 把裡面的品項/數字整理成 CSV 表格 → 存成檔案可下載。抽不到內容或檔案壞掉會走失敗分支發桌面通知。把「收到一堆 PDF 手動打字進 Excel」變全自動。(改編自 n8n 社群範本庫 1444_Extractfromfile_Converttofile_Automation_Webhook.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(監聽資料夾)",
+      "config": {
+        "watchPattern": ".pdf"
+      },
+      "position": {
+        "x": 0,
+        "y": 140
+      }
+    },
+    {
+      "id": "read",
+      "type": "read-file",
+      "label": "讀取 PDF 內容",
+      "config": {
+        "path": "{{filePath}}",
+        "maxChars": "20000"
+      },
+      "position": {
+        "x": 260,
+        "y": 140
+      }
+    },
+    {
+      "id": "ext",
+      "type": "llm-decide",
+      "label": "AI 整理成 CSV",
+      "config": {
+        "prompt": "下面是一份文件的文字內容。把裡面的表格資料整理成 CSV(逗號分隔),第一列是欄位標題,之後每列一筆。只輸出 CSV 本身,不要任何說明文字、不要用程式碼框:\n\n{{fileText}}",
+        "outputKey": "csvText"
+      },
+      "position": {
+        "x": 520,
+        "y": 140
+      }
+    },
+    {
+      "id": "chk",
+      "type": "if-condition",
+      "label": "有抽到內容嗎?",
+      "config": {
+        "left": "{{csvText}}",
+        "op": "not-empty",
+        "right": ""
+      },
+      "position": {
+        "x": 780,
+        "y": 140
+      }
+    },
+    {
+      "id": "save",
+      "type": "write-file",
+      "label": "存成 CSV 檔",
+      "config": {
+        "fileName": "擷取_{{fileName}}_{{today}}.csv",
+        "content": "{{csvText}}"
+      },
+      "position": {
+        "x": 1040,
+        "y": 70
+      }
+    },
+    {
+      "id": "alert",
+      "type": "desktop-notify",
+      "label": "抽不到內容告警",
+      "config": {
+        "title": "PDF 擷取失敗",
+        "message": "🆘 讀不到這個 PDF:{{error}}"
+      },
+      "position": {
+        "x": 520,
+        "y": 320
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "read"
+    },
+    {
+      "from": "read",
+      "to": "ext"
+    },
+    {
+      "from": "ext",
+      "to": "chk"
+    },
+    {
+      "from": "chk",
+      "to": "save",
+      "fromPort": "true"
+    },
+    {
+      "from": "read",
+      "to": "alert",
+      "fromPort": "error"
+    }
+  ]
+}

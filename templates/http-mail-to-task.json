@@ -1,0 +1,88 @@
+{
+  "id": "http-mail-to-task",
+  "category": "整合串接",
+  "icon": "📮",
+  "name": "來信自動變任務卡",
+  "description": "把郵件服務的轉寄規則或自動化指到這條流程的 Webhook,信件主旨與內文 POST 進來 → AI 把囉唆的信整理成乾淨的任務標題與重點(去客套、去簽名檔) → 打你的看板工具 API 建卡(原始範本是 Nextcloud Deck,換成你在用的看板 API 即可) → 建成回報 Telegram,看板 API 回錯誤碼則走另一路告警。(改編自 n8n 社群範本庫 0344_HTTP_Emailreadimap_Create_Webhook.json)",
+  "triggerParams": [
+    {
+      "key": "mailSubject",
+      "label": "信件主旨",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "mailBody",
+      "label": "信件內文",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(Webhook 收信件)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "clean",
+      "type": "llm-decide",
+      "label": "AI 整理成任務描述",
+      "config": {
+        "prompt": "這封信要變成一張待辦卡片。從主旨與內文整理出:第一行寫「一句話講清楚要做什麼」,接著列 2~4 點重點(該做的事、期限、相關人);把問候、客套、簽名檔全部去掉。\n主旨:{{mailSubject}}\n內文:{{mailBody}}",
+        "outputKey": "taskCard"
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "card",
+      "type": "http-request",
+      "label": "在看板建卡",
+      "config": {
+        "method": "POST",
+        "url": "https://example.com/api/boards/1/cards",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的看板API token\", \"Content-Type\": \"application/json\"}",
+        "body": "{\"title\": \"{{mailSubject}}\", \"description\": \"{{taskCard}}\"}"
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "ok",
+      "type": "if-condition",
+      "label": "建卡成功?",
+      "config": {
+        "left": "{{status}}",
+        "op": "<",
+        "right": "300"
+      },
+      "position": { "x": 780, "y": 120 }
+    },
+    {
+      "id": "ping",
+      "type": "telegram-notify",
+      "label": "回報已開卡",
+      "config": {
+        "message": "📮 已把來信開成任務卡:{{mailSubject}}"
+      },
+      "position": { "x": 1040, "y": 60 }
+    },
+    {
+      "id": "fail",
+      "type": "telegram-notify",
+      "label": "看板拒收告警",
+      "config": {
+        "message": "⚠️ 看板 API 回 {{status}},這封信的卡片沒建成:{{mailSubject}}\n回應:{{body}}"
+      },
+      "position": { "x": 1040, "y": 240 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "clean" },
+    { "from": "clean", "to": "card" },
+    { "from": "card", "to": "ok" },
+    { "from": "ok", "to": "ping", "fromPort": "true" },
+    { "from": "ok", "to": "fail", "fromPort": "false" }
+  ]
+}

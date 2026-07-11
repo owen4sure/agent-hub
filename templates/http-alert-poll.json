@@ -1,0 +1,88 @@
+{
+  "id": "http-alert-poll",
+  "category": "監控告警",
+  "icon": "📟",
+  "name": "定時巡告警系統,有事逐筆轉發",
+  "description": "排程打監控系統的告警清單 API → AI 判斷有沒有待處理的告警 → 有就用迴圈把每一筆各自 POST 到通知端點(每筆帶自己的名稱/嚴重度/訊息),最後發一則 Telegram 總結;沒有就安靜結束;連告警系統本身都打不通時走失敗分支直接告警。「輪詢+逐筆分送」的標準做法,把兩個 example.com 網址換成你的系統即可。(改編自 n8n 社群範本庫 0624_HTTP_Schedule_Send_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "pull",
+      "type": "http-request",
+      "label": "查告警清單",
+      "config": {
+        "method": "GET",
+        "url": "https://example.com/api/alerts",
+        "headers": "{}",
+        "body": ""
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "has",
+      "type": "llm-decide",
+      "label": "AI 判斷有沒有告警",
+      "config": {
+        "prompt": "這是告警系統 API 回的 JSON,判斷清單裡有沒有任何待處理的告警。\n例1:回應是 [] 或 {\"alerts\": []} → 回「沒有」。\n例2:回應是 [{\"name\": \"CPU 過高\", \"severity\": \"high\"}] → 回「有」。\n{{body}}",
+        "outputKey": "hasAlerts",
+        "choices": "有,沒有"
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "有待處理告警?",
+      "config": {
+        "left": "{{hasAlerts}}",
+        "op": "==",
+        "right": "有"
+      },
+      "position": { "x": 780, "y": 120 }
+    },
+    {
+      "id": "fan",
+      "type": "repeat-steps",
+      "label": "逐筆轉發每個告警",
+      "config": {
+        "items": "{{json}}",
+        "itemVar": "item",
+        "steps": "[{\"type\": \"http-request\", \"label\": \"轉發這筆告警\", \"config\": {\"method\": \"POST\", \"url\": \"https://example.com/api/notify\", \"headers\": \"{\\\"Content-Type\\\": \\\"application/json\\\"}\", \"body\": \"{\\\"subject\\\": \\\"告警:{{item.name}}\\\", \\\"detail\\\": \\\"嚴重度 {{item.severity}}:{{item.message}}\\\"}\"}}]",
+        "outputKey": "forwarded"
+      },
+      "position": { "x": 1040, "y": 60 }
+    },
+    {
+      "id": "ping",
+      "type": "telegram-notify",
+      "label": "總結通知我",
+      "config": {
+        "message": "📟 巡檢發現待處理告警,已逐筆轉發到通知端點。原始清單:\n{{body}}"
+      },
+      "position": { "x": 1300, "y": 60 }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "告警系統連不上",
+      "config": {
+        "message": "🆘 告警系統本身連不上了:{{error}}"
+      },
+      "position": { "x": 260, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "pull" },
+    { "from": "pull", "to": "has" },
+    { "from": "has", "to": "gate" },
+    { "from": "gate", "to": "fan", "fromPort": "true" },
+    { "from": "fan", "to": "ping" },
+    { "from": "pull", "to": "alert", "fromPort": "error" }
+  ]
+}
