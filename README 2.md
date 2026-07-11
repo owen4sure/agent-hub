@@ -48,14 +48,11 @@ Open http://127.0.0.1:3000 (bound to localhost only — other devices can't reac
 
 ![A failed node turns red: the error message is in plain words, with a one-click "Let AI fix this step"](docs/screenshots/ai-fix.png)
 
-## The AI carries 2,000+ real-world workflows in its head
+## Template gallery (pick a starting point)
 
-The UI only ever shows *your* flows (it stays simple); the muscle lives in the AI's brain:
+The "▦ Templates" page ships 18 general-purpose templates modeled on the most common shapes in the n8n community workflow library (monitoring & alerts / data intake / AI content / reporting / approval gates…), each gated by deterministic lint in CI. Pick the closest one, click "Use this template" to get your own draft, then tell the AI what's different. As your flows grow: the home page supports search and **groups** (work / personal…) with sectioned display, and the "☰ Runs" page shows every run across all workflows in one place.
 
-- **58 complete blueprints** — faithfully ported from the n8n community workflow library (Zie619/n8n-workflows) into this product's node format, each gated by deterministic lint in CI. When you describe a need in plain language, the AI first retrieves the closest blueprint and builds by imitation (same structure, your content) — a single sentence like "match incoming payments against my order sheet and alert me on mismatches" yields a correct 7-node graph with multi-way branching.
-- **A local index of all 2,061 community workflows** — names, node combinations, and trigger shapes distilled into a local index the AI consults on every build; for any common automation it has a real-world shape to reference.
-
-As your flows grow: the home page supports search and **groups** (work / personal…) with sectioned display, and the "☰ Runs" page shows every run across all workflows in one place.
+![Template gallery: browse by category, preview the steps, one-click copy into a draft](docs/screenshots/templates.png)
 
 ## Built-in examples (duplicate & adapt)
 

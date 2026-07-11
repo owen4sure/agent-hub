@@ -128,16 +128,118 @@ export function displayName(wf: CommunityWorkflow): string {
   return base.replace(/^\d+_/, "").replace(/_/g, " ");
 }
 
+/* ── 藍圖庫:community/blueprints/ 是 40 條「已轉成我們節點格式」的完整流程(從 n8n 社群庫
+ * 忠實移植,經 lint 閘門)。這是 AI 大腦的內建功夫:使用者一句白話,先檢索出最像的完整圖
+ * 當 few-shot 仿作範例——比只給 metadata 名稱強一個量級,弱模型也能建出多分支的複雜流程。
+ * 刻意不放進範本庫頁(介面要看著簡單;厲害的藏在大腦裡)。 ── */
+
+export interface Blueprint {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  triggerParams?: unknown[];
+  nodes: { id: string; type: string; label: string; config: Record<string, unknown> }[];
+  edges: { from: string; to: string; fromPort?: string }[];
+}
+
+let bpCache: Blueprint[] | undefined;
+
+export function loadBlueprints(): Blueprint[] {
+  if (bpCache !== undefined) return bpCache;
+  try {
+    const dir = path.join(process.cwd(), "community", "blueprints");
+    bpCache = fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8")) as Blueprint)
+      .filter((b) => Array.isArray(b.nodes) && b.nodes.length > 0);
+  } catch {
+    bpCache = [];
+  }
+  return bpCache;
+}
+
+/** 中文比對:把查詢切成 CJK 雙字詞,數它們在藍圖的名稱+描述裡命中幾個 */
+function cjkBigrams(s: string): string[] {
+  const chars = s.match(/[一-鿿]/g) ?? [];
+  const out: string[] = [];
+  for (let i = 0; i < chars.length - 1; i++) out.push(chars[i] + chars[i + 1]);
+  return out;
+}
+
+/** 檢索最像的藍圖(0~limit 條):中文雙字詞命中(權重高)+英文 token 對節點型別/文字 */
+export function matchBlueprints(query: string, limit = 2): Blueprint[] {
+  const bps = loadBlueprints();
+  if (bps.length === 0) return [];
+  const grams = cjkBigrams(query);
+  const tokens = queryTokens(query);
+  const scored: { bp: Blueprint; score: number }[] = [];
+  for (const bp of bps) {
+    let score = 0;
+    // 中文雙字詞是主訊號:名稱命中權重最高(名稱=這條藍圖「在做什麼」的濃縮),描述其次。
+    // 節點型別只當弱訊號——藍圖全是我們的節點,英文 token 撞型別很容易把「用了 http 的別條」
+    // 頂到「名稱才是對的那條」前面(實測:「網站掛了要告警」被撈成閱讀清單,就是這個病)。
+    for (const g of grams) {
+      if (bp.name.includes(g)) score += 3;
+      else if (bp.description.includes(g)) score += 1;
+    }
+    const nodeTypes = new Set(bp.nodes.map((n) => n.type.toLowerCase().replace(/-/g, "")));
+    const lowText = `${bp.name} ${bp.description}`.toLowerCase();
+    for (const t of tokens) {
+      if (lowText.includes(t)) score += 2;
+      else if (nodeTypes.has(t.replace(/-/g, ""))) score += 1;
+    }
+    if (score >= 5) scored.push({ bp, score }); // 門檻:太弱的命中寧可不給,免得誤導
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map((s) => s.bp);
+}
+
+/** 藍圖壓縮成可注入的 JSON(config 只留有值的鍵;控制注入大小) */
+function compactBlueprint(bp: Blueprint): string {
+  const nodes = bp.nodes.map((n) => ({
+    id: n.id,
+    type: n.type,
+    label: n.label,
+    config: Object.fromEntries(Object.entries(n.config ?? {}).filter(([, v]) => v !== "" && v !== undefined && v !== null)),
+  }));
+  return JSON.stringify({ name: bp.name, triggerParams: bp.triggerParams ?? [], nodes, edges: bp.edges });
+}
+
 /** 組成注入 builder 提示的參考區塊(空字串=沒有可注入的) */
 export function communityRefsSection(query: string): string {
-  const hits = matchCommunityWorkflows(query, 5);
-  if (hits.length === 0) return "";
-  const lines = hits.map(
-    (w) => `- ${displayName(w)}(${w.trigger};${w.nodeCount} 節點;用到:${w.nodes.slice(0, 8).join("/")})`,
-  );
-  return (
-    `\n【社群同型流程參考——n8n 社群庫裡跟這個需求相近的真實流程,參考它們的「結構與步驟拆法」(用我們自己的節點型別實作,不要照抄它們的節點名):\n` +
-    lines.join("\n") +
-    "\n】\n"
-  );
+  let out = "";
+
+  // ① 完整藍圖(最強的參考:同格式、可直接仿作)——最多 2 條、總量控制在 ~6000 字內
+  const bps = matchBlueprints(query, 2);
+  if (bps.length > 0) {
+    const parts: string[] = [];
+    let budget = 6000;
+    for (const bp of bps) {
+      const compact = compactBlueprint(bp);
+      if (compact.length > budget) continue;
+      budget -= compact.length;
+      parts.push(compact);
+    }
+    if (parts.length > 0) {
+      out +=
+        `\n【參考藍圖——跟這個需求同型的完整流程(已是我們的節點格式,經過驗證)。仿作它的「結構與分支拆法」,把觸發方式/網址/文字內容換成使用者實際要的;使用者需求跟藍圖不同的地方一律以使用者為準:\n` +
+        parts.join("\n") +
+        "\n】\n";
+    }
+  }
+
+  // ② metadata 級參考(廣度:n8n 社群 2000+ 條的名稱與節點組合)
+  const hits = matchCommunityWorkflows(query, out ? 3 : 5);
+  if (hits.length > 0) {
+    const lines = hits.map(
+      (w) => `- ${displayName(w)}(${w.trigger};${w.nodeCount} 節點;用到:${w.nodes.slice(0, 8).join("/")})`,
+    );
+    out +=
+      `\n【社群同型流程參考——n8n 社群庫裡跟這個需求相近的真實流程,參考它們的「結構與步驟拆法」(用我們自己的節點型別實作,不要照抄它們的節點名):\n` +
+      lines.join("\n") +
+      "\n】\n";
+  }
+  return out;
 }
