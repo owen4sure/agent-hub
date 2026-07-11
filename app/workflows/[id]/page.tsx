@@ -24,6 +24,8 @@ import { useWFChat, sendChatToAI, startAutoTest, stopAutoTest, clearPendingGraph
 import { MODELS, KNOWN_WORKING_MODELS, supportsVision } from "@/lib/models";
 import type { Workflow, NodeRun, RunRecord, ExplainData } from "./types";
 import { nodeTypes } from "./nodeVisuals";
+import { edgeTypes } from "./WFEdge";
+import { AddNodePanel } from "./AddNodePanel";
 import { nodeSummary } from "@/lib/workflow/nodeSummary";
 import { RunForm } from "./RunForm";
 import { NodePanel } from "./NodePanel";
@@ -31,6 +33,16 @@ import { HistoryPanel } from "./HistoryPanel";
 import { ExplainPanel } from "./ExplainPanel";
 import { VersionsPanel } from "./VersionsPanel";
 import { SchedulePanel } from "./SchedulePanel";
+
+/** Ctrl-Z 的反向操作(每筆對應一個手動編輯動作;復原=把反向操作送給伺服器端合併) */
+type UndoAction =
+  | { kind: "removeNodes"; nodes: Workflow["nodes"]; edges: Workflow["edges"] }
+  | { kind: "addNode"; nodeId: string }
+  | { kind: "insertNode"; nodeId: string; edge: Workflow["edges"][number] }
+  | { kind: "addEdge"; edge: Workflow["edges"][number] }
+  | { kind: "removeEdges"; edges: Workflow["edges"] }
+  | { kind: "positions"; positions: Record<string, { x: number; y: number }> }
+  | { kind: "rename"; nodeId: string; label: string };
 
 export default function WorkflowPage() {
   const params = useParams<{ id: string }>();
@@ -45,6 +57,8 @@ export default function WorkflowPage() {
   const [stoppingAutoTest, setStoppingAutoTest] = useState(false);
   const [autoTestMinimized, setAutoTestMinimized] = useState(false);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  // 「＋ 加步驟」抽屜(手動加節點)與「連線上插一步」共用(要宣告在畫布 edges 映射之前,onInsert 會用到)
+  const [drawer, setDrawer] = useState<null | { mode: "add" } | { mode: "insert"; from: string; to: string; fromPort?: string }>(null);
   // 每個節點的白話說明——一次抓整條流程的說明，點哪個節點就從裡面挑那一步，不用每點一個節點都重打一次 API
   const [explainData, setExplainData] = useState<ExplainData | null>(null);
   // 對話/思考中/待套用流程/自動測試 → 存在跨頁面存活的 store，切換畫面不遺失
@@ -240,6 +254,15 @@ export default function WorkflowPage() {
     };
   }, [processFiles]);
 
+  // ── Ctrl-Z 復原:每個「手動改到流程」的操作都記一筆反向操作,Cmd/Ctrl+Z 逐筆還原。
+  // 反向操作走伺服器端合併欄位(addNodes/addEdges/removeEdges/positions/rename),
+  // 絕不用「整包快照寫回」當復原——那會把 AI 在期間改好的 config 一起蓋掉(存檔鐵則1)。 ──
+  const undoStackRef = useRef<UndoAction[]>([]);
+  const pushUndo = (a: UndoAction) => {
+    undoStackRef.current.push(a);
+    if (undoStackRef.current.length > 40) undoStackRef.current.shift();
+  };
+
   // 改名/拖位置/刪節點一律走「部分更新」欄位(rename/positions/removeNodeIds)，由伺服器端
   // 以磁碟上的最新版為底合併——絕不把前端手上的整包 nodes 送回去。前端的 nodes 是上次載入時的
   // 快照，AI 修復(讓 AI 修/幫我測到會跑)在後端改好 config 的同時，整包舊快照寫回會把修復無聲蓋掉
@@ -248,6 +271,8 @@ export default function WorkflowPage() {
     async (nodeId: string, name: string) => {
       const cur = wfRef.current;
       if (!cur) return;
+      const old = cur.nodes.find((n) => n.id === nodeId)?.label;
+      if (old !== undefined && old !== name) pushUndo({ kind: "rename", nodeId, label: old });
       const newNodes = cur.nodes.map((n) => (n.id === nodeId ? { ...n, label: name } : n));
       setWf({ ...cur, nodes: newNodes });
       await fetch(`/api/workflows/${id}`, {
@@ -357,11 +382,17 @@ export default function WorkflowPage() {
         id: `e${i}`,
         source: e.from,
         target: e.to,
-        // 分支線標籤說人話：error=出錯時走這條(紅虛線)、approved/rejected=簽核結果、其他 port 原樣顯示
-        label: e.fromPort === "error" ? "🆘 出錯時" : e.fromPort === "approved" ? "✅ 核准" : e.fromPort === "rejected" ? "❌ 拒絕" : e.fromPort,
+        type: "wf", // 自訂邊:標籤藥丸+線中點「＋」插一步(WFEdge)
         animated: nodeRuns[e.from]?.status === "running",
         // 顏色/光暈交給 globals.css 的 edge-* 類(依分支語意上色,深淺主題自動適應)
         className: e.fromPort === "error" ? "edge-error" : e.fromPort === "approved" ? "edge-ok" : "edge-main",
+        data: {
+          // 分支線標籤說人話：error=出錯時走這條(紅虛線)、approved/rejected=簽核結果、其他 port 原樣顯示
+          label: e.fromPort === "error" ? "🆘 出錯時" : e.fromPort === "approved" ? "✅ 核准" : e.fromPort === "rejected" ? "❌ 拒絕" : e.fromPort,
+          labelTone: e.fromPort === "error" || e.fromPort === "rejected" ? "error" : e.fromPort === "approved" ? "ok" : "plain",
+          // 內建範例唯讀,不給插節點
+          onInsert: wf.builtin ? undefined : () => setDrawer({ mode: "insert", from: e.from, to: e.to, fromPort: e.fromPort }),
+        },
       })),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -450,9 +481,31 @@ export default function WorkflowPage() {
       onNodesChange(changes);
       const dragEnd = changes.some((c) => c.type === "position" && c.dragging === false);
       if (dragEnd) {
-        setNodes((cur) => {
-          persistPositions(cur);
-          return cur;
+        // 拖完記舊位置(從 wfRef 拿——它還是拖之前的快照),Ctrl-Z 可以把節點拉回原位
+        const movedIds = changes.filter((c) => c.type === "position" && c.dragging === false).map((c) => (c as { id: string }).id);
+        const cur = wfRef.current;
+        if (cur && movedIds.length) {
+          const oldPos: Record<string, { x: number; y: number }> = {};
+          for (const nid of movedIds) {
+            const n = cur.nodes.find((x) => x.id === nid);
+            if (n) oldPos[nid] = { ...n.position };
+          }
+          if (Object.keys(oldPos).length) pushUndo({ kind: "positions", positions: oldPos });
+        }
+        setNodes((c) => {
+          persistPositions(c);
+          // 同步 wfRef 的位置成拖完的新值——連拖兩次時,第二次記到的「舊位置」才是第一次拖完的位置。
+          // (寫進 ref 不觸發重繪;updater 內冪等,StrictMode 重放也安全)
+          if (wfRef.current) {
+            wfRef.current = {
+              ...wfRef.current,
+              nodes: wfRef.current.nodes.map((n) => {
+                const rf = c.find((x) => x.id === n.id);
+                return rf ? { ...n, position: { x: rf.position.x, y: rf.position.y } } : n;
+              }),
+            };
+          }
+          return c;
         });
       }
       // 刪除節點(框選後按 Delete / 或單一刪除)→ 存回 workflow，連帶清掉相關連線
@@ -467,6 +520,12 @@ export default function WorkflowPage() {
           }
           const newNodes = cur.nodes.filter((n) => !removed.includes(n.id));
           const newEdges = cur.edges.filter((e) => !removed.includes(e.from) && !removed.includes(e.to));
+          // 記反向操作:被刪的節點(含 config/位置)和跟著斷掉的連線,Ctrl-Z 原樣加回來
+          pushUndo({
+            kind: "removeNodes",
+            nodes: cur.nodes.filter((n) => removed.includes(n.id)),
+            edges: cur.edges.filter((e) => removed.includes(e.from) || removed.includes(e.to)),
+          });
           setWf({ ...cur, nodes: newNodes, edges: newEdges });
           // 只送要刪的節點 id(伺服器端合併刪除)，不送整包 nodes——見上面 renameNode 的說明
           fetch(`/api/workflows/${id}`, {
@@ -486,8 +545,9 @@ export default function WorkflowPage() {
       // 擋掉自己連自己(會形成環)和重複連線(同一對節點拉兩次會存兩條，執行走兩遍)
       if (!conn.source || !conn.target || conn.source === conn.target) return;
       if (cur?.edges.some((e) => e.from === conn.source && e.to === conn.target)) return;
-      setEdges((eds) => addEdge({ ...conn, style: { stroke: "var(--edge)", strokeWidth: 1.75 } }, eds));
+      setEdges((eds) => addEdge({ ...conn, type: "wf", className: "edge-main" }, eds));
       if (cur && conn.source && conn.target) {
+        pushUndo({ kind: "addEdge", edge: { from: conn.source, to: conn.target } });
         const newEdges = [...cur.edges, { from: conn.source, to: conn.target }];
         setWf({ ...cur, edges: newEdges });
         fetch(`/api/workflows/${id}`, {
@@ -515,6 +575,7 @@ export default function WorkflowPage() {
       // RF edge id 是 `e${index}`(見 wf→畫布那段 setEdges)，反查回 wf.edges 的 index
       const removedIdx = new Set(removed.map((rid) => Number(rid.slice(1))).filter((n) => Number.isInteger(n)));
       const newEdges = cur.edges.filter((_, i) => !removedIdx.has(i));
+      pushUndo({ kind: "removeEdges", edges: cur.edges.filter((_, i) => removedIdx.has(i)) });
       setWf({ ...cur, edges: newEdges });
       // 刪連線是會改變執行路徑的動作、且已持久化(重整回不來)——跳個提示讓使用者知道剛剛動到了什麼、
       // 怎麼救(版本還原)，不然選到連線誤按 Backspace 會無聲斷掉流程、之後下游失敗完全想不到根因。
@@ -532,6 +593,7 @@ export default function WorkflowPage() {
   const arrange = useCallback(async () => {
     const cur = wfRef.current;
     if (!cur) return;
+    pushUndo({ kind: "positions", positions: Object.fromEntries(cur.nodes.map((n) => [n.id, { ...n.position }])) });
     const pos = autoLayout(cur.nodes, cur.edges);
     const newNodes = cur.nodes.map((n) => ({ ...n, position: pos[n.id] ?? n.position }));
     setWf({ ...cur, nodes: newNodes });
@@ -544,6 +606,97 @@ export default function WorkflowPage() {
     // 排列完畫面要自動縮放到剛好裝得下全部節點，不然節點數一多、排完版反而超出畫面看不到全貌
     requestAnimationFrame(() => rfInstance.current?.fitView({ padding: 0.15, duration: 300 }));
   }, [id]);
+
+  // ── Ctrl-Z 復原執行:反向操作送伺服器端合併,再重載 ──
+  const undo = useCallback(async () => {
+    const a = undoStackRef.current.pop();
+    if (!a) { flashToast("沒有可復原的操作"); return; }
+    const patch = (body: Record<string, unknown>) =>
+      fetch(`/api/workflows/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    try {
+      switch (a.kind) {
+        case "removeNodes":
+          await patch({ addNodes: a.nodes });
+          if (a.edges.length) await patch({ addEdges: a.edges });
+          break;
+        case "addNode":
+          await patch({ removeNodeIds: [a.nodeId] });
+          break;
+        case "insertNode":
+          await patch({ removeNodeIds: [a.nodeId] });
+          await patch({ addEdges: [a.edge] });
+          break;
+        case "addEdge":
+          await patch({ removeEdges: [a.edge] });
+          break;
+        case "removeEdges":
+          await patch({ addEdges: a.edges });
+          break;
+        case "positions":
+          await patch({ positions: a.positions });
+          break;
+        case "rename":
+          await patch({ rename: { id: a.nodeId, label: a.label } });
+          break;
+      }
+      await load();
+      flashToast("↩︎ 已復原");
+    } catch {
+      flashToast("復原失敗,請再試一次");
+    }
+  }, [id, load, flashToast]);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "z" || e.shiftKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return; // 打字時的 Ctrl-Z 是文字復原,不搶
+      e.preventDefault();
+      void undo();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undo]);
+
+  const pickNodeType = useCallback(
+    async (type: string) => {
+      const ctx = drawer;
+      setDrawer(null);
+      if (!ctx) return;
+      try {
+        if (ctx.mode === "add") {
+          // 新節點放在目前視野的中心偏左,一眼看得到、也好接線
+          const center = rfInstance.current?.screenToFlowPosition({ x: window.innerWidth / 2 - 260, y: window.innerHeight / 2 }) ?? { x: 120, y: 120 };
+          const res = await fetch(`/api/workflows/${id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ addNodes: [{ type, position: { x: Math.round(center.x), y: Math.round(center.y) } }] }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { flashToast((data as { error?: string }).error ?? "加入失敗"); return; }
+          const nid = (data as { added?: string[] }).added?.[0];
+          if (nid) pushUndo({ kind: "addNode", nodeId: nid });
+          flashToast("已加入,拉線接上流程(或叫 AI 幫你接)");
+        } else {
+          const res = await fetch(`/api/workflows/${id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ insertNode: { from: ctx.from, to: ctx.to, fromPort: ctx.fromPort, type } }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) { flashToast((data as { error?: string }).error ?? "插入失敗"); return; }
+          const nid = (data as { added?: string[] }).added?.[0];
+          const removedEdge = (data as { removedEdge?: Workflow["edges"][number] }).removedEdge;
+          if (nid && removedEdge) pushUndo({ kind: "insertNode", nodeId: nid, edge: removedEdge });
+          flashToast("已插入這一步");
+        }
+        await load();
+      } catch {
+        flashToast("連不上伺服器,請再試一次");
+      }
+    },
+    [drawer, id, load, flashToast],
+  );
 
   if (notFound)
     return (
@@ -841,6 +994,16 @@ export default function WorkflowPage() {
                 AI 處理中…
               </button>
             )}
+            {!wf.builtin && (
+              <button
+                onClick={() => setDrawer((d) => (d?.mode === "add" ? null : { mode: "add" }))}
+                className="btn btn-ghost shrink-0"
+                title="加步驟：瀏覽所有積木,點了加進畫布(也可以直接用白話跟 AI 說)"
+                style={drawer?.mode === "add" ? { borderColor: "var(--accent)", color: "var(--accent)" } : undefined}
+              >
+                ＋ 加步驟
+              </button>
+            )}
             {wf.status === "draft" && (
               <button onClick={runAutoTest} disabled={autoTest?.running} className="btn shrink-0" style={{ background: "var(--accent)", color: "#fff" }} title="幫我測到會跑：跑一輪，失敗的話 AI 自動修再跑，直到會動">
                 {autoTest?.running ? "測試中…" : "🪄 測到會跑"}
@@ -921,6 +1084,7 @@ export default function WorkflowPage() {
             onEdgesChange={handleEdgesChange}
             onConnect={onConnect}
             nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
             onInit={(instance) => { rfInstance.current = instance; }}
             fitView
             fitViewOptions={{ padding: 0.15 }}
@@ -940,6 +1104,14 @@ export default function WorkflowPage() {
               <MiniMap pannable zoomable position="bottom-right" style={{ width: 168, height: 112 }} />
             )}
           </ReactFlow>
+          {/* 節點庫抽屜:「＋ 加步驟」與「連線上插一步」共用 */}
+          {drawer && (
+            <AddNodePanel
+              title={drawer.mode === "add" ? "＋ 加一個步驟" : "在這條線中間插一步"}
+              onPick={pickNodeType}
+              onClose={() => setDrawer(null)}
+            />
+          )}
           {/* 執行中狀態列:跑到第幾步/正在跑哪一步,不用盯著節點顏色猜進度 */}
           {(activeRunStatus === "running" || activeRunStatus === "queued") && (() => {
             const total = wf.nodes.length;
@@ -1047,6 +1219,7 @@ export default function WorkflowPage() {
             node={selNode}
             run={selRun}
             explainStep={explainData?.steps.find((s) => s.id === selNode.id) ?? null}
+            readonly={wf.builtin}
             onClose={() => setSelectedNode(null)}
             onChanged={load}
             onToast={flashToast}

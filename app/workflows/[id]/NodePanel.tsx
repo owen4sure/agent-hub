@@ -1,8 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ICONS } from "./nodeVisuals";
+import { fetchNodeDefs, type NodeDefLite, type ParamFieldLite } from "./AddNodePanel";
 import type { WFNode, NodeRun } from "./types";
+
+/** select 選項支援 "value=顯示文字";只有「=」前後都有內容才切(跟 graphLint 同一套規則,別把 == 切壞) */
+function parseOption(o: string): { value: string; label: string } {
+  const i = o.indexOf("=");
+  return i > 0 && i < o.length - 1 ? { value: o.slice(0, i), label: o.slice(i + 1) } : { value: o, label: o };
+}
 
 /** 比較節點設定改前改後的差異，只列出真的變了的欄位(值轉字串比較，物件/陣列也涵蓋在內) */
 export function configDiff(before: Record<string, unknown>, after: Record<string, unknown>): { key: string; before?: string; after?: string }[] {
@@ -23,6 +30,7 @@ export function NodePanel({
   node,
   run,
   explainStep,
+  readonly: readonlyWf,
   onClose,
   onChanged,
   onToast,
@@ -32,6 +40,8 @@ export function NodePanel({
   node: WFNode;
   run: NodeRun | null | undefined;
   explainStep: { text: string; settings: [string, string][] } | null;
+  /** 內建範例唯讀(要改先複製) */
+  readonly?: boolean;
   onClose: () => void;
   onChanged: () => void;
   onToast: (text: string) => void;
@@ -50,6 +60,51 @@ export function NodePanel({
   // 使用者是不懂程式的人，預設只給他看得懂的白話說明(explainStep 由父層一次抓整條流程的說明後傳下來，
   // 不用每點開一個節點就重打一次 API)；原始 config/code 只留給想除錯的人，收在下面「技術細節」裡預設收合。
   const [showTechnical, setShowTechnical] = useState(false);
+
+  // ── 直接改設定:簡單值(網址/關鍵字/檔名…)自己打字改,不用每次都求 AI(雙模式編輯拍板) ──
+  const [defs, setDefs] = useState<NodeDefLite[] | null>(null);
+  const [draftCfg, setDraftCfg] = useState<Record<string, string | boolean>>({});
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  useEffect(() => { fetchNodeDefs().then(setDefs).catch(() => {}); }, []);
+  // 切換節點時的草稿重置不用 effect——父層用 key={node.id} 強制重建整個面板,state 天生就是乾淨的
+  const schema = defs?.find((d) => d.type === node.type)?.configSchema ?? [];
+  // 可直接改的欄位:排除帳密(在設定頁)、AI 管的程式碼/內嵌步驟、觸發參數衍生欄位
+  const editableFields = schema.filter(
+    (f) => f.type !== "secret" && f.type !== "code" && !f.derived && !(node.type === "repeat-steps" && f.key === "steps") && !(node.type === "custom-code" && f.key === "code"),
+  );
+  const fieldValue = (f: ParamFieldLite): string | boolean => {
+    if (f.key in draftCfg) return draftCfg[f.key];
+    const v = node.config?.[f.key];
+    if (f.type === "boolean") return v === true || v === "true";
+    return v === undefined || v === null ? "" : String(v);
+  };
+  const dirty = Object.entries(draftCfg).some(([k, v]) => {
+    const cur = node.config?.[k];
+    return String(v) !== String(cur ?? "");
+  });
+
+  async function saveConfig() {
+    setSaving(true);
+    setSaveMsg(null);
+    try {
+      const res = await fetch(`/api/workflows/${workflowId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nodeConfig: { id: node.id, config: draftCfg } }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setSaveMsg(`存檔失敗:${(data as { error?: string }).error ?? "請再試一次"}`); return; }
+      setDraftCfg({});
+      setSaveMsg("✓ 已儲存");
+      onChanged();
+      onToast(`已更新:${node.label}`);
+    } catch {
+      setSaveMsg("連不上伺服器,請再試一次");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function tweak() {
     setBusyAction("tweak");
@@ -178,6 +233,52 @@ export function NodePanel({
             </div>
           )}
         </div>
+        {!readonlyWf && editableFields.length > 0 && (
+          <div className="card p-3 space-y-2.5">
+            <p className="text-xs font-medium" style={{ color: "var(--accent)" }}>✏️ 直接改設定</p>
+            {editableFields.map((f) => {
+              const v = fieldValue(f);
+              const set = (val: string | boolean) => setDraftCfg((d) => ({ ...d, [f.key]: val }));
+              return (
+                <div key={f.key}>
+                  <label className="block text-xs faint mb-1">
+                    {f.label}
+                    {f.help ? <span className="opacity-70">（{f.help}）</span> : null}
+                  </label>
+                  {f.type === "select" && f.options?.length ? (
+                    <select value={String(v)} onChange={(e) => set(e.target.value)} className="input text-sm">
+                      {String(v) === "" && <option value="">（用預設值）</option>}
+                      {f.options.map((o) => {
+                        const p = parseOption(o);
+                        return <option key={p.value} value={p.value}>{p.label}</option>;
+                      })}
+                    </select>
+                  ) : f.type === "boolean" ? (
+                    <label className="flex items-center gap-2 text-sm">
+                      <input type="checkbox" checked={v === true} onChange={(e) => set(e.target.checked)} />
+                      <span className="muted">開啟</span>
+                    </label>
+                  ) : f.type === "textarea" ? (
+                    <textarea value={String(v)} onChange={(e) => set(e.target.value)} rows={3} className="input text-sm resize-y font-mono" placeholder={f.default ? `預設:${f.default}` : "留空=用預設值"} />
+                  ) : (
+                    <input
+                      value={String(v)}
+                      onChange={(e) => set(e.target.value)}
+                      inputMode={f.type === "number" ? "numeric" : undefined}
+                      className="input text-sm"
+                      placeholder={f.default ? `預設:${f.default}` : "留空=用預設值"}
+                    />
+                  )}
+                </div>
+              );
+            })}
+            <button onClick={saveConfig} disabled={!dirty || saving} className="btn btn-primary w-full justify-center text-sm">
+              {saving ? "儲存中…" : dirty ? "儲存修改" : "沒有修改"}
+            </button>
+            {saveMsg && <p className="text-xs" style={{ color: saveMsg.startsWith("✓") ? "var(--green)" : "var(--red)" }}>{saveMsg}</p>}
+            <p className="text-[11px] faint leading-relaxed">改完記得按儲存;複雜的改動(換做法/加步驟)還是用下面的白話請 AI 改最快。</p>
+          </div>
+        )}
         {lastDiff && (
           <div className="card p-3 space-y-1.5" style={{ borderColor: "var(--accent)" }}>
             <p className="text-xs font-medium" style={{ color: "var(--accent)" }}>AI 剛剛改了什麼</p>
