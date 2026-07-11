@@ -8,6 +8,8 @@ export async function register() {
     engine.recoverCrashedRuns();
     cleanupStaleProposals(); // 清掉太舊沒人理/早就處理過的 AI 修法提案
     engine.pruneOrphanOutputs(); // 清掉已刪除 run 遺留的產出資料夾(釋放磁碟)
+    const approvals = await import("./lib/approvals");
+    approvals.pruneOrphanApprovals(); // 清掉指向已刪流程/已清紀錄的孤兒簽核(不留幽靈簽核卡)
     scheduler.startScheduler();
     watchers.startWatchers(); // 資料夾監聽觸發
     const poller = await import("./lib/telegramApprovalPoller");

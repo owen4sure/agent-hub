@@ -111,6 +111,17 @@ export async function decideApproval(
 }
 
 /**
+ * 開機清一次孤兒簽核：流程已刪(或執行紀錄已被清)但簽核還掛著 pending——
+ * 首頁會冒出「已刪除流程」的簽核卡、按了也無法恢復。刪流程時會連帶清(store.deleteWorkflow)，
+ * 這裡是補「舊版程式時期留下的」與各種意外情況的自癒網。
+ */
+export function pruneOrphanApprovals(): void {
+  const db = getDb();
+  db.prepare(`DELETE FROM approvals WHERE workflow_id NOT IN (SELECT id FROM workflows_meta)`).run();
+  db.prepare(`UPDATE approvals SET status='cancelled', decided_at=datetime('now') WHERE status='pending' AND run_id NOT IN (SELECT id FROM runs)`).run();
+}
+
+/**
  * 逾時掃描(由 scheduler 每分鐘 tick 順便呼叫)：過期的 pending 簽核標 expired，
  * 對應的 waiting run 老實標失敗(簽核逾時)並通知——不能讓流程無聲地永遠掛在等簽核。
  */

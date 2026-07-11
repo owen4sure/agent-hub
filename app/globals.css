@@ -1,34 +1,36 @@
 @import "tailwindcss";
 
 /* ───────────────────────────────────────────────────────────────
- * Design language: Linear (via open-design/design-systems/linear-app)
- * Achromatic surfaces + single indigo accent (#5e6ad2). Inter 510.
- * Dark is the native medium; light is an adapted tier.
+ * Design language: 玻璃光暈(Glass Glow)——2026-07 Owen 拍板的大改版。
+ * 深空底+柔和光暈+毛玻璃面板+漸層描邊節點卡+發光主鍵。
+ * 深色是原生面貌；淺色是同一套語言的「日光版」(白玻璃+淡光暈)，
+ * 兩套都是一等公民(拍板:「兩套都要精緻」)。
+ * 所有顏色/光效走 token——改主題只動 :root 區塊，元件不用各自再改。
  * ─────────────────────────────────────────────────────────────── */
 
 :root {
-  /* light (adapted) */
-  --app-bg: #fbfbfc;
-  --surface: #ffffff;
-  --surface-2: #f3f3f5;
-  --surface-hover: #f7f7f9;
-  --sidebar-bg: #fbfbfc;
-  --border: rgba(9, 9, 11, 0.08);
-  --border-strong: rgba(9, 9, 11, 0.15);
-  --text: #17181a;
-  --text-muted: #6b6f76;
-  --text-faint: #9ca0a8;
+  /* ── light(日光玻璃) ── */
+  --app-bg: #eef0f8;
+  --surface: rgba(255, 255, 255, 0.78);
+  --surface-2: rgba(237, 239, 250, 0.85);
+  --surface-hover: rgba(246, 247, 253, 0.9);
+  --sidebar-bg: rgba(250, 251, 255, 0.72);
+  --border: rgba(84, 92, 220, 0.13);
+  --border-strong: rgba(84, 92, 220, 0.28);
+  --text: #1a1c28;
+  --text-muted: #5f6478;
+  --text-faint: #979cb2;
 
-  --accent: #5e6ad2;
-  --accent-hover: #4b57c4;
-  --accent-soft: rgba(94, 106, 210, 0.1);
+  --accent: #5e63e8;
+  --accent-hover: #4a4fd8;
+  --accent-soft: rgba(94, 99, 232, 0.12);
   --green: #1f9d47;
   --red: #dc2626;
-  --amber: #d08700;
+  --amber: #c77e00;
 
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
 
   /* 節點類別色(深淺共用色相，soft 背景用 color-mix 依主題自動適應) */
   --cat-trigger: #d97706;
@@ -40,37 +42,55 @@
   --cat-ai: #9333ea;
   --cat-custom: #64748b;
 
-  --canvas-dot: rgba(9, 9, 11, 0.16);
-  --edge: rgba(9, 9, 11, 0.28);
+  --canvas-dot: rgba(70, 76, 160, 0.18);
+  --edge: rgba(70, 76, 180, 0.4);
+  --edge-label: #4a4f70;
+  --edge-label-bg: rgba(255, 255, 255, 0.92);
 
-  --shadow-sm: 0 1px 2px rgba(17, 18, 20, 0.04);
-  --shadow-md: 0 2px 6px rgba(17, 18, 20, 0.06), 0 1px 2px rgba(17, 18, 20, 0.04);
-  --shadow-lg: 0 12px 32px rgba(17, 18, 20, 0.1);
+  --shadow-sm: 0 1px 3px rgba(40, 44, 90, 0.06);
+  --shadow-md: 0 3px 10px rgba(40, 44, 90, 0.08), 0 1px 3px rgba(40, 44, 90, 0.05);
+  --shadow-lg: 0 18px 44px rgba(40, 44, 90, 0.14);
   --focus: 0 0 0 3px var(--accent-soft);
+
+  /* 玻璃光暈 token */
+  --bg-glow-a: rgba(94, 99, 232, 0.1);   /* 頁面左上光暈 */
+  --bg-glow-b: rgba(45, 170, 255, 0.07); /* 頁面右下光暈 */
+  --canvas-glow-a: rgba(94, 99, 232, 0.12);
+  --canvas-glow-b: rgba(45, 170, 255, 0.08);
+  --canvas-vignette: rgba(60, 64, 120, 0.06);
+  --bar-bg: rgba(252, 252, 255, 0.66);
+  --menu-bg: rgba(255, 255, 255, 0.94);
+  --node-bg: linear-gradient(160deg, rgba(255, 255, 255, 0.92), rgba(248, 249, 255, 0.86));
+  --node-border-grad: linear-gradient(135deg, rgba(94, 99, 232, 0.5), rgba(45, 170, 255, 0.28) 45%, rgba(94, 99, 232, 0.1));
+  --node-shadow: 0 14px 36px rgba(40, 44, 100, 0.12), 0 2px 8px rgba(40, 44, 100, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --node-shadow-hover: 0 22px 48px rgba(40, 44, 100, 0.18), 0 4px 12px rgba(40, 44, 100, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --glow-accent: 0 4px 20px rgba(94, 99, 232, 0.35);
+  --glow-accent-lg: 0 6px 28px rgba(94, 99, 232, 0.45), 0 0 42px -10px rgba(94, 99, 232, 0.4);
+  --handle-bg: radial-gradient(circle at 35% 35%, #b9beff, #6a70ee);
+  --handle-ring: #ffffff;
+  --handle-glow: 0 0 10px rgba(94, 99, 232, 0.5);
 
   --ease: cubic-bezier(0.2, 0, 0, 1);
 }
 
+/* ── dark(深空玻璃・原生) ── */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --app-bg: #08090a;
-    --surface: #171819;
-    --surface-2: #202123;
-    --surface-hover: #1c1d1f;
-    --sidebar-bg: #0b0c0d;
-    --border: rgba(255, 255, 255, 0.09);
-    --border-strong: rgba(255, 255, 255, 0.16);
-    --text: #f7f8f8;
-    --text-muted: #8a8f98;
-    --text-faint: #62666d;
-    --accent: #5e6ad2;
-    --accent-hover: #828fff;
-    --accent-soft: rgba(94, 106, 210, 0.2);
-    --green: #27a644;
+    --app-bg: #05060e;
+    --surface: rgba(22, 24, 40, 0.62);
+    --surface-2: rgba(36, 39, 62, 0.55);
+    --surface-hover: rgba(46, 49, 74, 0.6);
+    --sidebar-bg: rgba(8, 9, 18, 0.72);
+    --border: rgba(150, 158, 255, 0.15);
+    --border-strong: rgba(150, 158, 255, 0.34);
+    --text: #f0f2ff;
+    --text-muted: #a8adcc;
+    --text-faint: #7a80a4;
+    --accent: #8f97ff;
+    --accent-hover: #aab0ff;
+    --accent-soft: rgba(143, 151, 255, 0.2);
+    --green: #35c46c;
     --amber: #eab308;
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --shadow-md: rgba(0, 0, 0, 0.4) 0px 2px 6px, 0 0 0 1px rgba(255, 255, 255, 0.04);
-    --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.6);
     --cat-trigger: #f59e0b;
     --cat-browser: #60a5fa;
     --cat-data: #4ade80;
@@ -79,30 +99,48 @@
     --cat-logic: #fb923c;
     --cat-ai: #c084fc;
     --cat-custom: #94a3b8;
-    --canvas-dot: rgba(255, 255, 255, 0.22);
-    --edge: rgba(255, 255, 255, 0.28);
+    --canvas-dot: rgba(150, 158, 255, 0.16);
+    --edge: rgba(170, 177, 255, 0.5);
+    --edge-label: #d0d4ff;
+    --edge-label-bg: rgba(20, 22, 44, 0.92);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 10, 0.45);
+    --shadow-md: 0 4px 14px rgba(0, 0, 14, 0.5), 0 0 0 1px rgba(150, 158, 255, 0.05);
+    --shadow-lg: 0 22px 56px rgba(0, 0, 16, 0.65);
+    --bg-glow-a: rgba(118, 100, 255, 0.16);
+    --bg-glow-b: rgba(45, 200, 255, 0.08);
+    --canvas-glow-a: rgba(118, 100, 255, 0.3);
+    --canvas-glow-b: rgba(45, 200, 255, 0.16);
+    --canvas-vignette: rgba(0, 0, 6, 0.5);
+    --bar-bg: rgba(13, 14, 30, 0.6);
+    --menu-bg: rgba(19, 21, 40, 0.94);
+    --node-bg: linear-gradient(160deg, rgba(36, 40, 66, 0.88), rgba(17, 19, 36, 0.92));
+    --node-border-grad: linear-gradient(135deg, rgba(168, 158, 255, 0.72), rgba(90, 200, 255, 0.38) 45%, rgba(168, 158, 255, 0.12));
+    --node-shadow: 0 20px 52px rgba(4, 4, 24, 0.65), 0 4px 14px rgba(90, 96, 240, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.11);
+    --node-shadow-hover: 0 28px 64px rgba(4, 4, 26, 0.75), 0 6px 20px rgba(100, 106, 250, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    --glow-accent: 0 4px 22px rgba(122, 108, 255, 0.5);
+    --glow-accent-lg: 0 6px 28px rgba(122, 108, 255, 0.6), 0 0 46px -8px rgba(122, 108, 255, 0.55);
+    --handle-bg: radial-gradient(circle at 35% 35%, #c3c8ff, #7f88ff);
+    --handle-ring: #0c0e22;
+    --handle-glow: 0 0 14px rgba(143, 151, 255, 0.85);
   }
 }
 
 :root[data-theme="dark"] {
-  --app-bg: #08090a;
-  --surface: #171819;
-  --surface-2: #202123;
-  --surface-hover: #1c1d1f;
-  --sidebar-bg: #0b0c0d;
-  --border: rgba(255, 255, 255, 0.09);
-  --border-strong: rgba(255, 255, 255, 0.16);
-  --text: #f7f8f8;
-  --text-muted: #8a8f98;
-  --text-faint: #62666d;
-  --accent: #5e6ad2;
-  --accent-hover: #828fff;
-  --accent-soft: rgba(94, 106, 210, 0.2);
-  --green: #27a644;
+  --app-bg: #05060e;
+  --surface: rgba(22, 24, 40, 0.62);
+  --surface-2: rgba(36, 39, 62, 0.55);
+  --surface-hover: rgba(46, 49, 74, 0.6);
+  --sidebar-bg: rgba(8, 9, 18, 0.72);
+  --border: rgba(150, 158, 255, 0.15);
+  --border-strong: rgba(150, 158, 255, 0.34);
+  --text: #f0f2ff;
+  --text-muted: #a8adcc;
+  --text-faint: #7a80a4;
+  --accent: #8f97ff;
+  --accent-hover: #aab0ff;
+  --accent-soft: rgba(143, 151, 255, 0.2);
+  --green: #35c46c;
   --amber: #eab308;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: rgba(0, 0, 0, 0.4) 0px 2px 6px, 0 0 0 1px rgba(255, 255, 255, 0.04);
-  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.6);
   --cat-trigger: #f59e0b;
   --cat-browser: #60a5fa;
   --cat-data: #4ade80;
@@ -111,8 +149,29 @@
   --cat-logic: #fb923c;
   --cat-ai: #c084fc;
   --cat-custom: #94a3b8;
-  --canvas-dot: rgba(255, 255, 255, 0.22);
-  --edge: rgba(255, 255, 255, 0.28);
+  --canvas-dot: rgba(150, 158, 255, 0.16);
+  --edge: rgba(170, 177, 255, 0.5);
+  --edge-label: #d0d4ff;
+  --edge-label-bg: rgba(20, 22, 44, 0.92);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 10, 0.45);
+  --shadow-md: 0 4px 14px rgba(0, 0, 14, 0.5), 0 0 0 1px rgba(150, 158, 255, 0.05);
+  --shadow-lg: 0 22px 56px rgba(0, 0, 16, 0.65);
+  --bg-glow-a: rgba(118, 100, 255, 0.16);
+  --bg-glow-b: rgba(45, 200, 255, 0.08);
+  --canvas-glow-a: rgba(118, 100, 255, 0.3);
+  --canvas-glow-b: rgba(45, 200, 255, 0.16);
+  --canvas-vignette: rgba(0, 0, 6, 0.5);
+  --bar-bg: rgba(13, 14, 30, 0.6);
+  --menu-bg: rgba(19, 21, 40, 0.94);
+  --node-bg: linear-gradient(160deg, rgba(36, 40, 66, 0.88), rgba(17, 19, 36, 0.92));
+  --node-border-grad: linear-gradient(135deg, rgba(168, 158, 255, 0.72), rgba(90, 200, 255, 0.38) 45%, rgba(168, 158, 255, 0.12));
+  --node-shadow: 0 20px 52px rgba(4, 4, 24, 0.65), 0 4px 14px rgba(90, 96, 240, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.11);
+  --node-shadow-hover: 0 28px 64px rgba(4, 4, 26, 0.75), 0 6px 20px rgba(100, 106, 250, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  --glow-accent: 0 4px 22px rgba(122, 108, 255, 0.5);
+  --glow-accent-lg: 0 6px 28px rgba(122, 108, 255, 0.6), 0 0 46px -8px rgba(122, 108, 255, 0.55);
+  --handle-bg: radial-gradient(circle at 35% 35%, #c3c8ff, #7f88ff);
+  --handle-ring: #0c0e22;
+  --handle-glow: 0 0 14px rgba(143, 151, 255, 0.85);
 }
 
 @theme inline {
@@ -136,7 +195,12 @@ html {
 }
 
 body {
-  background: var(--app-bg);
+  /* 整個 app 都活在同一片光暈裡(不只畫布)——首頁/設定頁的玻璃卡片才有東西可透 */
+  background:
+    radial-gradient(1100px 700px at 6% -8%, var(--bg-glow-a), transparent 55%),
+    radial-gradient(950px 680px at 104% 106%, var(--bg-glow-b), transparent 55%),
+    var(--app-bg);
+  background-attachment: fixed;
   color: var(--text);
   font-family: var(--font-inter), -apple-system, "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -145,15 +209,17 @@ body {
 
 h1, h2, h3 { letter-spacing: -0.018em; }
 
-/* ── components ── */
+/* ── 玻璃元件 ── */
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
 }
-.card-hover { transition: background-color 0.18s var(--ease), border-color 0.18s var(--ease), box-shadow 0.18s var(--ease); }
-.card-hover:hover { border-color: var(--border-strong); box-shadow: var(--shadow-md); background: var(--surface-hover); }
+.card-hover { transition: background-color 0.18s var(--ease), border-color 0.18s var(--ease), box-shadow 0.18s var(--ease), transform 0.18s var(--ease); }
+.card-hover:hover { border-color: var(--border-strong); box-shadow: var(--shadow-md); background: var(--surface-hover); transform: translateY(-1px); }
 
 .btn {
   display: inline-flex;
@@ -161,25 +227,31 @@ h1, h2, h3 { letter-spacing: -0.018em; }
   gap: 6px;
   font-size: 13px;
   font-weight: 510;
-  border-radius: var(--radius-sm);
+  border-radius: 10px;
   padding: 7px 13px;
   line-height: 1;
-  transition: background 0.13s var(--ease), border-color 0.13s var(--ease), opacity 0.13s var(--ease);
+  transition: background 0.13s var(--ease), border-color 0.13s var(--ease), opacity 0.13s var(--ease), box-shadow 0.18s var(--ease), transform 0.13s var(--ease);
   cursor: pointer;
   white-space: nowrap;
 }
-.btn-primary { background: var(--accent); color: #fff; }
-.btn-primary:hover { background: var(--accent-hover); }
-.btn-ghost { background: var(--surface); border: 1px solid var(--border-strong); color: var(--text); }
+.btn-primary {
+  color: #fff;
+  border: none;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 72%, #fff) 0%, var(--accent) 55%, color-mix(in srgb, var(--accent) 78%, #1a1060) 100%);
+  box-shadow: var(--glow-accent), inset 0 1px 0 rgba(255, 255, 255, 0.32);
+  text-shadow: 0 1px 2px rgba(20, 14, 70, 0.35);
+}
+.btn-primary:hover { box-shadow: var(--glow-accent-lg), inset 0 1px 0 rgba(255, 255, 255, 0.32); transform: translateY(-1px); }
+.btn-ghost { background: color-mix(in srgb, var(--accent) 6%, transparent); border: 1px solid var(--border-strong); color: var(--text); }
 .btn-ghost:hover { background: var(--surface-2); }
 .btn:focus-visible { outline: none; box-shadow: var(--focus); }
-.btn:disabled { opacity: 0.45; cursor: default; }
+.btn:disabled { opacity: 0.45; cursor: default; transform: none; }
 
 .input {
   width: 100%;
   background: var(--surface);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  border-radius: 10px;
   padding: 8px 11px;
   font-size: 14px;
   color: var(--text);
@@ -208,42 +280,139 @@ h1, h2, h3 { letter-spacing: -0.018em; }
 .muted { color: var(--text-muted); }
 .faint { color: var(--text-faint); }
 
+/* 側欄:毛玻璃(inline 的 --sidebar-bg 半透明,光暈從後面透出來) */
+aside {
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+}
+
+/* 懸浮玻璃工具列(畫布頂欄)與面板玻璃 */
+.bar-float {
+  background: var(--bar-bg);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+  border: 1px solid var(--border);
+  margin: 10px 12px 6px;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+.panel-glass {
+  background: color-mix(in srgb, var(--app-bg) 35%, transparent);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
 ::-webkit-scrollbar { width: 11px; height: 11px; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; border: 3px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); background-clip: padding-box; }
 
-/* React Flow theming to match Linear surfaces */
-.react-flow__controls { box-shadow: var(--shadow-md) !important; border-radius: var(--radius-sm); overflow: hidden; }
-.react-flow__controls-button { background: var(--surface) !important; border-color: var(--border) !important; color: var(--text) !important; }
+/* ── 畫布:深空光暈+景深暗角 ── */
+.react-flow {
+  background:
+    radial-gradient(1300px 850px at 12% -10%, var(--canvas-glow-a), transparent 58%),
+    radial-gradient(1000px 750px at 102% 108%, var(--canvas-glow-b), transparent 55%),
+    radial-gradient(850px 550px at 58% 48%, color-mix(in srgb, var(--canvas-glow-a) 40%, transparent), transparent 62%),
+    radial-gradient(1800px 1200px at 50% 50%, transparent 55%, var(--canvas-vignette) 100%),
+    var(--app-bg) !important;
+}
+
+/* ── 節點卡:漸層描邊玻璃(padding-box/border-box 雙背景) ── */
+.wf-node {
+  min-width: 240px;
+  padding: 15px 17px;
+  border-radius: 18px;
+  border: 1.5px solid transparent;
+  background: var(--node-bg) padding-box, var(--node-border-grad) border-box;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: var(--node-shadow);
+  cursor: pointer;
+  transition: box-shadow 0.18s var(--ease), transform 0.18s var(--ease);
+}
+.wf-node:hover { box-shadow: var(--node-shadow-hover); transform: translateY(-2px); }
+.wf-node-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  font-size: 21px;
+  flex-shrink: 0;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22), 0 0 22px -6px color-mix(in srgb, var(--accent) 45%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+/* 卡片下緣的「關鍵設定摘要」——不點開就看得到這步在對什麼東西做事 */
+.wf-node-summary {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px dashed color-mix(in srgb, var(--border-strong) 70%, transparent);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  max-width: 224px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── React Flow 元件玻璃化 ── */
+.react-flow__controls { box-shadow: var(--shadow-md) !important; border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--border); }
+.react-flow__controls-button { background: var(--menu-bg) !important; border-color: var(--border) !important; color: var(--text) !important; }
 .react-flow__controls-button:hover { background: var(--surface-2) !important; }
 .react-flow__attribution { display: none; }
 .react-flow__minimap {
   background: var(--surface) !important;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-md);
   overflow: hidden;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
-.react-flow__minimap svg { background: var(--surface); }
+.react-flow__minimap svg { background: transparent; }
 /* React Flow 把 maskColor/nodeColor 寫成 inline style，不加 !important 蓋不掉——
    預設亮灰遮罩(240,240,240)在深色主題會浮出一塊亮板(截圖驗過) */
 .react-flow__minimap-mask { fill: color-mix(in srgb, var(--surface-2) 72%, transparent) !important; }
 .react-flow__minimap-node { fill: color-mix(in srgb, var(--accent) 65%, var(--text-faint)) !important; }
 .react-flow__handle {
-  transition: background 0.13s var(--ease), box-shadow 0.13s var(--ease);
+  width: 13px !important;
+  height: 13px !important;
+  background: var(--handle-bg) !important;
+  border: 2.5px solid var(--handle-ring) !important;
+  box-shadow: var(--handle-glow);
+  transition: box-shadow 0.13s var(--ease), transform 0.13s var(--ease);
 }
-.react-flow__handle:hover { background: var(--accent) !important; box-shadow: 0 0 0 3px var(--accent-soft); }
-.react-flow__edge-path { transition: stroke 0.15s var(--ease); }
-.react-flow__edge.selected .react-flow__edge-path { stroke: var(--accent) !important; }
+.react-flow__handle:hover { box-shadow: var(--handle-glow), 0 0 0 4px var(--accent-soft); transform: scale(1.12); }
 
-/* 下拉選單(工具列「⋯」等) */
+/* ── 連接線:發光流線(顏色/光暈依分支語意) ── */
+.react-flow__edge-path { transition: stroke 0.15s var(--ease); stroke-width: 2.2; }
+.react-flow__edge.edge-main .react-flow__edge-path {
+  stroke: var(--edge);
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 50%, transparent));
+}
+.react-flow__edge.edge-error .react-flow__edge-path {
+  stroke: #e0454c;
+  stroke-dasharray: 6 4;
+  opacity: 0.85;
+  filter: drop-shadow(0 0 6px rgba(224, 69, 76, 0.5));
+}
+.react-flow__edge.edge-ok .react-flow__edge-path {
+  stroke: #22b46a;
+  filter: drop-shadow(0 0 6px rgba(34, 180, 106, 0.5));
+}
+.react-flow__edge.selected .react-flow__edge-path { stroke: var(--accent) !important; }
+.react-flow__edge-textbg { fill: var(--edge-label-bg) !important; }
+.react-flow__edge-text { fill: var(--edge-label) !important; font-size: 11px !important; font-weight: 600; }
+
+/* 下拉選單(工具列「⋯」等):不透明度要夠,浮在節點上才讀得清楚 */
 .menu {
-  background: var(--surface);
+  background: var(--menu-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
   padding: 4px;
   min-width: 168px;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
 }
 .menu-item {
   display: flex;
@@ -298,4 +467,17 @@ h1, h2, h3 { letter-spacing: -0.018em; }
 }
 .wf-edit-toast {
   animation: wf-edit-toast-in 0.25s ease-out;
+}
+
+/* 執行中狀態列(畫布底部):滑入 */
+@keyframes wf-statusbar-in {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+.wf-statusbar { animation: wf-statusbar-in 0.22s ease-out; }
+
+/* 動效尊重系統設定 */
+@media (prefers-reduced-motion: reduce) {
+  .wf-running-dash { animation: none; }
+  .card-hover, .btn, .wf-node { transition: none; }
 }

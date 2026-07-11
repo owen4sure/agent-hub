@@ -62,6 +62,7 @@ export function WFNodeCard({ data, selected }: NodeProps) {
     label: string;
     type: string;
     status?: string;
+    summary?: string;
     onClick: () => void;
     onRename: (name: string) => void;
   };
@@ -70,6 +71,9 @@ export function WFNodeCard({ data, selected }: NodeProps) {
   const [draft, setDraft] = useState(d.label);
   const color = catColor(d.type);
   const meta = TYPE_META[d.type];
+  // 狀態/選取用「外圈光環」表達(疊在 .wf-node 的漸層描邊外面)——漸層描邊靠雙背景技法,
+  // border-color 已經是 transparent 的畫布,不能再拿它表達狀態
+  const ring = active ? statusColor(d.status) : selected ? "var(--accent)" : null;
 
   function commit() {
     setEditing(false);
@@ -86,19 +90,15 @@ export function WFNodeCard({ data, selected }: NodeProps) {
         setDraft(d.label);
         setEditing(true);
       }}
-      style={{
-        borderColor: active ? statusColor(d.status) : selected ? "var(--accent)" : "var(--border)",
-        background: "var(--surface)",
-        boxShadow: selected ? "var(--shadow-md), 0 0 0 3px var(--accent-soft)" : "var(--shadow-md)",
-      }}
-      className={`rounded-xl border px-3 py-2.5 min-w-[196px] cursor-pointer transition-shadow${d.status === "running" ? " wf-node-running" : ""}`}
+      style={ring ? { boxShadow: `var(--node-shadow), 0 0 0 2.5px ${ring}` } : undefined}
+      className={`wf-node${d.status === "running" ? " wf-node-running" : ""}`}
       title="拖動可移動位置 · 雙擊可改名"
     >
-      <Handle type="target" position={Position.Left} style={{ background: "var(--border-strong)", width: 10, height: 10, border: "2px solid var(--surface)" }} />
-      <div className="flex items-center gap-2.5">
+      <Handle type="target" position={Position.Left} />
+      <div className="flex items-center gap-3">
         <span
-          className="grid place-items-center w-8 h-8 rounded-lg text-[15px] shrink-0"
-          style={{ background: `color-mix(in srgb, ${color} 14%, var(--surface-2))`, border: `1px solid color-mix(in srgb, ${color} 28%, transparent)` }}
+          className="wf-node-icon"
+          style={{ background: `color-mix(in srgb, ${color} 16%, var(--surface-2))`, border: `1px solid color-mix(in srgb, ${color} 32%, transparent)` }}
         >
           {ICONS[d.type] ?? "▫️"}
         </span>
@@ -114,26 +114,27 @@ export function WFNodeCard({ data, selected }: NodeProps) {
                 if (e.key === "Escape") { setEditing(false); setDraft(d.label); }
               }}
               onClick={(e) => e.stopPropagation()}
-              className="text-[13px] font-medium bg-transparent border-b outline-none w-32"
+              className="text-[15px] font-semibold bg-transparent border-b outline-none w-36"
               style={{ borderColor: "var(--accent)", color: "var(--text)" }}
             />
           ) : (
-            <p className="text-[13px] font-medium leading-tight truncate" style={{ color: "var(--text)" }}>{d.label}</p>
+            <p className="text-[15px] font-semibold leading-tight truncate" style={{ color: "var(--text)", letterSpacing: "0.012em" }}>{d.label}</p>
           )}
-          <p className="text-[11px] leading-tight mt-0.5 truncate" style={{ color: active ? statusColor(d.status) : "var(--text-faint)" }}>
+          <p className="text-[11.5px] leading-tight mt-1 truncate" style={{ color: active ? statusColor(d.status) : "var(--text-faint)" }}>
             {active ? STATUS_TEXT[d.status!] ?? d.status : meta?.label ?? d.type}
           </p>
         </div>
         {active && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: statusColor(d.status) }} />}
       </div>
-      <Handle type="source" position={Position.Right} style={{ background: "var(--border-strong)", width: 10, height: 10, border: "2px solid var(--surface)" }} />
+      {d.summary && !editing && <p className="wf-node-summary">{d.summary}</p>}
+      <Handle type="source" position={Position.Right} />
       {d.status === "running" && (
         // 光環沿節點「實際邊框」跑動：用 SVG rect 的 stroke-dasharray/dashoffset 沿幾何路徑等速位移。
-        // rect 用真正的 SVG 屬性(width/height=100%、rx=12 對齊卡片的 rounded-xl)，不要用 CSS calc 塞 x/y/width——
+        // rect 用真正的 SVG 屬性(width/height=100%、rx=17 對齊 .wf-node 的 18px 圓角)，不要用 CSS calc 塞 x/y/width——
         // SVG 幾何屬性走 CSS calc 各家瀏覽器支援不一致，會算錯大小、讓光環浮在節點外面對不齊(踩過)。
         // vector-effect=non-scaling-stroke 讓線寬不受畫布縮放影響，縮小時也剛好貼著邊。
         <svg className="wf-running-ring" aria-hidden="true">
-          <rect className="wf-running-dash" x="0" y="0" width="100%" height="100%" rx="12" ry="12" pathLength={100} />
+          <rect className="wf-running-dash" x="0" y="0" width="100%" height="100%" rx="17" ry="17" pathLength={100} />
         </svg>
       )}
     </div>

@@ -24,6 +24,7 @@ import { useWFChat, sendChatToAI, startAutoTest, stopAutoTest, clearPendingGraph
 import { MODELS, KNOWN_WORKING_MODELS, supportsVision } from "@/lib/models";
 import type { Workflow, NodeRun, RunRecord, ExplainData } from "./types";
 import { nodeTypes } from "./nodeVisuals";
+import { nodeSummary } from "@/lib/workflow/nodeSummary";
 import { RunForm } from "./RunForm";
 import { NodePanel } from "./NodePanel";
 import { HistoryPanel } from "./HistoryPanel";
@@ -345,6 +346,7 @@ export default function WorkflowPage() {
           label: n.label,
           type: n.type,
           status: nodeRuns[n.id]?.status,
+          summary: nodeSummary(n.type, n.config),
           onClick: () => setSelectedNode(n.id),
           onRename: (name: string) => renameNode(n.id, name),
         },
@@ -358,12 +360,8 @@ export default function WorkflowPage() {
         // 分支線標籤說人話：error=出錯時走這條(紅虛線)、approved/rejected=簽核結果、其他 port 原樣顯示
         label: e.fromPort === "error" ? "🆘 出錯時" : e.fromPort === "approved" ? "✅ 核准" : e.fromPort === "rejected" ? "❌ 拒絕" : e.fromPort,
         animated: nodeRuns[e.from]?.status === "running",
-        style:
-          e.fromPort === "error"
-            ? { stroke: "#dc2626", strokeWidth: 1.75, strokeDasharray: "6 4", opacity: 0.8 }
-            : e.fromPort === "approved"
-              ? { stroke: "#16a34a", strokeWidth: 1.75 }
-              : { stroke: "var(--edge)", strokeWidth: 1.75 },
+        // 顏色/光暈交給 globals.css 的 edge-* 類(依分支語意上色,深淺主題自動適應)
+        className: e.fromPort === "error" ? "edge-error" : e.fromPort === "approved" ? "edge-ok" : "edge-main",
       })),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -763,7 +761,7 @@ export default function WorkflowPage() {
     <div className="flex h-screen">
       {/* 左：畫布 */}
       <div className="flex-1 flex flex-col min-w-0">
-        <div className="h-14 border-b px-4 flex items-center gap-2 shrink-0" style={{ background: "var(--surface)" }}>
+        <div className="h-14 bar-float px-4 flex items-center gap-2 shrink-0">
           <button onClick={() => router.push("/")} aria-label="回首頁" className="faint hover:text-[var(--text)] text-sm mr-1">←</button>
           {renamingWf ? (
             <input
@@ -934,7 +932,7 @@ export default function WorkflowPage() {
             multiSelectionKeyCode={["Meta", "Shift"]}
             deleteKeyCode={["Delete", "Backspace"]}
             proOptions={{ hideAttribution: true }}
-            defaultEdgeOptions={{ style: { stroke: "var(--edge)", strokeWidth: 1.75 } }}
+            defaultEdgeOptions={{ className: "edge-main" }}
           >
             <Background variant={BackgroundVariant.Dots} color="var(--canvas-dot)" gap={22} size={1.6} />
             <Controls showInteractive={false} />
@@ -942,6 +940,27 @@ export default function WorkflowPage() {
               <MiniMap pannable zoomable position="bottom-right" style={{ width: 168, height: 112 }} />
             )}
           </ReactFlow>
+          {/* 執行中狀態列:跑到第幾步/正在跑哪一步,不用盯著節點顏色猜進度 */}
+          {(activeRunStatus === "running" || activeRunStatus === "queued") && (() => {
+            const total = wf.nodes.length;
+            const done = Object.values(nodeRuns).filter((nr) => ["success", "failed", "skipped"].includes(nr.status)).length;
+            const runningNode = wf.nodes.find((n) => nodeRuns[n.id]?.status === "running");
+            return (
+              <div
+                className="wf-statusbar absolute left-1/2 bottom-5 z-20 -translate-x-1/2 flex items-center gap-3 rounded-full px-5 py-2.5 text-sm"
+                style={{ background: "var(--menu-bg)", border: "1px solid var(--border-strong)", boxShadow: "var(--shadow-lg)", backdropFilter: "blur(18px)" }}
+              >
+                <span className="inline-block w-2 h-2 rounded-full animate-pulse" style={{ background: "var(--amber)" }} />
+                <span className="font-medium">
+                  {activeRunStatus === "queued" ? "排隊中…" : runningNode ? `正在跑「${runningNode.label}」` : "執行中…"}
+                </span>
+                <span className="faint text-xs">{done}/{total} 步</span>
+                <div className="w-28 h-1.5 rounded-full overflow-hidden" style={{ background: "var(--surface-2)" }}>
+                  <div className="h-full rounded-full transition-all" style={{ width: `${total ? Math.round((done / total) * 100) : 0}%`, background: "var(--accent)" }} />
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </div>
 
@@ -1020,7 +1039,7 @@ export default function WorkflowPage() {
       )}
 
       {/* 右：AI 對話 / 節點面板 / 執行紀錄 */}
-      <div className="w-[400px] shrink-0 border-l flex flex-col" style={{ background: "var(--surface)" }}>
+      <div className="w-[400px] shrink-0 border-l flex flex-col panel-glass">
         {selNode ? (
           <NodePanel
             key={selNode.id} /* 切換節點時強制重建面板，不然上一個節點的訊息/diff 卡片會殘留，看起來像這個節點被改過 */
