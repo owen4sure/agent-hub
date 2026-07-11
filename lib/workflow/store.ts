@@ -46,6 +46,7 @@ function readWorkflowFile(file: string, builtinDefault: boolean): Workflow | nul
     defaultModel: raw.defaultModel ?? DEFAULT_MODEL,
     requiresSecrets: raw.requiresSecrets ?? [],
     triggerParams: raw.triggerParams ?? [],
+    onFailureWorkflow: raw.onFailureWorkflow,
     nodes: raw.nodes ?? [],
     edges: raw.edges ?? [],
   };
@@ -80,6 +81,21 @@ export function listWorkflows(): Workflow[] {
 export function getWorkflow(id: string): Workflow | null {
   const { file, builtin } = workflowPath(id);
   return readWorkflowFile(file, builtin);
+}
+
+/**
+ * 依「id 或名稱」找流程(執行子流程節點、失敗備援流程共用同一套解析)。
+ * getWorkflow 對「不像 id 的字串」(如中文名稱)會直接 throw(路徑穿越防護)，要先驗格式再走 id 路。
+ * 名稱重複時回 null(呼叫端自己決定要不要提示改用 id)——需要區分「重名」的呼叫端用 findWorkflowsByName。
+ */
+export function findWorkflowsByName(name: string): Workflow[] {
+  return listWorkflows().filter((w) => w.name === name);
+}
+export function findWorkflowByRef(ref: string): Workflow | null {
+  const byId = /^[a-zA-Z0-9_-]{1,80}$/.test(ref) ? getWorkflow(ref) : null;
+  if (byId) return byId;
+  const hits = findWorkflowsByName(ref);
+  return hits.length === 1 ? hits[0] : null;
 }
 
 export function isBuiltin(id: string): boolean {
@@ -197,6 +213,7 @@ export function deleteWorkflow(id: string): void {
   db.prepare(`DELETE FROM fix_proposals WHERE workflow_id = ?`).run(id);
   db.prepare(`DELETE FROM run_files WHERE workflow_id = ?`).run(id);
   db.prepare(`DELETE FROM watch_seen WHERE workflow_id = ?`).run(id);
+  db.prepare(`DELETE FROM approvals WHERE workflow_id = ?`).run(id); // 待簽核的也一併作廢，首頁不能留「已刪除流程」的簽核卡
   for (const runId of runIds) {
     db.prepare(`DELETE FROM node_runs WHERE run_id = ?`).run(runId);
     db.prepare(`DELETE FROM run_logs WHERE run_id = ?`).run(runId);

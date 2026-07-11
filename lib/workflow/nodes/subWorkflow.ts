@@ -2,7 +2,7 @@ import type { NodeDefinition } from "../types";
 import { PermanentError } from "../types";
 import { cfgStr } from "../nodeHelpers";
 import { runWorkflowAndWait, defaultMaxConcurrent } from "../engine";
-import { getWorkflow, listWorkflows } from "../store";
+import { getWorkflow, findWorkflowsByName } from "../store";
 import { getMaxConcurrent } from "../../settingsStore";
 import { getDb } from "../../db";
 
@@ -30,7 +30,7 @@ export const subWorkflowNode: NodeDefinition = {
     // getWorkflow 對「不像 id 的字串」(如中文名稱)會直接 throw(路徑穿越防護),要先驗格式再走 id 路
     let wf = /^[a-zA-Z0-9_-]{1,80}$/.test(target) ? getWorkflow(target) : null;
     if (!wf) {
-      const hits = listWorkflows().filter((w) => w.name === target);
+      const hits = findWorkflowsByName(target);
       if (hits.length > 1) throw new PermanentError(`有 ${hits.length} 條流程都叫「${target}」——請改填流程 id(網址列 /workflows/ 後面那段)`);
       wf = hits[0] ?? null;
     }
@@ -59,6 +59,11 @@ export const subWorkflowNode: NodeDefinition = {
 
     ctx.log(`開始執行子流程「${wf.name}」…`);
     const result = await runWorkflowAndWait(wf.id, params, { headed: false, timeoutMs: 15 * 60_000 });
+    if (result.status === "waiting") {
+      // 子流程停在等簽核——母流程沒辦法跟著暫停幾小時/幾天(引擎的續跑只存到節點層級)。
+      // 老實擋下並指路:簽核節點放母流程,或把「簽核之後的事」做成獨立流程
+      throw new PermanentError(`子流程「${wf.name}」裡有「等人簽核」節點——子流程不能停下來等人。請把簽核節點放在母流程裡,簽核後的步驟接在母流程的簽核節點後面`);
+    }
     if (result.status !== "success") {
       throw new PermanentError(`子流程「${wf.name}」失敗:${result.error ?? "未知原因"}——到那條流程的紀錄頁看細節`);
     }

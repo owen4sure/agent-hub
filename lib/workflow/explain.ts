@@ -162,6 +162,51 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
       };
     }
 
+    case "switch": {
+      const value = hstr("value");
+      const cases = str(c, "cases")
+        .split(/[\n,，]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      return {
+        text: `依「${value || "上游的分類結果"}」分路走：${cases.join("、") || "（還沒設定選項）"}，都不符合就走「其他」那條線。`,
+        settings: [["分類依據", value || "（未設定）"], ["分幾路", cases.join("、") || "（未設定）"]],
+      };
+    }
+
+    case "wait-approval": {
+      const message = str(c, "message");
+      const hours = str(c, "timeoutHours", "72");
+      return {
+        text: `流程在這裡暫停，把內容發給簽核人(手機/信箱/桌面通知)，等真人按「核准」才走核准那條線、按「拒絕」走拒絕那條線；${hours} 小時沒人決定就停止並通知。`,
+        settings: [["要問簽核人的內容", message ? `${message.slice(0, 60)}${message.length > 60 ? "…" : ""}` : "（用預設訊息）"], ["簽核時限", `${hours} 小時`]],
+      };
+    }
+
+    case "wait": {
+      const secs = str(c, "seconds", "10");
+      return {
+        text: `等待 ${secs} 秒再繼續(給對方系統一點處理時間)。`,
+        settings: [["等待秒數", secs]],
+      };
+    }
+
+    case "run-workflow": {
+      const target = hstr("target", "另一條流程");
+      return {
+        text: `執行另一條流程「${target}」當作這一步，等它跑完把結果接回來繼續。`,
+        settings: [["要執行的流程", target]],
+      };
+    }
+
+    case "rss-read": {
+      const url = hstr("url");
+      return {
+        text: `讀取 RSS 訂閱源「${url || "（未設定）"}」的最新文章(標題/連結/摘要)，給後面的步驟用。`,
+        settings: [["訂閱源網址", url || "（未設定）"]],
+      };
+    }
+
     case "llm-decide": {
       const key = str(c, "outputKey", "answer");
       const prompt = str(c, "prompt");

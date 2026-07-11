@@ -1,4 +1,5 @@
 import { getNodeDef, NODE_DEFS } from "./registry";
+import { parseSwitchCases, SWITCH_FALLBACK_PORT } from "./nodes/switchCase";
 import { DATE_TOKENS } from "../relativeDate";
 import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
 
@@ -35,10 +36,67 @@ export function lintGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): string[
   }
 
   // ── 連線 ──
+  const nodeById = new Map(nodes.map((n) => [n.id, n]));
   for (const e of edges) {
     if (!ids.has(e.from)) errors.push(`連線 ${e.from}→${e.to} 的起點 "${e.from}" 不是任何節點的 id。`);
     if (!ids.has(e.to)) errors.push(`連線 ${e.from}→${e.to} 的終點 "${e.to}" 不是任何節點的 id。`);
     if (e.from === e.to) errors.push(`連線 ${e.from}→${e.to} 自己連自己，不允許。`);
+    // 失敗分支(fromPort="error")：從任何「會做事」的節點拉出都合法(那步出錯就走這條 Plan B)，
+    // 但 trigger 不會失敗、拉錯是模型誤解，直接打回。
+    if (e.fromPort === "error" && nodeById.get(e.from)?.type === "trigger") {
+      errors.push(`連線 ${e.from}→${e.to} 標了 fromPort:"error"，但觸發節點不會失敗——失敗分支要從「可能出錯的那個步驟」拉出來。`);
+    }
+  }
+
+  // ── 多路分流(switch)：出線的 fromPort 必須是分流選項之一(或「其他」)，沒標就不知道走哪條 ──
+  for (const n of nodes) {
+    if (n.type !== "switch") continue;
+    const cases = parseSwitchCases(String((n.config ?? {}).cases ?? ""));
+    if (cases.length === 0) {
+      errors.push(`節點 "${n.id}"(多路分流)的「分流選項」是空的——請填要分幾路，一行一個(例如：請假、報支、其他問題)。`);
+      continue;
+    }
+    const legal = new Set([...cases, SWITCH_FALLBACK_PORT, "error"]);
+    for (const e of edges.filter((ed) => ed.from === n.id)) {
+      if (!e.fromPort) {
+        errors.push(
+          `多路分流 "${n.id}" 的出線 ${n.id}→${e.to} 沒有標 fromPort——每條出線都要標走哪一路，` +
+            `合法值：${[...cases, SWITCH_FALLBACK_PORT].map((c) => `"${c}"`).join("、")}。`,
+        );
+      } else if (!legal.has(e.fromPort)) {
+        errors.push(
+          `多路分流 "${n.id}" 的出線標了 fromPort:"${e.fromPort}"，但分流選項裡沒有這一路。` +
+            `合法值：${[...cases, SWITCH_FALLBACK_PORT].map((c) => `"${c}"`).join("、")}(fromPort 要跟選項文字完全一致)。`,
+        );
+      }
+    }
+  }
+
+  // ── 等人簽核：出線要標 approved/rejected(核准走哪條、拒絕走哪條)，且至少要接 approved ──
+  for (const n of nodes) {
+    if (n.type !== "wait-approval") continue;
+    const outs = edges.filter((ed) => ed.from === n.id);
+    for (const e of outs) {
+      if (e.fromPort !== "approved" && e.fromPort !== "rejected" && e.fromPort !== "error") {
+        errors.push(
+          `等人簽核 "${n.id}" 的出線 ${n.id}→${e.to} 的 fromPort 是「${e.fromPort ?? "(沒標)"}」——` +
+            `簽核節點的出線只能標 "approved"(核准走這條) 或 "rejected"(拒絕走這條)。`,
+        );
+      }
+    }
+    if (outs.length > 0 && !outs.some((e) => e.fromPort === "approved")) {
+      errors.push(`等人簽核 "${n.id}" 沒有接 "approved"(核准後要做的事)的出線——簽核通過後流程會什麼都不做就結束。`);
+    }
+  }
+
+  // ── repeat-steps 內不能包等人簽核：迴圈裡的暫停/恢復不支援，會被當成錯誤重試 ──
+  for (const n of nodes) {
+    if (n.type !== "repeat-steps") continue;
+    const stepsRaw = (n.config ?? {}).steps;
+    const stepsStr = typeof stepsRaw === "string" ? stepsRaw : JSON.stringify(stepsRaw ?? "");
+    if (/"type"\s*:\s*"wait-approval"/.test(stepsStr)) {
+      errors.push(`節點 "${n.id}"(重複執行)的內嵌步驟裡有 wait-approval——迴圈裡不能等人簽核。請把簽核節點放在迴圈外面(先簽核再進迴圈，或迴圈整理完資料後再簽核)。`);
+    }
   }
 
   // ── 結構 ──
@@ -210,12 +268,15 @@ export function lintVarRefWarnings(nodes: WorkflowNode[], edges: WorkflowEdge[],
 
   // 每個節點的「可用欄位集合」= 所有(遞迴)上游節點的輸出欄位聯集(引擎會沿鏈自動往下傳)。
   // null = 上游含 custom-code 等靜態列舉不了的來源，放棄檢查。
+  // 失敗分支的下游可以引用 {{error}}/{{errorStep}}(引擎在走 Plan B 時會把錯誤資訊塞進輸出)
+  const errorBranchTargets = new Set(edges.filter((e) => e.fromPort === "error").map((e) => e.to));
   const memo = new Map<string, Set<string> | null>();
   const availableFor = (id: string, seen: Set<string>): Set<string> | null => {
     if (memo.has(id)) return memo.get(id)!;
     if (seen.has(id)) return new Set(); // 有環(另一條 lint 會報)，別無限遞迴
     seen.add(id);
     const acc = new Set<string>();
+    if (errorBranchTargets.has(id)) { acc.add("error"); acc.add("errorStep"); }
     for (const pid of parents.get(id) ?? []) {
       const parent = byId.get(pid);
       if (!parent) continue;

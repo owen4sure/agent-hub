@@ -20,17 +20,33 @@ export function HistoryPanel({
   nodeLabels,
   onClose,
   onPickFailedNode,
+  onResume,
 }: {
   runs: RunRecord[];
   /** node id → 顯示名稱(時間線用；找不到就顯示原 id) */
   nodeLabels: Record<string, string>;
   onClose: () => void;
   onPickFailedNode: (nodeId: string, runId: string) => void;
+  /** 失敗的執行「從失敗那步續跑」(前面成功的步驟沿用上次結果) */
+  onResume: (runId: string) => Promise<string | null>;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [logs, setLogs] = useState<{ id: number; node_id: string | null; ts: string; line: string }[] | null>(null);
   const [nodeRuns, setNodeRuns] = useState<NodeRunRow[] | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [resuming, setResuming] = useState<string | null>(null);
+  const [resumeError, setResumeError] = useState<{ runId: string; msg: string } | null>(null);
+
+  async function handleResume(runId: string) {
+    setResuming(runId);
+    setResumeError(null);
+    try {
+      const err = await onResume(runId);
+      if (err) setResumeError({ runId, msg: err });
+    } finally {
+      setResuming(null);
+    }
+  }
 
   async function toggleLogs(runId: string) {
     if (expanded === runId) { setExpanded(null); return; }
@@ -59,12 +75,13 @@ export function HistoryPanel({
         {runs.map((r) => {
           const failed = r.status === "failed";
           const success = r.status === "success";
+          const waiting = r.status === "waiting";
           return (
             <div key={r.id} className="card p-3 space-y-1.5">
               <div className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full shrink-0" style={{ background: statusColor(r.status) }} />
-                <span className="text-sm font-medium">{success ? "成功" : failed ? "失敗" : r.status === "running" || r.status === "queued" ? "執行中" : r.status}</span>
-                <span className="text-xs faint">{r.trigger_type === "schedule" ? "排程" : r.trigger_type === "watch" ? "資料夾監聽" : r.trigger_type === "webhook" ? "Webhook" : r.trigger_type === "form" ? "表單" : "手動"}</span>
+                <span className="text-sm font-medium">{success ? "成功" : failed ? "失敗" : waiting ? "⏸ 等簽核中" : r.status === "running" || r.status === "queued" ? "執行中" : r.status}</span>
+                <span className="text-xs faint">{r.trigger_type === "schedule" ? "排程" : r.trigger_type === "watch" ? "資料夾監聽" : r.trigger_type === "webhook" ? "Webhook" : r.trigger_type === "form" ? "表單" : r.trigger_type === "error" ? "錯誤觸發" : "手動"}</span>
                 <span className="ml-auto text-xs faint">{formatDate(r.started_at)}</span>
               </div>
               {failed && (
@@ -77,16 +94,29 @@ export function HistoryPanel({
                 </div>
               )}
               {r.reason && <p className="text-xs muted leading-relaxed">{r.reason}</p>}
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 {failed && r.resolution === "ai-fixable" && r.failed_node && (
                   <button onClick={() => onPickFailedNode(r.failed_node!, r.id)} className="btn btn-ghost text-xs mt-1">
                     🔧 去修這一步
+                  </button>
+                )}
+                {failed && r.failed_node && (
+                  <button
+                    onClick={() => handleResume(r.id)}
+                    disabled={resuming === r.id}
+                    className="btn btn-ghost text-xs mt-1"
+                    title="前面成功的步驟沿用上次結果，只從失敗那步接著跑(需要登入狀態的部分會自動一併重跑)"
+                  >
+                    {resuming === r.id ? "續跑中…" : "▶ 從失敗那步續跑"}
                   </button>
                 )}
                 <button onClick={() => toggleLogs(r.id)} className="btn btn-ghost text-xs mt-1">
                   {expanded === r.id ? "收起過程" : "看逐步過程"}
                 </button>
               </div>
+              {resumeError?.runId === r.id && (
+                <p className="text-xs" style={{ color: "var(--red)" }}>{resumeError.msg}</p>
+              )}
               {expanded === r.id && (
                 <>
                   {/* 逐節點時間線：每步花多久一眼看完(比例條以最慢那步為 100%)——慢在哪一步不用去翻日誌 */}

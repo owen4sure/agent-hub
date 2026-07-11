@@ -192,6 +192,22 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
   steps.push({ kind: "run", title: "跑了一輪測試", detail: result.status === "success" ? "整條流程都通過" : "有一步失敗，準備自動處理", runId: result.runId });
 
   const cleanSuccess = () => result.status === "success" && result.varWarnings === 0;
+  // 流程停在「等人簽核」＝設計行為不是失敗：簽核之前的每一步都通過了，自動測試到這裡就是成功——
+  // 絕不能把它當失敗餵給 AI 修(AI 會想把簽核節點「修掉」)。收工時講清楚接下來簽核怎麼測。
+  const waitingResponse = () =>
+    NextResponse.json({
+      ok: true,
+      steps: [
+        ...steps,
+        {
+          kind: "done",
+          title: "測到「等人簽核」為止都通過了",
+          detail: "流程正確地停下來等簽核。到首頁的簽核卡(或通知裡的連結)按核准/拒絕，就能測簽核之後的分支。",
+          runId: result.runId,
+        },
+      ],
+    });
+  if (result.status === "waiting") return waitingResponse();
 
   while (!(cleanSuccess() && semanticOk) && totalFixes < MAX_FIXES) {
     if (remainingMs() <= 0) {
@@ -362,6 +378,11 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
 
     // 重跑驗證(帶剩餘時間預算)
     result = await runWorkflowAndWait(id, triggerParams, { headed, timeoutMs: Math.max(remainingMs(), 10_000) });
+    // 修好上游後這輪跑到了「等人簽核」＝簽核之前全通過，收工(不能把等簽核當失敗繼續修)
+    if (result.status === "waiting") {
+      for (const e of edits) verifiedFixes.set(e.nodeId, e.after); // 這批修改被驗證有效(跑到簽核了)，不能回滾
+      return waitingResponse();
+    }
 
     // 迴圈記憶：這輪改了什麼、結果如何——下一輪修復的 prompt 會帶上
     const outcomeDesc = cleanSuccess()

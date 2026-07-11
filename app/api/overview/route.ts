@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { listWorkflows } from "@/lib/workflow/store";
+import { listPendingApprovals } from "@/lib/approvals";
 
 export async function GET() {
   const db = getDb();
@@ -36,5 +37,7 @@ export async function GET() {
     todayCounts: Object.fromEntries(todayCounts.map((r) => [r.status, r.count])),
     running: running.map((r) => ({ ...r, name: nameById[r.workflow_id] ?? r.workflow_id })),
     recentScheduleFailures: recentScheduleFailures.map((r) => ({ ...r, name: nameById[r.workflow_id] ?? r.workflow_id })),
+    // 等待簽核的請求：首頁要有醒目的簽核卡(桌面通知/Telegram 可能被錯過，開網頁一定看得到)
+    pendingApprovals: listPendingApprovals(),
   });
 }

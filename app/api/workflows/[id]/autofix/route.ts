@@ -202,6 +202,13 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
       return NextResponse.json({ ok: false, cancelled: true, attempts: attempt, log });
     }
 
+    // 修好之後重跑到了「等人簽核」＝簽核之前全通過(等簽核是設計行為不是失敗)——收工，改動保留
+    if (result.status === "waiting") {
+      for (const e of edits) verifiedFixes.set(e.nodeId, e.after);
+      log.push({ attempt, action: "重跑驗證", result: "✅ 修好了——流程一路跑到「等人簽核」正確地停下來等人決定。到首頁簽核卡按核准/拒絕就會繼續。" });
+      return NextResponse.json({ ok: true, attempts: attempt, log, runId: result.runId });
+    }
+
     // 迴圈記憶
     if (edits.length > 0) {
       attemptHistory.push({

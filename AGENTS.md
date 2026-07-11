@@ -79,6 +79,6 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 # 觸發架構鐵則（2026-07 加入監聽/Webhook 時定下）
 
-21. **觸發來源只有四種**：`TriggerSource = "manual" | "schedule" | "watch" | "webhook"`(engine.ts)。**非 manual 的一律是無人值守**——成功/失敗都要走 `notifyDesktop`(桌面通知是使用者唯一的回報管道)，新增觸發方式時判斷式寫 `trigger !== "manual"`，不要逐一列舉(會漏)。HistoryPanel 的觸發標籤也要同步補中文。
+21. **觸發來源以 engine.ts 的 `TriggerSource` 為唯一真相**(目前是 manual/schedule/watch/webhook/form/error——別相信任何寫死的「只有N種」說法，以型別定義為準)。**非 manual 的一律是無人值守**——成功/失敗都要走 `notifyDesktop`(桌面通知是使用者唯一的回報管道)，新增觸發方式時判斷式寫 `trigger !== "manual"`，不要逐一列舉(會漏)。HistoryPanel 的觸發標籤也要同步補中文。
 22. **資料夾監聽(lib/watchers.ts)的初始化語意**：「首次啟用不觸發既有檔案」的判斷靠**路徑綁定哨兵** `#seeded#:<watchPath>`，不能用「這條流程有沒有任何 seen 記錄」——空資料夾第一輪掃不到東西=不會留任何記錄，之後丟進來的第一個檔案就被誤吞(踩過；「先建空收件匣再啟用」正是最常見用法)。哨兵同時讓「換監聽路徑」重新靜默登記一次，不會把新資料夾的歷史檔案補跑一輪。30 天清理**必須排除哨兵**(`NOT LIKE '#seeded#:%'`；別用底線開頭當哨兵字首，`_` 在 LIKE 是萬用字元)。多進程去重靠 watch_seen 的 PRIMARY KEY 搶佔(INSERT OR IGNORE 的 changes)。只監聽「正式」流程；觸發帶 `{{filePath}}`/`{{fileName}}` 給下游。
 23. **Webhook 的認證就是網址裡的 token**(lib/webhookStore.ts + app/api/hooks/[id]/[token]/route.ts)：常數時間比對；token 錯/流程不存在/沒啟用一律回同一句 404(不可探測)；proxy.ts 對「無 Origin 的請求」(curl/腳本/捷徑)本來就放行，所以 hooks 路由**不需要也不准加任何 proxy 豁免**。POST 的 JSON 欄位直接併進觸發參數變 `{{欄位}}`；非物件包進 `payload`。改觸發設定走 `/api/workflows/[id]/trigger-config`(重讀最新版→只改 watchPath/watchPattern→saveWorkflow，鐵則 2)。

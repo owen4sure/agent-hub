@@ -43,6 +43,8 @@ export interface Workflow {
   defaultModel: string;
   requiresSecrets?: { key: string; label: string; type: "text" | "password" }[];
   triggerParams?: ParamField[];
+  /** 這條流程失敗時要自動執行的備援流程(名稱或 id)。匯入時會被清空(不能讓外來檔案指揮本機流程)。 */
+  onFailureWorkflow?: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
 }
@@ -116,3 +118,14 @@ export interface NodeDefinition {
 export class PermanentError extends Error {}
 /** 暫時性錯誤(網路/timeout) → 可重試 */
 export class RetryableError extends Error {}
+/** 等人簽核節點拋出：不是失敗，是「流程暫停等真人決定」。引擎收到會把 run 標成 waiting，
+ * 簽核人按核准/拒絕後由 approvals 模組用續跑機制讓流程從簽核節點接著跑。 */
+export class WaitingForHuman extends Error {
+  approvalId: string;
+  approvalMessage: string;
+  constructor(approvalId: string, approvalMessage: string) {
+    super(`等待簽核中：${approvalMessage.slice(0, 80)}`);
+    this.approvalId = approvalId;
+    this.approvalMessage = approvalMessage;
+  }
+}

@@ -109,6 +109,8 @@ export async function POST(req: Request) {
     defaultModel: typeof body.defaultModel === "string" && body.defaultModel ? body.defaultModel : DEFAULT_MODEL,
     requiresSecrets: requiresSecrets as Workflow["requiresSecrets"],
     triggerParams: triggerParams as ParamField[],
+    // onFailureWorkflow 刻意不從匯入檔帶入：外來檔案不能指定「失敗時自動執行本機的哪條流程」
+    // (惡意檔案可以故意放一個必炸節點，串起本機任意流程)。要用的話匯入後自己到觸發面板設定。
     nodes,
     edges: edges as WorkflowEdge[],
   };

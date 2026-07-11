@@ -16,6 +16,7 @@ export function SchedulePanel({ workflowId, onClose }: { workflowId: string; onC
         <ScheduleSection workflowId={workflowId} />
         <WatchSection workflowId={workflowId} />
         <WebhookSection workflowId={workflowId} />
+        <OnFailureSection workflowId={workflowId} />
       </div>
     </div>
   );
@@ -331,6 +332,78 @@ function WebhookSection({ workflowId }: { workflowId: string }) {
         </div>
       )}
       {error && <p className="text-xs mt-2" style={{ color: "var(--red)" }}>{error}</p>}
+    </section>
+  );
+}
+
+/* ---------- ④ 失敗備援：這條流程失敗時自動執行另一條流程 ---------- */
+
+function OnFailureSection({ workflowId }: { workflowId: string }) {
+  const [current, setCurrent] = useState<string>("");
+  const [options, setOptions] = useState<{ id: string; name: string }[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [wfRes, listRes] = await Promise.all([
+          fetch(`/api/workflows/${workflowId}`),
+          fetch(`/api/workflows`),
+        ]);
+        const wfData = await wfRes.json();
+        const listData = await listRes.json();
+        setCurrent(wfData.workflow?.onFailureWorkflow ?? "");
+        setOptions(
+          ((listData.workflows ?? []) as { id: string; name: string }[]).filter((w) => w.id !== workflowId),
+        );
+      } catch { /* 載入失敗下面存檔時會再報錯 */ }
+    })();
+  }, [workflowId]);
+
+  async function save(value: string) {
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      const res = await fetch(`/api/workflows/${workflowId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ onFailureWorkflow: value }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? "儲存失敗");
+      setCurrent(value);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1800);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "儲存失敗");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section>
+      <SectionTitle icon="🆘" title="失敗時自動執行" badge={<StateBadge on={Boolean(current)} onText="已設定" offText="未設定" />} />
+      <p className="text-xs muted leading-relaxed mb-2">
+        這條流程執行失敗時，自動執行選定的備援流程(例如「發告警通知」或「改走備用來源」)。
+        備援流程可以用 {"{{failedWorkflow}}"}/{"{{failedStep}}"}/{"{{error}}"} 拿到失敗現場資訊。
+      </p>
+      <select
+        className="input w-full text-sm"
+        value={current}
+        disabled={saving}
+        onChange={(e) => save(e.target.value)}
+        aria-label="失敗時自動執行的流程"
+      >
+        <option value="">不自動執行(只發通知)</option>
+        {options.map((w) => (
+          <option key={w.id} value={w.id}>{w.name}</option>
+        ))}
+      </select>
+      {saved && <p className="text-xs mt-1.5" style={{ color: "var(--green)" }}>✓ 已儲存</p>}
+      {error && <p className="text-xs mt-1.5" style={{ color: "var(--red)" }}>{error}</p>}
     </section>
   );
 }

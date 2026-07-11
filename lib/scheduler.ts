@@ -3,6 +3,7 @@ import { getDb } from "./db";
 import { startWorkflowRun } from "./workflow/engine";
 import { getWorkflow } from "./workflow/store";
 import { resolveParams } from "./relativeDate";
+import { sweepExpiredApprovals } from "./approvals";
 
 export interface ScheduleRow {
   id: string;
@@ -185,6 +186,12 @@ let tickTimer: ReturnType<typeof setInterval> | null = null;
 function tick() {
   const db = getDb();
   const now = new Date();
+  // 簽核逾時掃描搭排程的每分鐘心跳一起做：過期的等簽核 run 要老實收尾+通知，不能無聲掛著
+  try {
+    sweepExpiredApprovals();
+  } catch (err) {
+    console.error("[scheduler] 簽核逾時掃描失敗:", err);
+  }
   const dt = taipeiParts(now);
   const minuteKey = `${dt.year}-${pad(dt.month)}-${pad(dt.day)}T${pad(dt.hour)}:${pad(dt.minute)}`;
   const nowStr = `${dt.year}-${pad(dt.month)}-${pad(dt.day)} ${pad(dt.hour)}:${pad(dt.minute)}`;

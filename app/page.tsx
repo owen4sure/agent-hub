@@ -21,6 +21,7 @@ interface Overview {
   todayCounts: Record<string, number>;
   running: { id: string; workflow_id: string; name: string }[];
   recentScheduleFailures: { id: string; workflow_id: string; name: string; reason: string | null; started_at: string }[];
+  pendingApprovals?: { id: string; workflow_id: string; workflow_name: string; message: string; token: string; created_at: string; expires_at: string }[];
 }
 interface FixProposal {
   id: string;
@@ -86,6 +87,31 @@ export default function HomePage() {
     setProposals((ps) => ps.filter((p) => p.id !== id));
   }
 
+  const [deciding, setDeciding] = useState<Record<string, boolean>>({});
+  const [decideError, setDecideError] = useState<Record<string, string>>({});
+  // 首頁簽核卡直接按核准/拒絕(要填備註就開「詳情」的簽核頁)
+  async function decideApprovalCard(id: string, action: "approve" | "reject") {
+    setDeciding((d) => ({ ...d, [id]: true }));
+    setDecideError((e) => ({ ...e, [id]: "" }));
+    try {
+      const res = await fetch(`/api/approvals/${id}/decide`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setDecideError((e) => ({ ...e, [id]: (data as { error?: string }).error ?? "簽核失敗，請再試一次" }));
+        return;
+      }
+      load(); // 卡片消失+執行中區塊會出現這條流程
+    } catch {
+      setDecideError((e) => ({ ...e, [id]: "連不上伺服器，請再試一次" }));
+    } finally {
+      setDeciding((d) => ({ ...d, [id]: false }));
+    }
+  }
+
   function dismissFailure(runId: string) {
     const next = [...dismissedFailures, runId];
     setDismissedFailures(next);
@@ -138,6 +164,29 @@ export default function HomePage() {
           <StatCard label="草稿" value={overview.draftCount} icon="✎" />
           <StatCard label="今日成功" value={overview.todayCounts.success ?? 0} tone="green" icon="✓" />
           <StatCard label="今日失敗" value={overview.todayCounts.failed ?? 0} tone={overview.todayCounts.failed ? "red" : undefined} icon={overview.todayCounts.failed ? "✕" : "—"} />
+        </div>
+      )}
+
+      {(overview?.pendingApprovals?.length ?? 0) > 0 && (
+        <div className="card px-4 py-3 mb-6 space-y-3" style={{ borderColor: "var(--amber)" }}>
+          <div className="text-sm font-medium" style={{ color: "var(--amber)" }}>🙋 有流程停下來等你簽核</div>
+          {overview!.pendingApprovals!.map((a) => (
+            <div key={a.id} className="space-y-1.5">
+              <div className="flex items-start gap-2 text-sm">
+                <div className="min-w-0 flex-1">
+                  <Link href={`/workflows/${a.workflow_id}`} className="font-medium hover:underline">{a.workflow_name}</Link>
+                  <span className="faint"> · {formatDate(a.created_at)}</span>
+                  <p className="text-xs muted mt-0.5 whitespace-pre-wrap line-clamp-3">{a.message}</p>
+                </div>
+                <button onClick={() => decideApprovalCard(a.id, "approve")} disabled={deciding[a.id]} className="btn btn-primary text-xs shrink-0">
+                  {deciding[a.id] ? "處理中…" : "✅ 核准"}
+                </button>
+                <button onClick={() => decideApprovalCard(a.id, "reject")} disabled={deciding[a.id]} className="btn btn-ghost text-xs shrink-0">❌ 拒絕</button>
+                <a href={`/approve/${a.token}`} target="_blank" rel="noreferrer" className="text-xs faint hover:text-[var(--text)] shrink-0 mt-1" title="開簽核頁(可填備註)">詳情</a>
+              </div>
+              {decideError[a.id] && <p className="text-xs" style={{ color: "var(--red)" }}>{decideError[a.id]}</p>}
+            </div>
+          ))}
         </div>
       )}
 

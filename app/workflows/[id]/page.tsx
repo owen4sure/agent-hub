@@ -355,9 +355,15 @@ export default function WorkflowPage() {
         id: `e${i}`,
         source: e.from,
         target: e.to,
-        label: e.fromPort,
+        // 分支線標籤說人話：error=出錯時走這條(紅虛線)、approved/rejected=簽核結果、其他 port 原樣顯示
+        label: e.fromPort === "error" ? "🆘 出錯時" : e.fromPort === "approved" ? "✅ 核准" : e.fromPort === "rejected" ? "❌ 拒絕" : e.fromPort,
         animated: nodeRuns[e.from]?.status === "running",
-        style: { stroke: "var(--edge)", strokeWidth: 1.75 },
+        style:
+          e.fromPort === "error"
+            ? { stroke: "#dc2626", strokeWidth: 1.75, strokeDasharray: "6 4", opacity: 0.8 }
+            : e.fromPort === "approved"
+              ? { stroke: "#16a34a", strokeWidth: 1.75 }
+              : { stroke: "var(--edge)", strokeWidth: 1.75 },
       })),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1033,6 +1039,21 @@ export default function WorkflowPage() {
             nodeLabels={Object.fromEntries(wf.nodes.map((n) => [n.id, n.label]))}
             onClose={() => setShowHistory(false)}
             onPickFailedNode={(nodeId, runId) => { setShowHistory(false); loadHistoricalRunNode(runId); setSelectedNode(nodeId); }}
+            onResume={async (runId) => {
+              // 從失敗那步續跑：成功回 null 並讓畫布開始追蹤這次執行；失敗回錯誤訊息給紀錄卡顯示
+              try {
+                const res = await fetch(`/api/runs/${runId}/resume`, { method: "POST" });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) return (data as { error?: string }).error ?? "續跑失敗";
+                setNodeRuns({});
+                setActiveRunId(runId);
+                setShowHistory(false);
+                flashToast("▶ 從失敗那步續跑中(前面的步驟沿用上次結果)");
+                return null;
+              } catch {
+                return "連不上伺服器，請再試一次";
+              }
+            }}
           />
         ) : showSchedule ? (
           <SchedulePanel workflowId={id} onClose={() => setShowSchedule(false)} />

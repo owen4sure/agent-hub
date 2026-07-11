@@ -60,6 +60,11 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const triggerParams = resolveParams(wf.triggerParams ?? [], {}, new Date());
   const result = await runWorkflowAndWait(proposal.workflow_id, triggerParams, { headed: false });
 
+  // 套用後重跑一路跑到「等人簽核」＝修好了(等簽核是設計行為不是失敗)，交還使用者去簽核
+  if (result.status === "waiting") {
+    return NextResponse.json({ ok: true, runId: result.runId, suspicion: undefined, waiting: "流程跑到「等人簽核」正確地停下來了——到首頁簽核卡按核准/拒絕就會繼續。" });
+  }
+
   if (result.status === "success" && result.varWarnings === 0) {
     // 跟 autorun/autofix 同一套防污染標準：結構層(varWarnings)乾淨還不夠，全綠後再過一次語意驗收——
     // 這裡以前只看 status==='success' 就記學習庫，是三個記錄入口裡把關最鬆的一個，

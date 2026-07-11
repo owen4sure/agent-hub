@@ -85,10 +85,17 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   const changesManifest =
     body.name !== undefined || body.longDescription !== undefined || body.status !== undefined ||
     body.nodes !== undefined || body.edges !== undefined || body.requiresSecrets !== undefined ||
-    body.triggerParams !== undefined;
+    body.triggerParams !== undefined || body.onFailureWorkflow !== undefined;
   if (changesManifest) {
     // 以「當下最新版」為底(不是函式開頭那份)——避免用過期快照把上面部分更新或其他人剛存的改動蓋掉
     const cur = getWorkflow(id) ?? wf;
+    // onFailureWorkflow：空字串=清掉設定(存成 undefined)，undefined=不改——跟 builderPrefs 同一套語意
+    const onFailure =
+      body.onFailureWorkflow === undefined
+        ? cur.onFailureWorkflow
+        : typeof body.onFailureWorkflow === "string" && body.onFailureWorkflow.trim()
+          ? body.onFailureWorkflow.trim().slice(0, 120)
+          : undefined;
     saveWorkflow({
       ...cur,
       name: body.name ?? cur.name,
@@ -98,6 +105,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
       edges: body.edges ?? cur.edges,
       requiresSecrets: body.requiresSecrets ?? cur.requiresSecrets,
       triggerParams: body.triggerParams ?? cur.triggerParams,
+      onFailureWorkflow: onFailure,
     });
   }
   return NextResponse.json({ ok: true });

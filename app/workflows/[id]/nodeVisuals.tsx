@@ -10,6 +10,7 @@ export const ICONS: Record<string, string> = {
   "telegram-notify": "✈️", "line-notify": "💬",
   "write-file": "💾", "read-file": "📂", "web-page": "🕸️", "desktop-notify": "🔔", "send-email": "✉️",
   "slack-notify": "📣", "google-sheet-read": "📗", "google-sheet-append": "📘", "read-image": "🖼️", wait: "⏳", "run-workflow": "🧩", "rss-read": "📰",
+  switch: "🧭", "wait-approval": "✋",
 };
 
 /** 節點型別 → 類別色 token + 白話型別名(卡片副標)。新增節點型別記得補一行，沒補會退回 custom 灰。 */
@@ -42,6 +43,8 @@ const TYPE_META: Record<string, { cat: string; label: string }> = {
   wait: { cat: "logic", label: "等待" },
   "run-workflow": { cat: "logic", label: "執行子流程" },
   "rss-read": { cat: "integration", label: "讀 RSS" },
+  switch: { cat: "logic", label: "多路分流" },
+  "wait-approval": { cat: "logic", label: "等人簽核" },
 };
 
 export function catColor(type: string): string {
@@ -49,10 +52,10 @@ export function catColor(type: string): string {
 }
 
 export function statusColor(s?: string) {
-  return s === "success" ? "#16a34a" : s === "failed" ? "#dc2626" : s === "running" || s === "queued" ? "#d97706" : s === "skipped" ? "#94a3b8" : "var(--border-strong)";
+  return s === "success" ? "#16a34a" : s === "failed" ? "#dc2626" : s === "running" || s === "queued" || s === "waiting" ? "#d97706" : s === "skipped" ? "#94a3b8" : "var(--border-strong)";
 }
 
-const STATUS_TEXT: Record<string, string> = { success: "完成", failed: "失敗", running: "執行中", queued: "排隊中", skipped: "略過" };
+const STATUS_TEXT: Record<string, string> = { success: "完成", failed: "失敗", running: "執行中", queued: "排隊中", skipped: "略過", waiting: "等簽核" };
 
 export function WFNodeCard({ data, selected }: NodeProps) {
   const d = data as {

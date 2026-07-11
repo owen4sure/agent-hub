@@ -17,6 +17,8 @@ import { readImageNode } from "./nodes/readImage";
 import { waitNode } from "./nodes/wait";
 import { subWorkflowNode } from "./nodes/subWorkflow";
 import { rssReadNode } from "./nodes/rssRead";
+import { switchNode } from "./nodes/switchCase";
+import { waitApprovalNode } from "./nodes/waitApproval";
 import { customCodeNode } from "./nodes/customCode";
 import { telegramNotifyNode, lineNotifyNode, slackNotifyNode } from "./nodes/notify";
 import { googleSheetReadNode, googleSheetAppendNode } from "./nodes/googleSheet";
@@ -44,7 +46,9 @@ const ALL: NodeDefinition[] = [
   templateTextNode,
   setVariableNode,
   ifConditionNode,
+  switchNode,
   waitNode,
+  waitApprovalNode,
   llmDecideNode,
   readImageNode,
   customCodeNode,

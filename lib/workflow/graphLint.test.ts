@@ -143,3 +143,50 @@ test("lintGraph：{{節點id.欄位}} 引用 → 錯誤;period/item 前綴不受
   assert.ok(errs.some((e) => e.includes("{{parse.result}}") && e.includes("{{result}}")), JSON.stringify(errs));
   assert.ok(!errs.some((e) => e.includes("period") || e.includes("item")), "period/item 前綴不能被誤殺");
 });
+
+/* ---------- 多路分流(switch)/等人簽核/失敗分支的連線規則 ---------- */
+
+test("lintGraph：switch 的出線沒標 fromPort 要報錯並列出合法值", () => {
+  const nodes = [node("n1", "trigger"), node("sw", "switch", { value: "{{category}}", cases: "請假\n報支" }), node("a", "custom-code", { intent: "x" })];
+  const errors = lintGraph(nodes, [{ from: "n1", to: "sw" }, { from: "sw", to: "a" }]);
+  assert.ok(errors.some((e) => e.includes("沒有標 fromPort") && e.includes("請假") && e.includes("其他")));
+});
+
+test("lintGraph：switch 的出線標了不在選項裡的 fromPort 要報錯", () => {
+  const nodes = [node("n1", "trigger"), node("sw", "switch", { value: "{{category}}", cases: "請假,報支" }), node("a", "custom-code", { intent: "x" })];
+  const errors = lintGraph(nodes, [{ from: "n1", to: "sw" }, { from: "sw", to: "a", fromPort: "加班" }]);
+  assert.ok(errors.some((e) => e.includes("加班") && e.includes("沒有這一路")));
+});
+
+test("lintGraph：switch 出線標對選項(含「其他」)就通過；cases 空要報錯", () => {
+  const nodes = [node("n1", "trigger"), node("sw", "switch", { value: "{{c}}", cases: "請假,報支" }), node("a", "custom-code", { intent: "x" }), node("b", "custom-code", { intent: "y" })];
+  const ok = lintGraph(nodes, [{ from: "n1", to: "sw" }, { from: "sw", to: "a", fromPort: "請假" }, { from: "sw", to: "b", fromPort: "其他" }]);
+  assert.deepEqual(ok, []);
+  const empty = lintGraph([node("n1", "trigger"), node("sw", "switch", { value: "x", cases: "" })], [{ from: "n1", to: "sw" }]);
+  assert.ok(empty.some((e) => e.includes("分流選項") && e.includes("空")));
+});
+
+test("lintGraph：wait-approval 出線的 fromPort 只能是 approved/rejected，且至少要接 approved", () => {
+  const nodes = [node("n1", "trigger"), node("ap", "wait-approval", { message: "准嗎" }), node("a", "custom-code", { intent: "x" })];
+  const wrongPort = lintGraph(nodes, [{ from: "n1", to: "ap" }, { from: "ap", to: "a", fromPort: "true" }]);
+  assert.ok(wrongPort.some((e) => e.includes("approved") && e.includes("rejected")));
+  const noApproved = lintGraph(nodes, [{ from: "n1", to: "ap" }, { from: "ap", to: "a", fromPort: "rejected" }]);
+  assert.ok(noApproved.some((e) => e.includes("沒有接") && e.includes("approved")));
+  const ok = lintGraph(nodes, [{ from: "n1", to: "ap" }, { from: "ap", to: "a", fromPort: "approved" }]);
+  assert.deepEqual(ok, []);
+});
+
+test("lintGraph：從 trigger 拉 fromPort=error 的失敗分支要報錯；從一般節點拉合法", () => {
+  const nodes = [node("n1", "trigger"), node("w", "web-page", { url: "https://example.com" }), node("alert", "desktop-notify", {})];
+  const fromTrigger = lintGraph(nodes, [{ from: "n1", to: "w" }, { from: "n1", to: "alert", fromPort: "error" }]);
+  assert.ok(fromTrigger.some((e) => e.includes("觸發節點不會失敗")));
+  const ok = lintGraph(nodes, [{ from: "n1", to: "w" }, { from: "w", to: "alert", fromPort: "error" }]);
+  assert.deepEqual(ok, []);
+});
+
+test("lintGraph：repeat-steps 的內嵌步驟裡放 wait-approval 要報錯", () => {
+  const steps = JSON.stringify([{ type: "wait-approval", config: { message: "准嗎" } }]);
+  const nodes = [node("n1", "trigger"), node("rp", "repeat-steps", { items: "{{list}}", steps })];
+  const errors = lintGraph(nodes, [{ from: "n1", to: "rp" }]);
+  assert.ok(errors.some((e) => e.includes("迴圈") && e.includes("簽核")));
+});

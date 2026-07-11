@@ -37,7 +37,31 @@ async function postJson(url: string, headers: Record<string, string>, body: unkn
 
 /** 送一則 Telegram 訊息(給節點與設定頁的「測試發送」共用，行為一致) */
 export async function sendTelegram(botToken: string, chatId: string, text: string, signal?: AbortSignal): Promise<void> {
-  const r = await postJson(`https://api.telegram.org/bot${botToken}/sendMessage`, {}, { chat_id: chatId, text }, signal);
+  await sendTelegramRaw(botToken, { chat_id: chatId, text }, signal);
+}
+
+/** 送一則帶「✅核准/❌拒絕」內建按鈕的 Telegram 訊息(等人簽核用——簽核人在手機上直接按按鈕就完成) */
+export async function sendTelegramApproval(
+  botToken: string,
+  chatId: string,
+  text: string,
+  approveData: string,
+  rejectData: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  await sendTelegramRaw(
+    botToken,
+    {
+      chat_id: chatId,
+      text,
+      reply_markup: { inline_keyboard: [[{ text: "✅ 核准", callback_data: approveData }, { text: "❌ 拒絕", callback_data: rejectData }]] },
+    },
+    signal,
+  );
+}
+
+async function sendTelegramRaw(botToken: string, body: unknown, signal?: AbortSignal): Promise<void> {
+  const r = await postJson(`https://api.telegram.org/bot${botToken}/sendMessage`, {}, body, signal);
   if (r.status === 401) throw new PermanentError("Telegram Bot Token 不正確(API 回 401)——請到設定頁重新貼上 BotFather 給你的 token");
   if (r.status === 400 && /chat not found/i.test(r.text)) {
     throw new PermanentError("Telegram Chat ID 不正確(找不到聊天)——請先在 Telegram 跟你的 bot 說一句話，再到設定頁按「自動偵測」重抓 Chat ID");

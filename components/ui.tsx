@@ -48,8 +48,8 @@ export function EmptyState({ icon, title, hint, action }: { icon: string; title:
 
 export function StatusDot({ status, size = 8 }: { status: string; size?: number }) {
   const color =
-    status === "success" ? "var(--green)" : status === "failed" ? "var(--red)" : status === "running" || status === "queued" ? "var(--amber)" : "var(--border-strong)";
-  const pulse = status === "running" || status === "queued";
+    status === "success" ? "var(--green)" : status === "failed" ? "var(--red)" : status === "running" || status === "queued" || status === "waiting" ? "var(--amber)" : "var(--border-strong)";
+  const pulse = status === "running" || status === "queued" || status === "waiting";
   return (
     <span
       className={`inline-block rounded-full ${pulse ? "animate-pulse" : ""}`}
@@ -59,7 +59,7 @@ export function StatusDot({ status, size = 8 }: { status: string; size?: number 
 }
 
 export function statusLabel(status: string): string {
-  return { success: "成功", failed: "失敗", running: "執行中", queued: "排隊中", pending: "待執行", skipped: "略過" }[status] ?? status;
+  return { success: "成功", failed: "失敗", running: "執行中", queued: "排隊中", pending: "待執行", skipped: "略過", waiting: "⏸ 等簽核" }[status] ?? status;
 }
 
 /** 統一的日期顯示：把 SQLite 的 "YYYY-MM-DD HH:mm:ss"(UTC) 顯示成好讀的本地時間 */

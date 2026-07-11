@@ -152,6 +152,24 @@ function init(): Database.Database {
       seen_at TEXT NOT NULL,
       PRIMARY KEY (workflow_id, file_key)
     );
+
+    -- 等人簽核：流程跑到簽核節點會暫停(run 標 waiting)並建一筆 pending 簽核，
+    -- 簽核人透過 /approve/<token> 網頁或 Telegram 內建按鈕決定，決定後流程從簽核節點續跑。
+    -- token 是簽核連結的認證(跟 webhook token 同一套思路：拿到連結=有權簽核)。
+    CREATE TABLE IF NOT EXISTS approvals (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      workflow_id TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      token TEXT NOT NULL UNIQUE,
+      message TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      decision_note TEXT,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      decided_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status, expires_at);
   `);
 
   // 無痛升級：schema 有變動時對既有 DB 補欄位，永遠不需要刪 DB(才不會弄丟已存的帳密/設定)。
@@ -168,6 +186,8 @@ function init(): Database.Database {
   addColumnIfMissing(db, "runs", "trigger_params_json", "trigger_params_json TEXT");
   addColumnIfMissing(db, "runs", "owner_pid", "owner_pid INTEGER");
   addColumnIfMissing(db, "node_runs", "attempt", "attempt INTEGER NOT NULL DEFAULT 1");
+  // 分支節點(if/switch)這次選了哪個出口——「從失敗那步續跑」要重放上次的分支選擇，下游跳過邏輯才會一致
+  addColumnIfMissing(db, "node_runs", "active_ports", "active_ports TEXT");
   addColumnIfMissing(db, "schedules", "last_fired_minute", "last_fired_minute TEXT");
   addColumnIfMissing(db, "schedules", "next_run_at", "next_run_at TEXT");
   addColumnIfMissing(db, "schedules", "params_json", "params_json TEXT");
