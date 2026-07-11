@@ -253,6 +253,14 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
       };
     }
 
+    case "read-image": {
+      const src = hstr("source", "上游的圖片");
+      return {
+        text: `把圖片(${src})交給 AI 看,依指示回答(讀出文字/描述內容/抽欄位),結果給後面的步驟用。`,
+        settings: [["圖片來源", src]],
+      };
+    }
+
     case "slack-notify": {
       return {
         text: "把訊息發到 Slack 頻道。Webhook 網址要先在設定頁「通知串接」填好(有測試發送)。",

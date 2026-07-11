@@ -13,6 +13,7 @@ import {
   ifConditionNode,
   llmDecideNode,
 } from "./nodes/general";
+import { readImageNode } from "./nodes/readImage";
 import { customCodeNode } from "./nodes/customCode";
 import { telegramNotifyNode, lineNotifyNode, slackNotifyNode } from "./nodes/notify";
 import { googleSheetReadNode, googleSheetAppendNode } from "./nodes/googleSheet";
@@ -40,6 +41,7 @@ const ALL: NodeDefinition[] = [
   setVariableNode,
   ifConditionNode,
   llmDecideNode,
+  readImageNode,
   customCodeNode,
   repeatStepsNode,
   telegramNotifyNode,

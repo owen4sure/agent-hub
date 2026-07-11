@@ -9,7 +9,7 @@ export const ICONS: Record<string, string> = {
   "if-condition": "🔀", "llm-decide": "🧠", "custom-code": "⚙️", "repeat-steps": "🔁",
   "telegram-notify": "✈️", "line-notify": "💬",
   "write-file": "💾", "read-file": "📂", "web-page": "🕸️", "desktop-notify": "🔔", "send-email": "✉️",
-  "slack-notify": "📣", "google-sheet-read": "📗", "google-sheet-append": "📘",
+  "slack-notify": "📣", "google-sheet-read": "📗", "google-sheet-append": "📘", "read-image": "🖼️",
 };
 
 /** 節點型別 → 類別色 token + 白話型別名(卡片副標)。新增節點型別記得補一行，沒補會退回 custom 灰。 */
@@ -38,6 +38,7 @@ const TYPE_META: Record<string, { cat: string; label: string }> = {
   "slack-notify": { cat: "integration", label: "Slack 通知" },
   "google-sheet-read": { cat: "integration", label: "讀 Google 試算表" },
   "google-sheet-append": { cat: "integration", label: "寫入 Google 試算表" },
+  "read-image": { cat: "ai", label: "AI 看圖片" },
 };
 
 export function catColor(type: string): string {
