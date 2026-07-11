@@ -12,6 +12,7 @@ import { autoLayout } from "./layout";
 import { callAIWithRetry } from "../aiRetry";
 import { extractJsonObject, stripCodeFences } from "../jsonExtract";
 import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../claudeCodeClient";
+import { communityRefsSection } from "../communityIndex";
 import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
 
 export type MessagePart =
@@ -426,8 +427,13 @@ export async function buildWorkflow(
     assistantTurns >= 3 && nothingBuiltYet
       ? `\n\n【重要】你已經反問使用者 ${assistantTurns} 輪了。這一輪請直接輸出流程圖(phase:"ready")：還不確定的細節用合理預設值，並在 message 裡條列你做的假設請使用者確認。只有「缺了就完全無法動工」的資訊(例如要登入哪個網站)才允許再問。`
       : "";
+  // 社群藍圖檢索:用最新一則使用者需求對 community/index.json(n8n 社群庫 2000+ 條的 metadata)
+  // 做關鍵字檢索,把最相近的幾條當「同型流程參考」注入——使用者問到任何常見自動化,
+  // 模型手上都有真實世界的結構藍圖可對照,不用憑空想步驟拆法。索引缺檔時回空字串,功能靜默停用。
+  const lastUserText = (lastUserMsg?.parts ?? []).map((p) => (p.kind === "text" ? p.text : "")).join("\n");
+  const communityRefs = communityRefsSection(lastUserText);
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: "system", content: systemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph) + clarifyCapNote },
+    { role: "system", content: systemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph) + communityRefs + clarifyCapNote },
   ];
   for (const m of history) {
     const parts = m.parts ?? [];
