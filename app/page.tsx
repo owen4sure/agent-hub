@@ -156,7 +156,15 @@ export default function HomePage() {
   const [newGroupName, setNewGroupName] = useState("");
   useEffect(() => {
     if (!groupMenuFor) return;
-    const close = () => setGroupMenuFor(null);
+    // 點選單「外面」才關。不能靠選單內 stopPropagation 擋——Next App Router 的 React 根就是
+    // document,這個監聽器跟 React 的事件代理掛在同一個節點,stopPropagation 攔不住同節點的
+    // 兄弟監聽器(踩過的真實 bug:點到「新群組名稱」輸入框選單就關掉,名字永遠打不進去)。
+    // 改用檢查點擊落點:落在選單內/🗂 按鈕上一律不關。
+    const close = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.closest(".menu") || t.closest("button[aria-label='移到群組']"))) return;
+      setGroupMenuFor(null);
+    };
     document.addEventListener("click", close);
     return () => document.removeEventListener("click", close);
   }, [groupMenuFor]);
