@@ -43,7 +43,7 @@ export default function TemplatesPage() {
     return cats.map((c) => ({ title: c, items: visible.filter((t) => t.category === c) })).filter((s) => s.items.length > 0);
   }, [templates, search]);
 
-  async function useTemplate(id: string) {
+  async function applyTemplate(id: string) {
     if (using) return;
     setUsing(id);
     setUseError(null);
@@ -95,7 +95,7 @@ export default function TemplatesPage() {
                     </span>
                   ))}
                 </div>
-                <button onClick={() => useTemplate(t.id)} disabled={using !== null} className="btn btn-primary w-full justify-center mt-4">
+                <button onClick={() => applyTemplate(t.id)} disabled={using !== null} className="btn btn-primary w-full justify-center mt-4">
                   {using === t.id ? "建立中…" : "使用這個範本"}
                 </button>
               </div>
