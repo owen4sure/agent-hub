@@ -1,0 +1,92 @@
+{
+  "id": "github-issues-watch",
+  "category": "監控告警",
+  "icon": "🐙",
+  "name": "盯一個開源專案的新 issue",
+  "description": "排程打 GitHub 公開 API 抓某個專案的 issue 清單 → 跟上次快照比對 → 有新的就摘要通知。(改編自 n8n 社群範本庫)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "api",
+      "type": "http-request",
+      "label": "抓 issue 清單",
+      "config": {
+        "method": "GET",
+        "url": "https://api.github.com/repos/n8n-io/n8n/issues?state=open&per_page=20",
+        "headers": "{}",
+        "body": ""
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "diff",
+      "type": "custom-code",
+      "label": "跟上次比對找新的",
+      "config": {
+        "intent": "輸入 body 是 GitHub issues 的 JSON 陣列文字。解析出每筆的 number 與 title;跟存在 data 目錄的上次快照(以固定檔名)比對,找出新出現的 issue;更新快照。輸出欄位:hasNew(布林)、newList(新 issue 的「#編號 標題」逐行文字,沒有就空字串)。第一次執行存快照並輸出 hasNew=false。",
+        "code": ""
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "有新的?",
+      "config": {
+        "left": "{{hasNew}}",
+        "op": "==",
+        "right": "true"
+      },
+      "position": {
+        "x": 780,
+        "y": 120
+      }
+    },
+    {
+      "id": "ping",
+      "type": "telegram-notify",
+      "label": "通知我",
+      "config": {
+        "message": "🐙 有新 issue:\n{{newList}}"
+      },
+      "position": {
+        "x": 1040,
+        "y": 60
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "api"
+    },
+    {
+      "from": "api",
+      "to": "diff"
+    },
+    {
+      "from": "diff",
+      "to": "gate"
+    },
+    {
+      "from": "gate",
+      "to": "ping",
+      "fromPort": "true"
+    }
+  ]
+}

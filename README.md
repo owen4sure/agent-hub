@@ -50,7 +50,7 @@ Open http://127.0.0.1:3000 (bound to localhost only — other devices can't reac
 
 ## Template gallery (pick a starting point)
 
-The "▦ Templates" page ships 10+ curated templates (approval flows / failure alerts / AI triage / receipt OCR / per-item batching / daily digests…), each gated by deterministic lint in CI. Pick the closest one, click "Use this template" to get your own draft, then tell the AI what's different. As your flows grow: the home page supports search and **groups** (work / personal…) with sectioned display, and the "☰ Runs" page shows every run across all workflows in one place.
+The "▦ Templates" page ships 18 general-purpose templates modeled on the most common shapes in the n8n community workflow library (monitoring & alerts / data intake / AI content / reporting / approval gates…), each gated by deterministic lint in CI. Pick the closest one, click "Use this template" to get your own draft, then tell the AI what's different. As your flows grow: the home page supports search and **groups** (work / personal…) with sectioned display, and the "☰ Runs" page shows every run across all workflows in one place.
 
 ![Template gallery: browse by category, preview the steps, one-click copy into a draft](docs/screenshots/templates.png)
 

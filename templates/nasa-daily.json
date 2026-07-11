@@ -1,0 +1,73 @@
+{
+  "id": "nasa-daily",
+  "category": "資訊摘要",
+  "icon": "🔭",
+  "name": "每天一張 NASA 太空圖+白話解說",
+  "description": "打 NASA 每日天文圖公開 API → AI 把英文解說翻成兩句繁中 → 連圖帶文推到 Telegram。(改編自 n8n 社群範本庫)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配每日排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "api",
+      "type": "http-request",
+      "label": "打 NASA APOD API",
+      "config": {
+        "method": "GET",
+        "url": "https://api.nasa.gov/planetary/apod?api_key=DEMO_KEY",
+        "headers": "{}",
+        "body": ""
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "say",
+      "type": "llm-decide",
+      "label": "AI 翻成兩句繁中",
+      "config": {
+        "prompt": "這是 NASA 每日天文圖 API 的回應,把標題和解說濃縮翻成兩句繁體中文,最後附上圖片網址(url 欄位):\n{{body}}",
+        "outputKey": "note"
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    },
+    {
+      "id": "push",
+      "type": "telegram-notify",
+      "label": "推到 Telegram",
+      "config": {
+        "message": "🔭 今日太空圖\n{{note}}"
+      },
+      "position": {
+        "x": 780,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "api"
+    },
+    {
+      "from": "api",
+      "to": "say"
+    },
+    {
+      "from": "say",
+      "to": "push"
+    }
+  ]
+}

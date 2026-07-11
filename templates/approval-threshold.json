@@ -3,7 +3,7 @@
   "category": "審核把關",
   "icon": "💰",
   "name": "超過門檻才要簽核",
-  "description": "外部送進一筆支出(webhook/表單),金額超過 5000 先等你核准才記帳,沒超過直接記——「小事自動、大事問我」的標準做法。",
+  "description": "外部送進一筆支出(webhook/表單),金額超過 5000 先等你核准才登記,沒超過直接登記——「小事自動、大事問我」的標準審核閘門。(改編自 n8n 社群範本庫的審核型工作流)",
   "triggerParams": [
     {
       "key": "item",
@@ -60,7 +60,7 @@
     {
       "id": "rec1",
       "type": "write-file",
-      "label": "記帳(已複核)",
+      "label": "登記(已複核)",
       "config": {
         "fileName": "支出紀錄_{{today}}.txt",
         "content": "{{item}}|{{amount}}|已複核:{{decision}}"
@@ -73,7 +73,7 @@
     {
       "id": "rec2",
       "type": "write-file",
-      "label": "記帳(小額直接記)",
+      "label": "登記(小額直接過)",
       "config": {
         "fileName": "支出紀錄_{{today}}.txt",
         "content": "{{item}}|{{amount}}|小額自動"

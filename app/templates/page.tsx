@@ -60,7 +60,7 @@ export default function TemplatesPage() {
 
   return (
     <div className="max-w-6xl mx-auto px-8 py-8">
-      <PageHeader title="範本庫" subtitle="挑一個接近的起點,一鍵複製成自己的草稿,再用白話跟 AI 說哪裡不一樣" />
+      <PageHeader title="範本庫" subtitle="通用範本取材自 n8n 社群工作流庫的常見型態——挑一個接近的起點,一鍵複製成自己的草稿,再用白話跟 AI 說哪裡不一樣" />
 
       <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="🔍 搜尋範本…(例如:簽核、告警、記帳)" className="input text-sm max-w-[300px] mb-6" aria-label="搜尋範本" />
       {useError && <p className="text-sm mb-4" style={{ color: "var(--red)" }}>{useError}</p>}

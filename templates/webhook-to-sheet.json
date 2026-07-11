@@ -1,19 +1,19 @@
 {
-  "id": "shortcut-ledger",
+  "id": "webhook-to-sheet",
   "category": "整合串接",
-  "icon": "📱",
-  "name": "手機捷徑一鍵記帳到試算表",
-  "description": "手機捷徑對 Webhook 送一筆 {item, amount} → 直接寫進你的 Google 試算表(免 OAuth,3 分鐘 Apps Script 部署)。",
+  "icon": "📥",
+  "name": "任何工具的資料直接進試算表",
+  "description": "給外部工具一個 Webhook 網址,POST 進來的欄位直接寫成試算表新列——最通用的資料收集入口。(改編自 n8n 社群範本庫)",
   "triggerParams": [
     {
-      "key": "item",
-      "label": "品項",
+      "key": "field1",
+      "label": "欄位一",
       "type": "text",
       "default": ""
     },
     {
-      "key": "amount",
-      "label": "金額",
+      "key": "field2",
+      "label": "欄位二",
       "type": "text",
       "default": ""
     }
@@ -34,7 +34,7 @@
       "type": "google-sheet-append",
       "label": "寫進試算表",
       "config": {
-        "cells": "{{today}}, {{item}}, {{amount}}",
+        "cells": "{{today}}, {{field1}}, {{field2}}",
         "sheetName": ""
       },
       "position": {
