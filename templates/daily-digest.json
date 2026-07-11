@@ -1,0 +1,73 @@
+{
+  "id": "daily-digest",
+  "category": "資訊摘要",
+  "icon": "🗞️",
+  "name": "每天早上網頁重點寄給我",
+  "description": "抓一個網頁 → AI 挑三則重點翻成繁中 → 寄 email 給自己。配上每日排程就是全自動晨報。",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配每日排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "fetch",
+      "type": "web-page",
+      "label": "抓網頁",
+      "config": {
+        "url": "https://news.ycombinator.com/",
+        "maxChars": "8000"
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "pick",
+      "type": "llm-decide",
+      "label": "AI 挑三則重點",
+      "config": {
+        "prompt": "從這頁挑三則最有趣的消息,翻成繁體中文,每則一行標題+一句說明:\n{{pageText}}",
+        "outputKey": "digest"
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    },
+    {
+      "id": "mail",
+      "type": "send-email",
+      "label": "寄給自己",
+      "config": {
+        "to": "",
+        "subject": "今日重點 {{today}}",
+        "body": "{{digest}}"
+      },
+      "position": {
+        "x": 780,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "fetch"
+    },
+    {
+      "from": "fetch",
+      "to": "pick"
+    },
+    {
+      "from": "pick",
+      "to": "mail"
+    }
+  ]
+}

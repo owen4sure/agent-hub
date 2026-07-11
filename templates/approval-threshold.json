@@ -1,0 +1,108 @@
+{
+  "id": "approval-threshold",
+  "category": "審核把關",
+  "icon": "💰",
+  "name": "超過門檻才要簽核",
+  "description": "外部送進一筆支出(webhook/表單),金額超過 5000 先等你核准才記帳,沒超過直接記——「小事自動、大事問我」的標準做法。",
+  "triggerParams": [
+    {
+      "key": "item",
+      "label": "品項",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "amount",
+      "label": "金額",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(收到支出)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "金額超過 5000?",
+      "config": {
+        "left": "{{amount}}",
+        "op": ">",
+        "right": "5000"
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "ask",
+      "type": "wait-approval",
+      "label": "等你複核",
+      "config": {
+        "message": "大額支出:{{item}} {{amount}} 元,放行嗎?",
+        "channels": "auto",
+        "timeoutHours": "48"
+      },
+      "position": {
+        "x": 520,
+        "y": 40
+      }
+    },
+    {
+      "id": "rec1",
+      "type": "write-file",
+      "label": "記帳(已複核)",
+      "config": {
+        "fileName": "支出紀錄_{{today}}.txt",
+        "content": "{{item}}|{{amount}}|已複核:{{decision}}"
+      },
+      "position": {
+        "x": 780,
+        "y": 40
+      }
+    },
+    {
+      "id": "rec2",
+      "type": "write-file",
+      "label": "記帳(小額直接記)",
+      "config": {
+        "fileName": "支出紀錄_{{today}}.txt",
+        "content": "{{item}}|{{amount}}|小額自動"
+      },
+      "position": {
+        "x": 520,
+        "y": 220
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "gate"
+    },
+    {
+      "from": "gate",
+      "to": "ask",
+      "fromPort": "true"
+    },
+    {
+      "from": "gate",
+      "to": "rec2",
+      "fromPort": "false"
+    },
+    {
+      "from": "ask",
+      "to": "rec1",
+      "fromPort": "approved"
+    }
+  ]
+}

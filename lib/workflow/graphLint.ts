@@ -281,7 +281,14 @@ export function lintVarRefWarnings(nodes: WorkflowNode[], edges: WorkflowEdge[],
       const parent = byId.get(pid);
       if (!parent) continue;
       if (parent.type === "custom-code") { memo.set(id, null); return null; } // 輸出無法靜態得知
-      if (parent.type === "trigger") for (const k of triggerParamKeys) acc.add(k); // 觸發參數(如期間衍生欄位)
+      if (parent.type === "trigger") {
+        for (const k of triggerParamKeys) acc.add(k); // 觸發參數(如期間衍生欄位)
+        // 監聽觸發執行時會注入 {{filePath}}/{{fileName}}(watchers.ts);手動執行時 RunForm 也會
+        // 對「有引用 filePath 的流程」補問測試檔——這兩個欄位是觸發層的事實變數,不認得的話
+        // 每條監聽型流程建圖都挨一次假警告(範本品質閘門實測抓到)。
+        acc.add("filePath");
+        acc.add("fileName");
+      }
       const def = getNodeDef(parent.type);
       for (const f of outputFieldNames(def?.outputs)) acc.add(f);
       // llm-decide / template-text 的輸出欄位名放在 outputKey；set-variable 的放在 name(欄位名不同，別漏)

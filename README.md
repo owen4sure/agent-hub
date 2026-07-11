@@ -40,12 +40,19 @@ Open http://127.0.0.1:3000 (bound to localhost only — other devices can't reac
 ## Building flows in plain language
 
 - **Build**: describe your need in the chat panel (you can upload screenshots/documents to help the AI understand). If anything is unclear, the AI asks before drawing → you confirm and apply.
-- **Tweak one step**: click a node on the canvas → say "search for the XX email instead" → the AI edits just that node.
+- **Manual editing is first-class too**: a "＋ Add step" drawer to browse every block, a "＋" on each edge to insert a step between two nodes, direct field editing on any node (change a URL or keyword without asking the AI), and Cmd/Ctrl-Z undo for every canvas edit. AI and manual modes work side by side.
+- **Tweak one step**: click a node on the canvas → say "search for the XX email instead" → the AI edits just that node; each node card also shows its key settings (which URL, which cases, which filename) at a glance.
 - **Self-repair on failure**: a node turns red → click "🔧 Let AI fix this step" → the AI reads the error and page screenshot and proposes a fix.
 - **Add/remove steps**: tell the AI "add an email-sending step at the end" or "drop the notification step".
 - **Standing preferences**: write your habits once on the Settings page ("always suffix filenames with today's date", "always notify via Telegram") — the AI honors them in every flow it builds, so you never repeat yourself.
 
 ![A failed node turns red: the error message is in plain words, with a one-click "Let AI fix this step"](docs/screenshots/ai-fix.png)
+
+## Template gallery (pick a starting point)
+
+The "▦ Templates" page ships 10+ curated templates (approval flows / failure alerts / AI triage / receipt OCR / per-item batching / daily digests…), each gated by deterministic lint in CI. Pick the closest one, click "Use this template" to get your own draft, then tell the AI what's different. As your flows grow: the home page supports search and **groups** (work / personal…) with sectioned display, and the "☰ Runs" page shows every run across all workflows in one place.
+
+![Template gallery: browse by category, preview the steps, one-click copy into a draft](docs/screenshots/templates.png)
 
 ## Built-in examples (duplicate & adapt)
 

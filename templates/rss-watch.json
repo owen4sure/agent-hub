@@ -1,0 +1,71 @@
+{
+  "id": "rss-watch",
+  "category": "資訊摘要",
+  "icon": "📰",
+  "name": "RSS 新文章摘要到 Telegram",
+  "description": "讀 RSS 訂閱源 → AI 挑重點摘要 → 推到 Telegram。配排程就是全自動追蹤器。",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "rss",
+      "type": "rss-read",
+      "label": "讀 RSS",
+      "config": {
+        "url": "https://hnrss.org/frontpage",
+        "maxItems": "10"
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "sum",
+      "type": "llm-decide",
+      "label": "AI 摘要",
+      "config": {
+        "prompt": "從這些文章挑 3 篇最值得看的,每篇一行:標題(繁中)+為什麼值得看:\n{{articlesText}}",
+        "outputKey": "summary"
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    },
+    {
+      "id": "push",
+      "type": "telegram-notify",
+      "label": "推到 Telegram",
+      "config": {
+        "message": "📰 今日精選\n{{summary}}"
+      },
+      "position": {
+        "x": 780,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "rss"
+    },
+    {
+      "from": "rss",
+      "to": "sum"
+    },
+    {
+      "from": "sum",
+      "to": "push"
+    }
+  ]
+}

@@ -7,6 +7,7 @@ import HelpGuide from "./HelpGuide";
 
 const NAV = [
   { href: "/", label: "Workflows", icon: "◈" },
+  { href: "/templates", label: "範本庫", icon: "▦" },
   { href: "/drafts", label: "草稿 & 範例", icon: "✎" },
   { href: "/schedules", label: "排程 & 執行", icon: "⏰" },
   { href: "/runs", label: "執行紀錄", icon: "☰" },

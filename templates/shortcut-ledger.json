@@ -1,0 +1,52 @@
+{
+  "id": "shortcut-ledger",
+  "category": "整合串接",
+  "icon": "📱",
+  "name": "手機捷徑一鍵記帳到試算表",
+  "description": "手機捷徑對 Webhook 送一筆 {item, amount} → 直接寫進你的 Google 試算表(免 OAuth,3 分鐘 Apps Script 部署)。",
+  "triggerParams": [
+    {
+      "key": "item",
+      "label": "品項",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "amount",
+      "label": "金額",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(Webhook/表單)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "row",
+      "type": "google-sheet-append",
+      "label": "寫進試算表",
+      "config": {
+        "cells": "{{today}}, {{item}}, {{amount}}",
+        "sheetName": ""
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "row"
+    }
+  ]
+}

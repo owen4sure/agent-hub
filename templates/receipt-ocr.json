@@ -1,0 +1,75 @@
+{
+  "id": "receipt-ocr",
+  "category": "檔案自動化",
+  "icon": "🖼️",
+  "name": "拍照丟進來,AI 讀單據自動記帳",
+  "description": "把收據/單據照片丟進監聽資料夾 → AI 看圖抽出品項與金額 → 自動記進帳本檔。",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "監聽資料夾(丟照片)",
+      "config": {
+        "watchPath": ""
+      },
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "ocr",
+      "type": "read-image",
+      "label": "AI 看單據",
+      "config": {
+        "source": "{{filePath}}",
+        "prompt": "這是一張消費單據,抽出:品項(一句話)、總金額(只要數字)。用「品項|金額」一行回覆。",
+        "outputKey": "parsed"
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "save",
+      "type": "write-file",
+      "label": "記進帳本",
+      "config": {
+        "fileName": "帳本_{{today}}.txt",
+        "content": "{{parsed}}|{{fileName}}"
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    },
+    {
+      "id": "ding",
+      "type": "desktop-notify",
+      "label": "通知我",
+      "config": {
+        "title": "已記帳",
+        "message": "{{parsed}}"
+      },
+      "position": {
+        "x": 780,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "ocr"
+    },
+    {
+      "from": "ocr",
+      "to": "save"
+    },
+    {
+      "from": "save",
+      "to": "ding"
+    }
+  ]
+}

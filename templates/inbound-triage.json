@@ -1,0 +1,116 @@
+{
+  "id": "inbound-triage",
+  "category": "審核把關",
+  "icon": "🧭",
+  "name": "來信自動分類分流通知",
+  "description": "外部送進一則訊息 → AI 分類(詢價/客訴/其他) → 多路分流各自通知對的人——三路以上分流的標準做法。",
+  "triggerParams": [
+    {
+      "key": "message",
+      "label": "訊息內容",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(收到訊息)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 150
+      }
+    },
+    {
+      "id": "classify",
+      "type": "llm-decide",
+      "label": "AI 分類",
+      "config": {
+        "prompt": "判斷這則訊息的類別:{{message}}。例:『請問這個多少錢』→詢價;『我上週買的壞了』→客訴;打招呼/其他→其他。",
+        "outputKey": "kind",
+        "choices": "詢價,客訴,其他"
+      },
+      "position": {
+        "x": 260,
+        "y": 150
+      }
+    },
+    {
+      "id": "route",
+      "type": "switch",
+      "label": "分流",
+      "config": {
+        "value": "{{kind}}",
+        "cases": "詢價\n客訴"
+      },
+      "position": {
+        "x": 520,
+        "y": 150
+      }
+    },
+    {
+      "id": "sales",
+      "type": "telegram-notify",
+      "label": "通知業務",
+      "config": {
+        "message": "💬 詢價:{{message}}"
+      },
+      "position": {
+        "x": 780,
+        "y": 40
+      }
+    },
+    {
+      "id": "cs",
+      "type": "telegram-notify",
+      "label": "通知客服(急)",
+      "config": {
+        "message": "🚨 客訴:{{message}}"
+      },
+      "position": {
+        "x": 780,
+        "y": 150
+      }
+    },
+    {
+      "id": "log",
+      "type": "write-file",
+      "label": "其他歸檔",
+      "config": {
+        "fileName": "其他訊息_{{today}}.txt",
+        "content": "{{message}}"
+      },
+      "position": {
+        "x": 780,
+        "y": 260
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "classify"
+    },
+    {
+      "from": "classify",
+      "to": "route"
+    },
+    {
+      "from": "route",
+      "to": "sales",
+      "fromPort": "詢價"
+    },
+    {
+      "from": "route",
+      "to": "cs",
+      "fromPort": "客訴"
+    },
+    {
+      "from": "route",
+      "to": "log",
+      "fromPort": "其他"
+    }
+  ]
+}

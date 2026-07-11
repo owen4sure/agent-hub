@@ -1,0 +1,143 @@
+{
+  "id": "approval-purchase",
+  "category": "審核把關",
+  "icon": "✋",
+  "name": "採購申請簽核流程",
+  "description": "同事填表單申請 → AI 判斷類別 → 採購要等主管簽核(核准/拒絕各走各的),請假直接登記。簽核可在手機 Telegram 按按鈕完成。",
+  "triggerParams": [
+    {
+      "key": "name",
+      "label": "申請人",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "request",
+      "label": "申請內容",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(表單申請)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 150
+      }
+    },
+    {
+      "id": "classify",
+      "type": "llm-decide",
+      "label": "AI 判斷申請類別",
+      "config": {
+        "prompt": "判斷這筆申請的類別:{{request}}。例:『買一箱影印紙』→採購;『下週三請特休一天』→請假;都不像→其他。",
+        "outputKey": "category",
+        "choices": "採購,請假,其他"
+      },
+      "position": {
+        "x": 260,
+        "y": 150
+      }
+    },
+    {
+      "id": "route",
+      "type": "switch",
+      "label": "依類別分流",
+      "config": {
+        "value": "{{category}}",
+        "cases": "採購\n請假"
+      },
+      "position": {
+        "x": 520,
+        "y": 150
+      }
+    },
+    {
+      "id": "approve",
+      "type": "wait-approval",
+      "label": "等主管簽核",
+      "config": {
+        "message": "採購申請:{{name}} 想申請「{{request}}」,核准嗎?",
+        "channels": "auto",
+        "timeoutHours": "72"
+      },
+      "position": {
+        "x": 780,
+        "y": 40
+      }
+    },
+    {
+      "id": "writeOk",
+      "type": "write-file",
+      "label": "寫入核准紀錄",
+      "config": {
+        "fileName": "採購核准_{{name}}_{{today}}.txt",
+        "content": "申請人:{{name}}\n內容:{{request}}\n決定:{{decision}}\n備註:{{decisionNote}}"
+      },
+      "position": {
+        "x": 1040,
+        "y": 0
+      }
+    },
+    {
+      "id": "writeNo",
+      "type": "write-file",
+      "label": "寫入拒絕紀錄",
+      "config": {
+        "fileName": "採購拒絕_{{name}}_{{today}}.txt",
+        "content": "申請人:{{name}}\n內容:{{request}}\n決定:{{decision}}"
+      },
+      "position": {
+        "x": 1040,
+        "y": 130
+      }
+    },
+    {
+      "id": "writeLeave",
+      "type": "write-file",
+      "label": "寫入請假紀錄",
+      "config": {
+        "fileName": "請假紀錄_{{name}}_{{today}}.txt",
+        "content": "申請人:{{name}}\n內容:{{request}}"
+      },
+      "position": {
+        "x": 780,
+        "y": 280
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "classify"
+    },
+    {
+      "from": "classify",
+      "to": "route"
+    },
+    {
+      "from": "route",
+      "to": "approve",
+      "fromPort": "採購"
+    },
+    {
+      "from": "route",
+      "to": "writeLeave",
+      "fromPort": "請假"
+    },
+    {
+      "from": "approve",
+      "to": "writeOk",
+      "fromPort": "approved"
+    },
+    {
+      "from": "approve",
+      "to": "writeNo",
+      "fromPort": "rejected"
+    }
+  ]
+}

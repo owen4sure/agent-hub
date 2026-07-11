@@ -1,0 +1,72 @@
+{
+  "id": "site-down-alert",
+  "category": "監控告警",
+  "icon": "🆘",
+  "name": "網站掛了馬上告警",
+  "description": "排程定時抓你的網站,抓得到就安靜;抓不到(掛了/改版)走紅色的失敗分支,立刻發 Telegram 告警——失敗分支(Plan B)的招牌用法。",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "probe",
+      "type": "web-page",
+      "label": "抓網站首頁",
+      "config": {
+        "url": "https://example.com/",
+        "maxChars": "2000"
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "ok",
+      "type": "template-text",
+      "label": "正常(不打擾)",
+      "config": {
+        "template": "{{pageTitle}} 正常",
+        "outputKey": "note"
+      },
+      "position": {
+        "x": 520,
+        "y": 40
+      }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "掛了發告警",
+      "config": {
+        "message": "🆘 網站掛了!\n出事步驟:{{errorStep}}\n錯誤:{{error}}"
+      },
+      "position": {
+        "x": 520,
+        "y": 220
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "probe"
+    },
+    {
+      "from": "probe",
+      "to": "ok"
+    },
+    {
+      "from": "probe",
+      "to": "alert",
+      "fromPort": "error"
+    }
+  ]
+}

@@ -20,7 +20,9 @@ export const rssReadNode: NodeDefinition = {
   label: "讀 RSS",
   description: "抓一個 RSS/Atom feed 的最新文章清單(標題/連結/時間/摘要),給下游彙整或逐篇處理。配排程+AI 摘要+通知就是全自動每日簡報。",
   icon: "📰",
-  outputs: "articles(文章清單,每筆 {title,link,date,summary})、articleCount、feedTitle、articlesText(前 N 篇的文字清單,方便直接給 AI)",
+  // outputs 宣告以逗號分隔欄位——括號說明裡不能再放半形逗號(outputFieldNames 會切壞欄位名,
+  // lint 誤把說明文字當欄位;範本品質閘門實測抓到)
+  outputs: "articles(文章清單;每筆有 title/link/date/summary), articleCount(篇數), feedTitle(來源名稱), articlesText(前 N 篇的文字清單;方便直接給 AI)",
   configSchema: [
     { key: "url", label: "RSS/Atom 網址", type: "text", default: "" },
     { key: "maxItems", label: "最多取幾篇", type: "number", default: "10" },
