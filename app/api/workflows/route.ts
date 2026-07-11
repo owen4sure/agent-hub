@@ -19,6 +19,7 @@ export async function GET() {
       status: wf.status,
       builtin: wf.builtin,
       description: wf.description,
+      group: wf.group ?? "",
       nodeCount: wf.nodes.length,
       model: getWorkflowModel(wf.id, wf.defaultModel),
       lastRun: runs[0] ?? null,

@@ -47,6 +47,7 @@ function readWorkflowFile(file: string, builtinDefault: boolean): Workflow | nul
     requiresSecrets: raw.requiresSecrets ?? [],
     triggerParams: raw.triggerParams ?? [],
     onFailureWorkflow: raw.onFailureWorkflow,
+    group: raw.group,
     nodes: raw.nodes ?? [],
     edges: raw.edges ?? [],
   };

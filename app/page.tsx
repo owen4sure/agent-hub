@@ -12,6 +12,7 @@ interface WorkflowSummary {
   builtin: boolean;
   description: string;
   nodeCount: number;
+  group?: string;
   lastRun?: { status: string; started_at: string } | null;
   triggers?: { schedule: boolean; watch: boolean; webhook: boolean };
 }
@@ -148,6 +149,44 @@ export default function HomePage() {
 
   const official = workflows?.filter((w) => w.status === "official") ?? [];
 
+  // ── 搜尋+群組(工作/私人…):流程一多就靠這兩個找東西 ──
+  const [search, setSearch] = useState("");
+  const [groupFilter, setGroupFilter] = useState<string | null>(null);
+  const [groupMenuFor, setGroupMenuFor] = useState<string | null>(null);
+  const [newGroupName, setNewGroupName] = useState("");
+  useEffect(() => {
+    if (!groupMenuFor) return;
+    const close = () => setGroupMenuFor(null);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [groupMenuFor]);
+
+  const groups = [...new Set(official.map((w) => w.group).filter((g): g is string => Boolean(g)))].sort((a, b) => a.localeCompare(b, "zh-Hant"));
+  const q = search.trim().toLowerCase();
+  const visible = official.filter(
+    (w) =>
+      (!q || w.name.toLowerCase().includes(q) || (w.description ?? "").toLowerCase().includes(q)) &&
+      (!groupFilter || w.group === groupFilter),
+  );
+  // 分區:有名字的群組照字母序,「未分組」永遠最後(沒有任何群組時只有一區、不顯示標題)
+  const sections = [
+    ...groups.filter((g) => !groupFilter || g === groupFilter).map((g) => ({ title: g, items: visible.filter((w) => w.group === g) })),
+    ...(!groupFilter ? [{ title: "未分組", items: visible.filter((w) => !w.group) }] : []),
+  ].filter((s) => s.items.length > 0);
+
+  async function assignGroup(wfId: string, group: string) {
+    setGroupMenuFor(null);
+    setNewGroupName("");
+    try {
+      await fetch(`/api/workflows/${wfId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ group }),
+      });
+      load();
+    } catch { /* 下一輪 load 會對回真實狀態 */ }
+  }
+
   return (
     <div className="max-w-6xl mx-auto px-8 py-8">
       <PageHeader
@@ -254,9 +293,39 @@ export default function HomePage() {
         />
       )}
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {official.map((w) => (
-          <Link key={w.id} href={`/workflows/${w.id}`} className="card card-hover p-5 block">
+      {/* 搜尋+群組篩選:流程一多就靠這排找東西 */}
+      {official.length > 0 && (
+        <div className="flex items-center gap-2 mb-5 flex-wrap">
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="🔍 搜尋流程名稱/說明…"
+            className="input text-sm max-w-[260px]"
+            aria-label="搜尋流程"
+          />
+          {groups.length > 0 && (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <button onClick={() => setGroupFilter(null)} className="btn btn-ghost text-xs" style={groupFilter === null ? { borderColor: "var(--accent)", color: "var(--accent)" } : undefined}>全部</button>
+              {groups.map((g) => (
+                <button key={g} onClick={() => setGroupFilter((cur) => (cur === g ? null : g))} className="btn btn-ghost text-xs" style={groupFilter === g ? { borderColor: "var(--accent)", color: "var(--accent)" } : undefined}>
+                  🗂 {g}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {sections.map(({ title, items }) => (
+        <div key={title} className="mb-8">
+          {(groups.length > 0 || title !== "未分組") && (
+            <h2 className="text-sm font-semibold mb-3 flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
+              🗂 {title} <span className="faint font-normal">{items.length}</span>
+            </h2>
+          )}
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {items.map((w) => (
+          <Link key={w.id} href={`/workflows/${w.id}`} className="card card-hover p-5 block relative">
             <div className="flex items-start gap-3 mb-2">
               <span
                 className="grid place-items-center w-9 h-9 rounded-lg text-base shrink-0"
@@ -276,7 +345,48 @@ export default function HomePage() {
                   {w.triggers?.webhook && <span title="Webhook 已啟用，外部工具可觸發">🔗 Webhook</span>}
                 </p>
               </div>
+              {!w.builtin && (
+                <button
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setGroupMenuFor((cur) => (cur === w.id ? null : w.id)); }}
+                  className="faint hover:text-[var(--text)] text-sm shrink-0 px-1"
+                  title="移到群組(工作/私人…)"
+                  aria-label="移到群組"
+                >
+                  🗂
+                </button>
+              )}
             </div>
+            {groupMenuFor === w.id && (
+              <div className="menu absolute right-3 top-12 z-30" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
+                <p className="text-[11px] faint px-2.5 pt-1.5 pb-1">移到群組</p>
+                {groups.map((g) => (
+                  <button key={g} className="menu-item" onClick={() => assignGroup(w.id, g)}>
+                    <span>🗂</span> {g} {w.group === g && <span className="ml-auto" style={{ color: "var(--accent)" }}>✓</span>}
+                  </button>
+                ))}
+                {w.group && (
+                  <button className="menu-item" onClick={() => assignGroup(w.id, "")}>
+                    <span>✕</span> 移出群組
+                  </button>
+                )}
+                <div className="menu-sep" />
+                <div className="flex items-center gap-1 px-1.5 pb-1">
+                  <input
+                    value={newGroupName}
+                    onChange={(e) => setNewGroupName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && newGroupName.trim()) assignGroup(w.id, newGroupName.trim()); }}
+                    placeholder="新群組名稱…"
+                    className="input text-xs py-1"
+                  />
+                  <button
+                    onClick={() => { if (newGroupName.trim()) assignGroup(w.id, newGroupName.trim()); }}
+                    className="btn btn-ghost text-xs shrink-0"
+                  >
+                    建立
+                  </button>
+                </div>
+              </div>
+            )}
             <p className="text-sm muted line-clamp-2 min-h-[2.5rem]">{w.description || <span className="faint">（還沒有說明——點進去跟 AI 對話時會自動補上）</span>}</p>
             <div className="flex items-center gap-2 mt-4 pt-3 border-t text-xs">
               {w.lastRun ? (
@@ -290,8 +400,10 @@ export default function HomePage() {
               <button onClick={(e) => runNow(e, w.id)} disabled={running[w.id]} title="用預設參數立即執行(有可調參數的流程會用預設值；要指定請點進流程頁按執行)" className="btn btn-ghost text-xs ml-auto shrink-0">{running[w.id] ? "已開始" : "▶ 執行"}</button>
             </div>
           </Link>
-        ))}
-      </div>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

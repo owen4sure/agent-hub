@@ -45,6 +45,8 @@ export interface Workflow {
   triggerParams?: ParamField[];
   /** 這條流程失敗時要自動執行的備援流程(名稱或 id)。匯入時會被清空(不能讓外來檔案指揮本機流程)。 */
   onFailureWorkflow?: string;
+  /** 群組(工作/私人…)——首頁按群組分區顯示。空/未設定=未分組。 */
+  group?: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
 }
