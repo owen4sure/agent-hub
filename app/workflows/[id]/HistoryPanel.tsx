@@ -64,7 +64,7 @@ export function HistoryPanel({
               <div className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full shrink-0" style={{ background: statusColor(r.status) }} />
                 <span className="text-sm font-medium">{success ? "成功" : failed ? "失敗" : r.status === "running" || r.status === "queued" ? "執行中" : r.status}</span>
-                <span className="text-xs faint">{r.trigger_type === "schedule" ? "排程" : r.trigger_type === "watch" ? "資料夾監聽" : r.trigger_type === "webhook" ? "Webhook" : "手動"}</span>
+                <span className="text-xs faint">{r.trigger_type === "schedule" ? "排程" : r.trigger_type === "watch" ? "資料夾監聽" : r.trigger_type === "webhook" ? "Webhook" : r.trigger_type === "form" ? "表單" : "手動"}</span>
                 <span className="ml-auto text-xs faint">{formatDate(r.started_at)}</span>
               </div>
               {failed && (

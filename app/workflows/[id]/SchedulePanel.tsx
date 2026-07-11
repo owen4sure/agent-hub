@@ -311,6 +311,14 @@ function WebhookSection({ workflowId }: { workflowId: string }) {
           <pre className="card p-2 text-xs font-mono overflow-x-auto" style={{ background: "var(--surface-2)" }}>{`curl -X POST '${url}' \\
   -H 'Content-Type: application/json' \\
   -d '{"備註":"hello"}'`}</pre>
+          <div className="pt-1">
+            <div className="text-xs faint mb-1">📝 表單網址(同一把鑰匙的「人類版」——用瀏覽器開，填表送出即觸發)</div>
+            <div className="flex gap-1.5">
+              <input readOnly value={url ? url.replace("/api/hooks/", "/form/") : ""} className="input font-mono text-xs flex-1 min-w-0" onFocus={(e) => e.currentTarget.select()} />
+              <button onClick={async () => { if (url) { await navigator.clipboard.writeText(url.replace("/api/hooks/", "/form/")); setCopied(true); setTimeout(() => setCopied(false), 1500); } }} className="btn btn-ghost shrink-0 text-sm">複製</button>
+            </div>
+            <p className="text-xs faint mt-1">表單欄位＝這條流程的觸發參數；沒宣告參數就給一個通用「備註」欄。</p>
+          </div>
           <p className="text-xs faint leading-relaxed">網址本身就是鑰匙，別貼到公開的地方；不小心外流就按「重新產生」，舊網址立刻失效。伺服器只聽本機，所以只有這台電腦上的程式打得到。</p>
           <div className="flex gap-1.5">
             <button

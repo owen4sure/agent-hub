@@ -67,6 +67,7 @@ Besides clicking ▶ Run, every workflow has a ⚡ trigger panel with three ways
 
 - **Schedule**: daily / monthly / quarterly on Jan-Apr-Jul-Oct / weekly / raw cron — the whole graph triggers automatically (headless), computing "last period" dates for you.
 - **Folder watch**: point the workflow at a folder; any new file dropped in triggers a run within seconds, with `{{filePath}}` / `{{fileName}}` available to downstream nodes ("drop the report in the inbox folder and it processes itself"). Files already in the folder when you enable watching are ignored; only new arrivals trigger. Watching applies to *production* workflows only, so a draft you're still editing never fires in the background.
+- **Web form**: enabling the webhook also gives you a form URL — anyone you share it with fills a ready-made web form (fields = the flow's trigger parameters) and submits to trigger the flow. The human-friendly twin of the webhook.
 - **Webhook**: enable it to get a private URL (the random token in the URL is the credential). Any local tool — a phone shortcut relaying through your Mac, a script, another app — POSTs JSON to it and the fields become `{{field}}` variables in the flow. Regenerate the URL anytime to revoke the old one.
 
 Unattended runs (all three trigger types) report success/failure via desktop notification — you'll know something broke without opening the app.

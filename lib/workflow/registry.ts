@@ -14,6 +14,7 @@ import {
   llmDecideNode,
 } from "./nodes/general";
 import { readImageNode } from "./nodes/readImage";
+import { waitNode } from "./nodes/wait";
 import { customCodeNode } from "./nodes/customCode";
 import { telegramNotifyNode, lineNotifyNode, slackNotifyNode } from "./nodes/notify";
 import { googleSheetReadNode, googleSheetAppendNode } from "./nodes/googleSheet";
@@ -40,6 +41,7 @@ const ALL: NodeDefinition[] = [
   templateTextNode,
   setVariableNode,
   ifConditionNode,
+  waitNode,
   llmDecideNode,
   readImageNode,
   customCodeNode,

@@ -24,8 +24,8 @@ const MAX_ATTEMPTS = 3;
 const NODE_TIMEOUT_MS = 3 * 60 * 1000;
 
 /** manual=使用者按執行；其餘都是無人值守的自動觸發(結果要靠桌面通知讓人知道) */
-export type TriggerSource = "manual" | "schedule" | "watch" | "webhook";
-const TRIGGER_LABEL: Record<TriggerSource, string> = { manual: "手動", schedule: "排程", watch: "資料夾監聽", webhook: "Webhook" };
+export type TriggerSource = "manual" | "schedule" | "watch" | "webhook" | "form";
+const TRIGGER_LABEL: Record<TriggerSource, string> = { manual: "手動", schedule: "排程", watch: "資料夾監聽", webhook: "Webhook", form: "表單" };
 
 interface QueueItem {
   runId: string;
