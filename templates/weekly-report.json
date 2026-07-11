@@ -1,0 +1,73 @@
+{
+  "id": "weekly-report",
+  "category": "報表彙整",
+  "icon": "📊",
+  "name": "每週自動彙整試算表寄報告",
+  "description": "排程讀你的 Google 試算表(連結分享即可,免授權) → AI 彙整成一段人話週報 → 寄 email 給自己。",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配每週排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "read",
+      "type": "google-sheet-read",
+      "label": "讀試算表",
+      "config": {
+        "sheetUrl": "",
+        "maxRows": "200"
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "sum",
+      "type": "llm-decide",
+      "label": "AI 寫週報",
+      "config": {
+        "prompt": "用這份資料寫一段 5 句以內的繁中週報(重點數字+跟上週比的變化,不確定就別編):\n{{sheetText}}",
+        "outputKey": "report"
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    },
+    {
+      "id": "mail",
+      "type": "send-email",
+      "label": "寄給自己",
+      "config": {
+        "to": "",
+        "subject": "週報 {{today}}",
+        "body": "{{report}}"
+      },
+      "position": {
+        "x": 780,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "read"
+    },
+    {
+      "from": "read",
+      "to": "sum"
+    },
+    {
+      "from": "sum",
+      "to": "mail"
+    }
+  ]
+}

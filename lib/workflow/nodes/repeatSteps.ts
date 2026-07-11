@@ -93,7 +93,8 @@ export const repeatStepsNode: NodeDefinition = {
   description:
     "對一份清單裡的每一項，重複執行同一組步驟(例如：清單是 3 個月份，每個月都要「找信→下載附件→擷取資料」)。**用這個節點取代「同樣的幾個步驟複製貼上 N 遍」**——只寫一次要做什麼，清單有幾項就自動跑幾次，流程圖不會因為處理多筆類似資料而暴增節點數。清單裡目前這一項在 steps 的設定裡可以用 {{item}} 引用(如果每項是物件，用 {{item.欄位名}}，例如 {{item.searchDate}})。",
   icon: "🔁",
-  outputs: "settings 裡 outputKey 指定的欄位：一個陣列，每一項是該次迭代最後一步的完整輸出",
+  // 開頭不能是英文識別字——outputFieldNames 會把「settings」誤抽成欄位名(實際欄位名由 config.outputKey 決定,lint 的 dynKey 已涵蓋)
+  outputs: "依「彙整輸出欄位名」設定(預設 results):一個陣列;每一項是該次迭代最後一步的完整輸出",
   configSchema: [
     { key: "items", label: "重複清單(可用 {{欄位名}} 引用上游的陣列)", type: "text", default: "" },
     { key: "itemVar", label: "這一項在步驟裡叫什麼名字(預設 item)", type: "text", default: "item" },

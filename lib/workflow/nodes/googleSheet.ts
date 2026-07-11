@@ -115,7 +115,9 @@ export const googleSheetReadNode: NodeDefinition = {
   description:
     "讀取一份 Google 試算表的內容(第一列當欄位名，其餘變成資料清單給下游用)。試算表要開「知道連結的任何人可檢視」，貼上網址就能讀，不用任何授權。要寫回試算表請改用 Excel 節點產出檔案。",
   icon: "📗",
-  outputs: "rows(資料清單，每筆是 {欄位名:值})、rowCount(筆數)、headers(欄位名清單)、sheetText(前 30 列的文字表格，方便給 AI 判斷)",
+  // outputs 宣告要用「半形逗號」分隔欄位、括號說明內不能有半形逗號(outputFieldNames 靠逗號切欄位名;
+  // 之前整串用頓號分隔,lint 只認得第一個欄位,下游引用 {{sheetText}} 全部挨假警告——範本閘門抓到)
+  outputs: "rows(資料清單;每筆是 {欄位名:值}), rowCount(筆數), headers(欄位名清單), sheetText(前 30 列的文字表格;方便給 AI 判斷)",
   configSchema: [
     { key: "sheetUrl", label: "試算表網址(直接複製瀏覽器網址列)", type: "text", default: "" },
     { key: "maxRows", label: "最多讀幾列(避免超大表塞爆下游)", type: "number", default: "500" },

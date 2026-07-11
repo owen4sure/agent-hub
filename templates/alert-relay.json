@@ -1,0 +1,68 @@
+{
+  "id": "alert-relay",
+  "category": "整合串接",
+  "icon": "📣",
+  "name": "任何工具打進來,轉成 Slack 通知",
+  "description": "給別的程式/腳本/捷徑一個 Webhook 網址,POST {title, detail} 進來就組成訊息發到 Slack——把各種工具的通知統一到一個頻道。",
+  "triggerParams": [
+    {
+      "key": "title",
+      "label": "標題",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "detail",
+      "label": "內容",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(Webhook)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "fmt",
+      "type": "template-text",
+      "label": "組訊息",
+      "config": {
+        "template": "🔔 {{title}}\n{{detail}}\n({{today}})",
+        "outputKey": "text"
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "send",
+      "type": "slack-notify",
+      "label": "發到 Slack",
+      "config": {
+        "message": "{{text}}"
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "fmt"
+    },
+    {
+      "from": "fmt",
+      "to": "send"
+    }
+  ]
+}
