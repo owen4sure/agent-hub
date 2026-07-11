@@ -15,6 +15,8 @@ import {
 } from "./nodes/general";
 import { readImageNode } from "./nodes/readImage";
 import { waitNode } from "./nodes/wait";
+import { subWorkflowNode } from "./nodes/subWorkflow";
+import { rssReadNode } from "./nodes/rssRead";
 import { customCodeNode } from "./nodes/customCode";
 import { telegramNotifyNode, lineNotifyNode, slackNotifyNode } from "./nodes/notify";
 import { googleSheetReadNode, googleSheetAppendNode } from "./nodes/googleSheet";
@@ -35,6 +37,7 @@ const ALL: NodeDefinition[] = [
   readFileNode,
   writeFileNode,
   webPageNode,
+  rssReadNode,
   googleSheetReadNode,
   googleSheetAppendNode,
   httpRequestNode,
@@ -46,6 +49,7 @@ const ALL: NodeDefinition[] = [
   readImageNode,
   customCodeNode,
   repeatStepsNode,
+  subWorkflowNode,
   telegramNotifyNode,
   lineNotifyNode,
   slackNotifyNode,
