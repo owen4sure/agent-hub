@@ -813,7 +813,8 @@ async function executeWorkflow(item: QueueItem) {
       //    使用者按停止不走備案(他要的是停，不是 Plan B)。 ──
       const hasErrorBranch = wf.edges.some((e) => e.from === node.id && e.fromPort === "error");
       if (!isCancel && hasErrorBranch) {
-        db.prepare(`UPDATE node_runs SET status='failed', error=?, finished_at=datetime('now') WHERE run_id=? AND node_id=?`)
+        // active_ports 記 ["error"]:分支覆蓋率統計要知道「失敗分支真的被走過」(不只成功分支)
+        db.prepare(`UPDATE node_runs SET status='failed', error=?, active_ports='["error"]', finished_at=datetime('now') WHERE run_id=? AND node_id=?`)
           .run(errMsg, runId, node.id);
         log(runId, node.id, `[${node.label}] 失敗：${errMsg}`);
         log(runId, node.id, `[${node.label}] 🆘 有接失敗分支——改走 Plan B 繼續執行`);

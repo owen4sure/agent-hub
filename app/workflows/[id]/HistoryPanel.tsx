@@ -1,9 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { formatDate } from "@/components/ui";
 import { statusColor } from "./nodeVisuals";
 import type { RunRecord } from "./types";
+
+interface CoverageReport {
+  total: number;
+  covered: number;
+  complete: boolean;
+  ports: { nodeId: string; nodeLabel: string; port: string; portLabel: string; covered: boolean }[];
+}
 
 interface NodeRunRow { node_id: string; status: string; attempt: number; started_at: string | null; finished_at: string | null }
 
@@ -36,6 +43,18 @@ export function HistoryPanel({
   const [logsLoading, setLogsLoading] = useState(false);
   const [resuming, setResuming] = useState<string | null>(null);
   const [resumeError, setResumeError] = useState<{ runId: string; msg: string } | null>(null);
+  // 分支覆蓋率:圖上的每個分支出口歷史上走過了沒——「成功一次」只證明一條路能走
+  const [coverage, setCoverage] = useState<CoverageReport | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const wfId = window.location.pathname.split("/workflows/")[1]?.split("/")[0];
+    if (!wfId) return;
+    fetch(`/api/workflows/${wfId}/coverage`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (alive && d && typeof d.total === "number") setCoverage(d); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [runs.length]);
 
   async function handleResume(runId: string) {
     setResuming(runId);
@@ -71,6 +90,30 @@ export function HistoryPanel({
         <button onClick={onClose} className="ml-auto faint hover:text-[var(--text)]">✕</button>
       </div>
       <div className="flex-1 overflow-auto p-4 space-y-2.5">
+        {coverage && coverage.total > 0 && (
+          <div className="card p-3 space-y-1.5" style={coverage.complete ? { borderColor: "color-mix(in srgb, var(--green) 45%, var(--border))" } : undefined}>
+            <p className="text-xs font-medium flex items-center gap-2">
+              🧪 分支覆蓋
+              <span className="badge" style={coverage.complete ? { color: "var(--green)", borderColor: "var(--green)" } : { color: "var(--amber)", borderColor: "var(--amber)" }}>
+                {coverage.complete ? "完整驗證" : `${coverage.covered}/${coverage.total} 已走過`}
+              </span>
+            </p>
+            {!coverage.complete && (
+              <>
+                <p className="text-[11px] faint leading-relaxed">成功一次只代表其中一條路能跑——下面「○」的分支還沒被任何一次執行走過,建議做出對應情境測一下(例如按拒絕、給超標的金額)。</p>
+                <div className="space-y-0.5">
+                  {coverage.ports.map((p) => (
+                    <div key={`${p.nodeId}-${p.port}`} className="flex items-center gap-2 text-xs">
+                      <span style={{ color: p.covered ? "var(--green)" : "var(--text-faint)" }}>{p.covered ? "✓" : "○"}</span>
+                      <span className="truncate">{p.nodeLabel}</span>
+                      <span className="faint">→ {p.portLabel}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
         {runs.length === 0 && <p className="text-sm muted">還沒有執行紀錄。按「▶ 執行」跑一次就會出現在這。</p>}
         {runs.map((r) => {
           const failed = r.status === "failed";

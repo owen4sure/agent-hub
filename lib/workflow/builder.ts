@@ -13,6 +13,8 @@ import { callAIWithRetry } from "../aiRetry";
 import { extractJsonObject, stripCodeFences } from "../jsonExtract";
 import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../claudeCodeClient";
 import { communityRefsSection } from "../communityIndex";
+import { checkRequirements, unmetFeedback, checklistText } from "./requirementCheck";
+import { getSharedSecrets } from "../settingsStore";
 import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
 
 export type MessagePart =
@@ -77,6 +79,26 @@ const graphSchema = z.object({
     params: z.record(z.string(), z.unknown()).optional(),
   }).optional(),
 });
+
+/**
+ * 建好圖之後的「可執行性提示」:告訴使用者這條流程是「馬上能測」還是「還缺什麼」——
+ * 缺帳密/自訂步驟要產碼這種事,建完當下講清楚,不要等執行失敗才發現(GPT 體檢 #7)。
+ */
+function readinessNotes(nodes: WorkflowNode[]): string {
+  const needed = new Map<string, string>();
+  for (const n of nodes) {
+    const def = getNodeDef(n.type);
+    for (const f of def?.secretFields?.(n.config ?? {}) ?? []) needed.set(f.key, f.label);
+  }
+  let secrets: Record<string, string> = {};
+  try { secrets = getSharedSecrets(); } catch { /* 測試環境沒 DB 時略過,不擋建圖 */ }
+  const missing = [...needed].filter(([k]) => !secrets[k]?.length).map(([, l]) => l);
+  const pendingCode = nodes.filter((n) => n.type === "custom-code" && !String(n.config?.code ?? "").trim()).length;
+  const lines: string[] = [];
+  if (missing.length) lines.push(`🔑 執行前要先到「設定」頁填:${[...new Set(missing)].join("、")}`);
+  if (pendingCode) lines.push(`⚙️ 有 ${pendingCode} 個自訂步驟會在第一次執行時自動產生程式碼(那一步會多花一點時間)`);
+  return lines.length ? `\n\n下一步:\n${lines.join("\n")}` : "";
+}
 
 /** Prevent malformed model-produced cron from reaching the confirmation UI.
  * The scheduler validates it again when the user applies the graph. */
@@ -513,6 +535,7 @@ export async function buildWorkflow(
   const feedbackCC: ChatMessage[] = [];
   let lastProblems: string[] = [];
   const MAX_CORRECTIONS = 2;
+  let reqFeedbackGiven = false; // 需求完整性補齊只餵回一輪(見 ready 路徑)
 
   for (let attempt = 0; attempt <= MAX_CORRECTIONS; attempt++) {
     const raw = await callOnce(feedback, feedbackCC);
@@ -599,18 +622,38 @@ export async function buildWorkflow(
           const pos = autoLayout(rawNodes, validated.data.edges);
           const nodes = rawNodes.map((n) => ({ ...n, position: pos[n.id] ?? n.position }));
           const edges = normalizeIfConditionPorts(nodes, validated.data.edges);
-          // {{變數}} 引用查核是軟提醒(合法字面 {{}} 存在，不能硬擋)，附在訊息裡讓使用者/後續修復留意
-          const varWarnings = lintVarRefWarnings(nodes, edges, validated.data.triggerParams as ParamField[] | undefined);
-          const warnNote = varWarnings.length ? `\n\n⚠️ 提醒：\n${varWarnings.slice(0, 3).map((w) => `- ${w}`).join("\n")}` : "";
           const triggerParams = validated.data.triggerParams as ParamField[] | undefined;
-          const periodNote = triggerParams?.some((p) => p.key === "periodUnit")
-            ? "\n\n📅 這條流程可以在每次執行前選擇要抓哪一期的資料(執行時會跳出選擇表單)。"
-            : "";
           const schedule = validated.data.schedule as SuggestedSchedule | undefined;
-          const scheduleNote = schedule ? `\n\n⏰ 套用流程時會一併建立並啟用排程（${schedule.cron}，台北時間）。` : "";
-          return { phase: "ready", message: String(obj.message ?? "流程已建好") + warnNote + periodNote + scheduleNote, nodes, edges, triggerParams, schedule };
+
+          // ── 需求完整性驗收(GPT 體檢 #2):lint 保證「圖合法」,這裡保證「需求有做到」。
+          //    確定性規則從使用者原話抽契約(簽核/門檻/通知/存檔/排程…),沒對應到的餵回模型補一次;
+          //    補完(或補不動)都把 ✓/✗ 清單附在回覆——沒做到的事要明講,不能默默當建好。 ──
+          const allUserText = fullHistory
+            .filter((m) => m.role === "user")
+            .map((m) => (m.parts ?? []).map((p) => (p.kind === "text" ? p.text : "")).join("\n"))
+            .join("\n");
+          const reqItems = checkRequirements(allUserText, { nodes, edges, triggerParams, schedule });
+          const unmet = reqItems.filter((i) => !i.met);
+          if (unmet.length > 0 && !reqFeedbackGiven && attempt < MAX_CORRECTIONS) {
+            reqFeedbackGiven = true; // 只補一輪:補不動就老實標 ⚠️ 交給使用者,不無限燒修正次數
+            lastProblems = [unmetFeedback(reqItems)];
+          } else {
+            // {{變數}} 引用查核是軟提醒(合法字面 {{}} 存在，不能硬擋)，附在訊息裡讓使用者/後續修復留意
+            const varWarnings = lintVarRefWarnings(nodes, edges, triggerParams);
+            const warnNote = varWarnings.length ? `\n\n⚠️ 提醒：\n${varWarnings.slice(0, 3).map((w) => `- ${w}`).join("\n")}` : "";
+            const periodNote = triggerParams?.some((p) => p.key === "periodUnit")
+              ? "\n\n📅 這條流程可以在每次執行前選擇要抓哪一期的資料(執行時會跳出選擇表單)。"
+              : "";
+            const scheduleNote = schedule ? `\n\n⏰ 套用流程時會一併建立並啟用排程（${schedule.cron}，台北時間）。` : "";
+            return {
+              phase: "ready",
+              message: String(obj.message ?? "流程已建好") + checklistText(reqItems) + readinessNotes(nodes) + warnNote + periodNote + scheduleNote,
+              nodes, edges, triggerParams, schedule,
+            };
+          }
+        } else {
+          lastProblems = lintErrors;
         }
-        lastProblems = lintErrors;
       }
     }
     // ── 純 clarify(合法的反問)──直接回給使用者

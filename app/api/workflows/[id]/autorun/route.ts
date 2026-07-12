@@ -12,6 +12,8 @@ import { checkRunSemantics } from "@/lib/workflow/resultCheck";
 import { resolveParams } from "@/lib/relativeDate";
 import { CancelledError } from "@/lib/aiRetry";
 import { getDb } from "@/lib/db";
+import { fillSampleParams, fileSampleKind, writeSampleFile } from "@/lib/workflow/sampleData";
+import { getWorkflowCoverage } from "@/lib/workflow/coverage";
 import type { WorkflowNode } from "@/lib/workflow/types";
 
 // 一輪自動測試最多修幾次(跨節點總和)，以及同一個節點最多連續修幾次就放棄
@@ -111,18 +113,36 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
       }
     } catch { /* 資料夾不存在等同空——走下面的誠實停下 */ }
     if (!newest) {
-      return NextResponse.json({
-        ok: false,
-        steps: [{
-          kind: "human",
-          title: "需要一個測試檔案",
-          detail: `這條流程由「資料夾監聽」觸發，測試需要一個樣本檔——請先放一個${pattern ? `檔名含「${pattern}」的` : ""}檔案到 ${dir}，再按一次「測到會跑」。`,
-        }],
-      });
+      // 資料夾沒東西 → 能自動生模擬檔就生(CSV/文字),真資料進來前先驗流程接線;
+      // PDF/圖片這種「內容才是重點」的輸入生不出有意義的樣本,照舊誠實停下(不假裝測過)。
+      const kind = fileSampleKind(wf.nodes);
+      if (kind === "no") {
+        return NextResponse.json({
+          ok: false,
+          steps: [{
+            kind: "human",
+            title: "需要一個測試檔案",
+            detail: `這條流程要讀 PDF/圖片的「內容」,模擬檔測不出真效果——請先放一個${pattern ? `檔名含「${pattern}」的` : ""}真實樣本到 ${dir},再按一次「測到會跑」。`,
+          }],
+        });
+      }
+      const sample = writeSampleFile(kind);
+      triggerParams.filePath = sample.filePath;
+      triggerParams.fileName = sample.fileName;
+      steps.push({ kind: "info", title: "自動用模擬資料當測試樣本", detail: `${sample.fileName}(通用${kind === "csv" ? "表格" : "文字"}內容;真檔案丟進監聽資料夾後建議再實測一次)` });
+    } else {
+      triggerParams.filePath = newest.abs;
+      triggerParams.fileName = newest.name;
+      steps.push({ kind: "info", title: "用監聽資料夾裡的檔案當測試樣本", detail: newest.name });
     }
-    triggerParams.filePath = newest.abs;
-    triggerParams.fileName = newest.name;
-    steps.push({ kind: "info", title: "用監聽資料夾裡的檔案當測試樣本", detail: newest.name });
+  }
+
+  // 表單/webhook 型參數:「沒預設值也沒人填」的洞用安全模擬值補滿——不然測試第一步就死在空參數,
+  // 或整條用空字串跑出「全綠但內容空白」的假成功(GPT 體檢 #3)
+  {
+    const { params: filled, notes } = fillSampleParams(wf.triggerParams ?? [], triggerParams);
+    Object.assign(triggerParams, filled);
+    if (notes.length) steps.push({ kind: "info", title: "用模擬值補上沒填的參數", detail: notes.join("、") });
   }
   const fixCountByNode: Record<string, number> = {};
   const labelOf = (nodeId: string | null | undefined) => (nodeId && wf.nodes.find((n) => n.id === nodeId)?.label) || nodeId || "某一步";
@@ -439,7 +459,19 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
       return NextResponse.json({ ok: true, steps, runId: result.runId, suspicion: lastSuspicion });
     }
     for (const f of pendingRecordFixes) recordFix(f);
-    steps.push({ kind: "done", title: "完成！這條流程已經測到會跑了", detail: "確認結果沒問題後，可以按「設為正式」把它固定下來。" });
+    // 分支覆蓋提醒:成功一次只證明其中一條路能走——沒走過的分支(拒絕/超標/失敗備案)講清楚,
+    // 別讓「全綠」被誤讀成「每條路都驗過」(GPT 體檢 #4)
+    let coverageNote = "";
+    try {
+      const cov = getWorkflowCoverage(id);
+      if (cov && cov.total > 0 && !cov.complete) {
+        const missing = cov.ports.filter((p) => !p.covered).slice(0, 4).map((p) => `「${p.nodeLabel}→${p.portLabel}」`).join("、");
+        coverageNote = `已驗證 ${cov.covered}/${cov.total} 條分支;${missing} 這幾條還沒走過,建議用對應情境再測一次(紀錄面板有完整清單)。`;
+      } else if (cov?.complete) {
+        coverageNote = "所有分支出口都被實際走過(完整驗證)。";
+      }
+    } catch { /* 覆蓋率只是加分資訊,算不出來不擋收工 */ }
+    steps.push({ kind: "done", title: "完成！這條流程已經測到會跑了", detail: `確認結果沒問題後，可以按「設為正式」把它固定下來。${coverageNote}` });
     return NextResponse.json({ ok: true, steps, runId: result.runId });
   }
 
