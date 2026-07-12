@@ -3,6 +3,7 @@ import { listWorkflows, createWorkflow } from "@/lib/workflow/store";
 import { getWorkflowModel, getGlobalSettings } from "@/lib/settingsStore";
 import { listRuns } from "@/lib/workflow/engine";
 import { getWebhookToken } from "@/lib/webhookStore";
+import { getLineToken } from "@/lib/lineHook";
 import { getDb } from "@/lib/db";
 
 export async function GET() {
@@ -28,6 +29,9 @@ export async function GET() {
         schedule: hasSchedule,
         watch: Boolean(String(trigger?.config?.watchPath ?? "").trim()),
         webhook: Boolean(getWebhookToken(wf.id)),
+        email: trigger?.config?.mailWatch === "on",
+        telegram: trigger?.config?.telegramWatch === "on",
+        line: Boolean(getLineToken(wf.id)),
       },
     };
   });

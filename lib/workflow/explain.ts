@@ -61,7 +61,29 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
           settings: [["監聽資料夾", watchPath], ["檔名條件", pattern || "（任何檔案）"]],
         };
       }
-      return { text: "流程的起點。手動按「執行」、排程時間到、或 Webhook 被呼叫，就從這裡開始跑(監聽/Webhook 在 ⚡ 觸發面板設定)。", settings: [] };
+      if (str(c, "mailWatch").trim() === "on") {
+        const subject = str(c, "mailSubjectFilter").trim();
+        const from = str(c, "mailFromFilter").trim();
+        const folder = str(c, "mailFolder").trim() || "收件匣";
+        return {
+          text: `流程的起點。每分鐘檢查信箱(${folder})，收到${subject ? `主旨含「${subject}」` : ""}${subject && from ? "、" : ""}${from ? `寄件人含「${from}」` : ""}${!subject && !from ? "任何" : ""}的新信就自動跑——下游用 {{subject}}/{{body}} 拿信的內容，附件用 {{filePath}}。流程要「設為正式」才會開始收信；IMAP 帳密在設定頁填。`,
+          settings: [["主旨條件", subject || "（任何主旨）"], ["寄件人條件", from || "（任何人）"], ["信箱資料夾", folder]],
+        };
+      }
+      if (str(c, "telegramWatch").trim() === "on") {
+        const keyword = str(c, "telegramKeyword").trim();
+        return {
+          text: `流程的起點。傳${keyword ? `含「${keyword}」的` : ""}訊息給你的 Telegram bot 就自動跑——下游用 {{message}} 拿訊息文字。只接受設定頁綁定的 Chat ID；流程要「設為正式」才會開始接收。`,
+          settings: [["訊息條件", keyword || "（任何訊息）"]],
+        };
+      }
+      if (str(c, "lineWatch").trim() === "on") {
+        return {
+          text: "流程的起點。有人傳訊息給你的 LINE 官方帳號就自動跑——下游用 {{message}} 拿訊息文字。webhook 網址在 ⚡ 觸發面板取得(要經隧道開成公網 HTTPS 再填進 LINE Developers)。",
+          settings: [],
+        };
+      }
+      return { text: "流程的起點。手動按「執行」、排程時間到、或 Webhook 被呼叫，就從這裡開始跑(監聽/收信/Telegram/LINE/Webhook 都在 ⚡ 觸發面板設定)。", settings: [] };
     }
 
     case "browser-login": {
@@ -279,6 +301,17 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
       return {
         text: `寄一封主旨「${subject}」的 email 給「${to || "自己(SMTP 帳號)"}」${attach ? `，附上「${attach}」` : ""}。SMTP 要先在設定頁串好。`,
         settings: [["收件人", to || "（寄給自己）"], ["主旨", subject], ...(attach ? ([["附件", attach]] as [string, string][]) : [])],
+      };
+    }
+
+    case "email-read": {
+      const subject = hstr("subjectFilter").trim();
+      const from = hstr("fromFilter").trim();
+      const days = str(c, "sinceDays", "3").trim() || "3";
+      const folder = str(c, "folder").trim() || "收件匣";
+      return {
+        text: `直接連信箱(${folder})抓最近 ${days} 天內「最新一封」${subject ? `主旨含「${subject}」` : ""}${subject && from ? "、" : ""}${from ? `寄件人含「${from}」` : ""}${!subject && !from ? "的" : "的"}信(免開瀏覽器)，信的內文給後面步驟用，附件自動存檔(下游用 {{filePath}} 接)。IMAP 帳密要先在設定頁填好。`,
+        settings: [["主旨條件", subject || "（任何主旨）"], ["寄件人條件", from || "（任何人）"], ["找最近幾天", `${days} 天`], ["信箱資料夾", folder]],
       };
     }
 

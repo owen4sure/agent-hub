@@ -10,6 +10,7 @@ import { autorunActive } from "@/lib/workflow/busyLocks";
 import { createSchedule, deleteSchedule, isValidCron, listSchedules } from "@/lib/scheduler";
 import { setBuildStage, clearBuildStage } from "@/lib/workflow/buildProgress";
 import { getWebhookToken, rotateWebhookToken } from "@/lib/webhookStore";
+import { getLineToken, rotateLineToken } from "@/lib/lineHook";
 
 // 提出建圖(可能回問題、回可套用的圖、或直接改好現有節點)
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -218,11 +219,21 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
       const token = getWebhookToken(id) ?? rotateWebhookToken(id); // 已啟用就沿用舊網址,不作廢別人手上的
       webhookUrl = `http://127.0.0.1:${process.env.PORT ?? 3000}/api/hooks/${id}/${token}`;
     }
+    // LINE 訊息觸發:AI 把意圖寫在 trigger config 的 lineWatch="on"——套用時自動啟用拿網址,
+    // 使用者不用自己去面板按(跟 autoWebhook 同一個「觸發全自動套用」精神)
+    let lineUrl: string | null = null;
+    const wantsLine = (body.nodes as { type?: string; config?: Record<string, unknown> }[])
+      .some((n) => n.type === "trigger" && n.config?.lineWatch === "on");
+    if (wantsLine) {
+      const token = getLineToken(id) ?? rotateLineToken(id);
+      lineUrl = `http://127.0.0.1:${process.env.PORT ?? 3000}/api/line-hooks/${id}/${token}`;
+    }
     return NextResponse.json({
       ok: true,
       scheduleCreated,
       webhookUrl,
       formUrl: webhookUrl ? webhookUrl.replace("/api/hooks/", "/form/") : null,
+      lineUrl,
       onFailureLinked: onFailureTarget ? onFailureTarget.name : null,
       onFailureMissing: onFailureRef && !onFailureTarget ? onFailureRef : null,
     });

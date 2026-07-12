@@ -110,7 +110,7 @@ export default function SettingsPage() {
     setNotifyInputs((prev) => { const next = { ...prev }; for (const k of keys) delete next[k]; return next; });
     return true;
   }
-  async function notifyAction(platform: "telegram" | "line" | "email" | "slack" | "sheet", action: string, saveKeys: string[]) {
+  async function notifyAction(platform: "telegram" | "line" | "email" | "slack" | "sheet" | "imap", action: string, saveKeys: string[]) {
     setNotifyBusy(action);
     setNotifyMsg((p) => ({ ...p, [platform]: { ok: true, text: "處理中…" } }));
     try {
@@ -320,9 +320,15 @@ export default function SettingsPage() {
             <input type="text" className="input mt-1" placeholder={secretsSet.lineUserId ? "（已設定，留空不變）" : "Basic settings 最下面的 Your user ID(U 開頭)"}
               value={notifyInputs.lineUserId ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, lineUserId: e.target.value }))} />
           </label>
+          <label className="block text-sm">
+            <span className="muted">Channel Secret(選填，「LINE 訊息觸發」才需要) {secretsSet.lineChannelSecret && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
+            <input type="password" className="input mt-1" placeholder={secretsSet.lineChannelSecret ? "••••••••（已設定，留空不變）" : "Basic settings 分頁的 Channel secret"}
+              value={notifyInputs.lineChannelSecret ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, lineChannelSecret: e.target.value }))} />
+            <span className="text-xs faint block mt-1">發通知用不到它；想讓「傳 LINE 給官方帳號就觸發流程」動起來才要填(驗 webhook 簽章用)。</span>
+          </label>
           <div className="flex items-center gap-2">
             <button className="btn btn-primary" disabled={notifyBusy !== null}
-              onClick={() => notifyAction("line", "line-test", ["lineChannelAccessToken", "lineUserId"])}>
+              onClick={() => notifyAction("line", "line-test", ["lineChannelAccessToken", "lineUserId", "lineChannelSecret"])}>
               {notifyBusy === "line-test" ? "發送中…" : "測試發送"}
             </button>
           </div>
@@ -394,6 +400,49 @@ export default function SettingsPage() {
             </button>
           </div>
           {notifyMsg.email && <p className="text-sm" style={{ color: notifyMsg.email.ok ? "var(--green)" : "var(--red)" }}>{notifyMsg.email.text}</p>}
+        </div>
+
+        <div className="card p-5 space-y-3">
+          <h3 className="text-sm font-medium">📨 收信(IMAP) {secretsSet.imapHost && secretsSet.imapAccount && secretsSet.imapPassword && <span style={{ color: "var(--green)" }}>· 已串接</span>}</h3>
+          <p className="text-sm muted">串好之後，流程就能「收到 email 就自動觸發」、也能用「讀取信箱」步驟直接抓信和附件——都不用開瀏覽器登入。</p>
+          <details className="text-sm">
+            <summary className="cursor-pointer muted">📖 用 Gmail 怎麼填？(點開看教學，約 1 分鐘)</summary>
+            <ol className="list-decimal ml-5 mt-2 space-y-1 muted">
+              <li>IMAP 主機填 <code>imap.gmail.com</code>，連接埠留空(預設 993)。</li>
+              <li>帳號填你的 Gmail 地址；<b>密碼跟上面寄信同一組「應用程式密碼」</b>(不是登入密碼)。</li>
+              <li>Gmail 預設已開 IMAP；其他信箱服務照它們的 IMAP 資訊填即可。</li>
+              <li>按「測試連線」，看到收件匣的信件數就完成了！</li>
+            </ol>
+          </details>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block text-sm">
+              <span className="muted">IMAP 主機 {secretsSet.imapHost && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
+              <input type="text" className="input mt-1" placeholder={secretsSet.imapHost ? "（已設定，留空不變）" : "imap.gmail.com"}
+                value={notifyInputs.imapHost ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, imapHost: e.target.value }))} />
+            </label>
+            <label className="block text-sm">
+              <span className="muted">連接埠 {secretsSet.imapPort && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
+              <input type="text" className="input mt-1" placeholder={secretsSet.imapPort ? "（已設定，留空不變）" : "993(留空即可)"}
+                value={notifyInputs.imapPort ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, imapPort: e.target.value }))} />
+            </label>
+          </div>
+          <label className="block text-sm">
+            <span className="muted">Email 帳號 {secretsSet.imapAccount && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
+            <input type="text" className="input mt-1" placeholder={secretsSet.imapAccount ? "（已設定，留空不變）" : "you@gmail.com"}
+              value={notifyInputs.imapAccount ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, imapAccount: e.target.value }))} />
+          </label>
+          <label className="block text-sm">
+            <span className="muted">Email 密碼 {secretsSet.imapPassword && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
+            <input type="password" className="input mt-1" placeholder={secretsSet.imapPassword ? "••••••••（已設定，留空不變）" : "Gmail 填 16 碼應用程式密碼"}
+              value={notifyInputs.imapPassword ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, imapPassword: e.target.value }))} />
+          </label>
+          <div className="flex items-center gap-2">
+            <button className="btn btn-primary" disabled={notifyBusy !== null}
+              onClick={() => notifyAction("imap", "imap-test", ["imapHost", "imapPort", "imapAccount", "imapPassword"])}>
+              {notifyBusy === "imap-test" ? "連線中…" : "測試連線"}
+            </button>
+          </div>
+          {notifyMsg.imap && <p className="text-sm" style={{ color: notifyMsg.imap.ok ? "var(--green)" : "var(--red)" }}>{notifyMsg.imap.text}</p>}
         </div>
 
         <div className="card p-5 space-y-3">

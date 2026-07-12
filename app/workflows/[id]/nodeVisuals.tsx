@@ -10,7 +10,7 @@ export const ICONS: Record<string, string> = {
   "telegram-notify": "✈️", "line-notify": "💬",
   "write-file": "💾", "read-file": "📂", "web-page": "🕸️", "desktop-notify": "🔔", "send-email": "✉️",
   "slack-notify": "📣", "google-sheet-read": "📗", "google-sheet-append": "📘", "read-image": "🖼️", wait: "⏳", "run-workflow": "🧩", "rss-read": "📰",
-  switch: "🧭", "wait-approval": "✋",
+  switch: "🧭", "wait-approval": "✋", "email-read": "📨",
 };
 
 /** 節點型別 → 類別色 token + 白話型別名(卡片副標)。新增節點型別記得補一行，沒補會退回 custom 灰。 */
@@ -45,6 +45,7 @@ const TYPE_META: Record<string, { cat: string; label: string }> = {
   "rss-read": { cat: "integration", label: "讀 RSS" },
   switch: { cat: "logic", label: "多路分流" },
   "wait-approval": { cat: "logic", label: "等人簽核" },
+  "email-read": { cat: "integration", label: "讀取信箱" },
 };
 
 export function catColor(type: string): string {

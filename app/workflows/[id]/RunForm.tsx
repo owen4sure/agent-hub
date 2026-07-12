@@ -8,6 +8,7 @@ export function RunForm({
   triggerParams,
   isDraft,
   watchMode,
+  messageMode,
   onClose,
   onRun,
 }: {
@@ -15,6 +16,8 @@ export function RunForm({
   isDraft: boolean;
   /** 監聽型流程手動執行：要選一個測試檔案去代替「被丟進資料夾的新檔案」 */
   watchMode?: boolean;
+  /** 收信/Telegram/LINE 觸發型流程手動執行：填測試值代替「剛收到的信/訊息」 */
+  messageMode?: "mail" | "telegram" | "line";
   onClose: () => void;
   onRun: (params: Record<string, string>, headed?: boolean) => void;
 }) {
@@ -24,6 +27,10 @@ export function RunForm({
   );
   const [headed, setHeaded] = useState(isDraft);
   const [testFile, setTestFile] = useState("");
+  const [testSubject, setTestSubject] = useState("測試信件");
+  const [testFrom, setTestFrom] = useState("test@example.com");
+  const [testBody, setTestBody] = useState("");
+  const [testMessage, setTestMessage] = useState("");
   const titleId = useId();
   const cancelRef = useRef<HTMLButtonElement>(null);
 
@@ -36,10 +43,29 @@ export function RunForm({
 
   function submit() {
     const params = { ...values };
-    if (watchMode && testFile.trim()) {
-      // 手動測試時模擬監聽觸發：把選的檔案當成「剛被丟進資料夾的新檔案」餵給下游的 {{filePath}}/{{fileName}}
+    if ((watchMode || messageMode === "mail") && testFile.trim()) {
+      // 手動測試時模擬觸發：把選的檔案當成「剛丟進資料夾的新檔案/信的附件」餵給下游的 {{filePath}}/{{fileName}}
       params.filePath = testFile.trim();
       params.fileName = testFile.trim().split("/").pop() ?? testFile.trim();
+    }
+    if (messageMode === "mail") {
+      // 模擬收信觸發：測試值代替「剛收到的信」，欄位跟 mailWatcher 注入的一致
+      params.subject = testSubject.trim();
+      params.from = testFrom.trim();
+      params.body = testBody;
+      params.date = new Date().toISOString();
+      if (!("attachmentCount" in params)) params.attachmentCount = testFile.trim() ? "1" : "0";
+    }
+    if (messageMode === "telegram") {
+      params.message = testMessage;
+      params.fromName = "測試";
+      params.chatId = "";
+      params.messageId = "0";
+    }
+    if (messageMode === "line") {
+      params.message = testMessage;
+      params.userId = "";
+      params.replyToken = "";
     }
     onRun(params, headed);
   }
@@ -90,6 +116,36 @@ export function RunForm({
             <span className="muted">測試用檔案(完整路徑)</span>
             <input value={testFile} onChange={(e) => setTestFile(e.target.value)} className="input mt-1 font-mono text-xs" placeholder="/Users/你的名字/Desktop/測試檔.txt" />
             <span className="text-xs faint">這條流程平常由「資料夾監聽」觸發——手動測試時，選一個檔案代替「剛丟進資料夾的新檔案」。留空的話，用到 {"{{filePath}}"} 的步驟會失敗。</span>
+          </label>
+        )}
+        {messageMode === "mail" && (
+          <div className="space-y-2 rounded-lg p-3" style={{ background: "var(--surface-2)" }}>
+            <p className="text-xs faint">這條流程平常由「收信」觸發——手動測試時，用下面的測試值代替「剛收到的信」。</p>
+            <label className="block text-sm">
+              <span className="muted">測試主旨</span>
+              <input value={testSubject} onChange={(e) => setTestSubject(e.target.value)} className="input mt-1" />
+            </label>
+            <label className="block text-sm">
+              <span className="muted">測試寄件人</span>
+              <input value={testFrom} onChange={(e) => setTestFrom(e.target.value)} className="input mt-1" />
+            </label>
+            <label className="block text-sm">
+              <span className="muted">測試內文({"{{body}}"})</span>
+              <textarea value={testBody} onChange={(e) => setTestBody(e.target.value)} className="input mt-1 min-h-16" placeholder="貼一段像真信內文的文字" />
+            </label>
+            {!watchMode && (
+              <label className="block text-sm">
+                <span className="muted">測試附件檔案(完整路徑，留空=沒附件)</span>
+                <input value={testFile} onChange={(e) => setTestFile(e.target.value)} className="input mt-1 font-mono text-xs" placeholder="/Users/你的名字/Desktop/測試檔.xlsx" />
+              </label>
+            )}
+          </div>
+        )}
+        {(messageMode === "telegram" || messageMode === "line") && (
+          <label className="block text-sm">
+            <span className="muted">測試訊息({"{{message}}"})</span>
+            <input value={testMessage} onChange={(e) => setTestMessage(e.target.value)} className="input mt-1" placeholder={messageMode === "telegram" ? "模擬傳給 bot 的訊息文字" : "模擬傳給官方帳號的訊息文字"} />
+            <span className="text-xs faint">這條流程平常由「{messageMode === "telegram" ? "Telegram" : "LINE"} 訊息」觸發——手動測試時，填一句訊息代替。</span>
           </label>
         )}
         <div className="space-y-3">

@@ -288,6 +288,18 @@ export function lintVarRefWarnings(nodes: WorkflowNode[], edges: WorkflowEdge[],
         // 每條監聽型流程建圖都挨一次假警告(範本品質閘門實測抓到)。
         acc.add("filePath");
         acc.add("fileName");
+        // 收信/Telegram/LINE 觸發注入的事實變數同理——只在對應觸發有開時才算可用，
+        // 沒開就引用 {{body}}/{{message}} 仍然要警告(那是真的接錯)。
+        const cfg = parent.config ?? {};
+        if (cfg.mailWatch === "on") {
+          for (const k of ["from", "subject", "date", "body", "attachmentCount"]) acc.add(k);
+        }
+        if (cfg.telegramWatch === "on") {
+          for (const k of ["message", "chatId", "fromName", "messageId"]) acc.add(k);
+        }
+        if (cfg.lineWatch === "on") {
+          for (const k of ["message", "userId", "replyToken"]) acc.add(k);
+        }
       }
       const def = getNodeDef(parent.type);
       for (const f of outputFieldNames(def?.outputs)) acc.add(f);

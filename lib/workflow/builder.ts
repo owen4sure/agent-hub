@@ -397,10 +397,13 @@ ${runtimeSection(rc)}
   - 系統會依 periodUnit/periodWhich 算出 period.*、解析出這些衍生欄位的實際值，且執行前會跳出表單讓使用者精準選「2026 第一季」這種實際期間(不只是「上一期/這一期」二選一)，這正是解決「有時候想抓別期」的機制。
   - 不是週期性的需求(單次抓資料、一次性報表)就不需要 triggerParams，不要為了不需要的東西硬加。
 
-【觸發方式：排程/資料夾監聽/Webhook】
+【觸發方式：排程/資料夾監聽/Webhook/收信/Telegram/LINE】
 - 使用者說「每天/每週/每月/每季幾點自動跑」：排程不是節點，不要為它畫節點；請在 phase:"ready" 根層加 schedule:{"cron":"五欄 cron","params":{}}。系統會在使用者按「套用」時一併建立並啟用排程，不要再叫使用者自己去觸發面板設定。時區固定 Asia/Taipei。例：每天 09:00 = "0 9 * * *"；每週一 09:00 = "0 9 * * 1"；每月 1 日 09:00 = "0 9 1 * *"；每季首月 1 日 09:00 = "0 9 1 1,4,7,10 *"。
 - 使用者說「把檔案丟進某個資料夾就自動處理」：在 trigger 節點的 config 填 watchPath(那個資料夾的絕對路徑；使用者沒講清楚路徑就先 clarify 問)，需要過濾檔名就填 watchPattern。下游節點用 {{filePath}} 拿到新檔案的完整路徑(例如 read-file 的 path 填 {{filePath}})、{{fileName}} 拿檔名。記得在 message 提醒「設為正式後才會開始監聽」。
 - 使用者說「讓別的程式/捷徑/工具能觸發這個流程」：這是 Webhook——流程圖照建;系統會在套用時**自動啟用 Webhook 並把網址顯示給使用者**,你不用叫他去面板設定。外部 POST 的 JSON 欄位會直接變成下游可用的 {{欄位}}；如果需求裡講明外部會送哪些欄位(如 title、amount)，下游節點就直接引用那些欄位名。
+- 使用者說「收到某種 email 就自動處理」：在 trigger 節點的 config 設 mailWatch:"on"，要篩選就填 mailSubjectFilter(主旨包含)/mailFromFilter(寄件人包含)。下游用 {{from}}/{{subject}}/{{date}}/{{body}} 拿信的欄位，信有附件時 {{filePath}}/{{fileName}} 是第一個附件(read-file/excel-process/pdf-read 都吃 {{filePath}})、{{attachmentCount}} 是附件數。記得在 message 提醒「設為正式後才會開始收信；IMAP 帳密要在設定頁填(有測試連線)」。注意：「收到信就跑」用收信觸發；「流程中途去信箱抓某封信」用 email-read 節點；「寄信出去」用 send-email——三件事別搞混。
+- 使用者說「我傳 Telegram 訊息給機器人就跑」：在 trigger 節點的 config 設 telegramWatch:"on"，只想讓特定訊息觸發就填 telegramKeyword(訊息包含)。下游用 {{message}} 拿訊息文字、{{fromName}}/{{chatId}}/{{messageId}} 拿來源。安全設計：只接受設定頁綁定的 Chat ID。記得在 message 提醒「設為正式後才會開始接收；Telegram Bot Token/Chat ID 在設定頁通知串接填」。「跑完發 Telegram 通知我」是 telegram-notify 節點，不是這個觸發。
+- 使用者說「傳 LINE 給官方帳號就跑」：在 trigger 節點的 config 設 lineWatch:"on"。系統會在套用時**自動啟用並把 webhook 網址顯示給使用者**;下游用 {{message}}/{{userId}}/{{replyToken}}。記得在 message 老實提醒「LINE 平台只能打公網 HTTPS——要先用 cloudflared/ngrok 等隧道把網址開出去(面板有教學)，並在設定頁填 LINE Channel Secret」。「跑完發 LINE 通知我」是 line-notify 節點，不是這個觸發。
 【熱門服務的免 OAuth 接法——使用者提到這些服務時,用 http-request 節點+這些配方直接建,不要說做不到】
 - **Notion**:整合 token(notion.so/my-integrations 建立,secret 欄名 notionToken)。寫入資料庫=POST https://api.notion.com/v1/pages,headers {"Authorization":"Bearer {{notionToken}}","Notion-Version":"2022-06-28","Content-Type":"application/json"}。提醒使用者:資料庫要「加入連接」給那個整合。
 - **Airtable**:個人存取權杖(airtable.com/create/tokens,secret 欄名 airtableToken)。新增列=POST https://api.airtable.com/v0/{baseId}/{tableName},Authorization Bearer。

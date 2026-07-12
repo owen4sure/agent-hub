@@ -48,6 +48,8 @@ Open http://127.0.0.1:3000 (bound to localhost only — other devices can't reac
 
 ![A failed node turns red: the error message is in plain words, with a one-click "Let AI fix this step"](docs/screenshots/ai-fix.png)
 
+![Pre-run form: pick the period — filter range, report date, and output filename are all computed automatically](docs/screenshots/run-form.png)
+
 ## The AI carries 2,000+ real-world workflows in its head
 
 The UI only ever shows *your* flows (it stays simple); the muscle lives in the AI's brain:
@@ -57,19 +59,9 @@ The UI only ever shows *your* flows (it stays simple); the muscle lives in the A
 
 As your flows grow: the home page supports search and **groups** (work / personal…) with sectioned display, and the "☰ Runs" page shows every run across all workflows in one place.
 
-## Built-in examples (duplicate & adapt)
-
-Three read-only examples show the main patterns — duplicate one and tell the AI how yours differs:
-
-- **Monthly inventory Excel digest** — 5 nodes: log in to webmail (the image CAPTCHA is read by a vision model automatically) → find the exact email by date + report name → download the attachment → filter an Excel date range, highlight, save. Date parameters use relative tokens (`{{yesterday}}`, `{{last-quarter-start}}`) resolved at trigger time; before each run you pick the accounting period and all dates are computed for you to confirm.
-- **Drop a file, get a summary** — folder-watch trigger: drop a PDF/Word/txt into a watched folder → contents extracted → AI writes a 3-point summary → saved as a file + desktop notification.
-- **Morning web digest by email** — fetch a web page → AI picks the top 3 items in Chinese → emails them to you; add a daily schedule and it becomes an automatic morning briefing.
-
-![Pre-run form: pick the period — filter range, report date, and output filename are all computed automatically](docs/screenshots/run-form.png)
-
 ## Node library (extensible)
 
-Triggers, browser (login / find email / download attachment), data (Excel / string templates / PDF reading / zip extraction), files (read a file as text — PDF/Word/Excel/PPT auto-extracted — / write text files), integrations (HTTP requests / fetch a web page as text / read RSS feeds / read a link-shared Google Sheet with zero auth / append rows to your Google Sheet via a 3-minute Apps Script deploy — no OAuth / send email over SMTP with attachments / Telegram / LINE / Slack / desktop notification), logic (if conditions / **multi-way switch** / **wait-for-human-approval** / repeat steps over a list / wait / run another workflow as a sub-flow / variables), AI (decide·generate / read images with a vision model), and custom code. Each node type is one file in `lib/workflow/nodes/*.ts` — add a file and the AI can use it immediately. Files uploaded to the AI (PDF, Word `.docx/.doc`, Excel `.xlsx/.xls`, PowerPoint `.pptx`, RTF, plain-text family) are converted to text server-side (`lib/textExtract.ts`); images and screenshots go through a vision model that truly *sees* the content (Excel colors/borders/layout, embedded charts, web pages) — not just extracted text.
+Triggers, browser (login / find email / download attachment), data (Excel / string templates / PDF reading / zip extraction), files (read a file as text — PDF/Word/Excel/PPT auto-extracted — / write text files), integrations (HTTP requests / fetch a web page as text / read RSS feeds / **read a mailbox over IMAP (no browser)** / read a link-shared Google Sheet with zero auth / append rows to your Google Sheet via a 3-minute Apps Script deploy — no OAuth / send email over SMTP with attachments / Telegram / LINE / Slack / desktop notification), logic (if conditions / **multi-way switch** / **wait-for-human-approval** / repeat steps over a list / wait / run another workflow as a sub-flow / variables), AI (decide·generate / read images with a vision model), and custom code. Each node type is one file in `lib/workflow/nodes/*.ts` — add a file and the AI can use it immediately. Files uploaded to the AI (PDF, Word `.docx/.doc`, Excel `.xlsx/.xls`, PowerPoint `.pptx`, RTF, plain-text family) are converted to text server-side (`lib/textExtract.ts`); images and screenshots go through a vision model that truly *sees* the content (Excel colors/borders/layout, embedded charts, web pages) — not just extracted text.
 
 ## Human approval / Plan-B branches / resume from the failed step
 
@@ -81,16 +73,19 @@ Triggers, browser (login / find email / download attachment), data (Excel / stri
 
 ![The approval page: read the request, optionally leave a note, approve or reject — the flow continues on its own](docs/screenshots/approval-page.png)
 
-## Triggers: schedule / folder watch / webhook
+## Triggers: schedule / folder watch / webhook / email / Telegram / LINE
 
-Besides clicking ▶ Run, every workflow has a ⚡ trigger panel with three ways to run itself:
+Besides clicking ▶ Run, every workflow has a ⚡ trigger panel with six ways to run itself:
 
 - **Schedule**: daily / monthly / quarterly on Jan-Apr-Jul-Oct / weekly / raw cron — the whole graph triggers automatically (headless), computing "last period" dates for you.
 - **Folder watch**: point the workflow at a folder; any new file dropped in triggers a run within seconds, with `{{filePath}}` / `{{fileName}}` available to downstream nodes ("drop the report in the inbox folder and it processes itself"). Files already in the folder when you enable watching are ignored; only new arrivals trigger. Watching applies to *production* workflows only, so a draft you're still editing never fires in the background.
 - **Web form**: enabling the webhook also gives you a form URL — anyone you share it with fills a ready-made web form (fields = the flow's trigger parameters) and submits to trigger the flow. The human-friendly twin of the webhook.
 - **Webhook**: enable it to get a private URL (the random token in the URL is the credential). Any local tool — a phone shortcut relaying through your Mac, a script, another app — POSTs JSON to it and the fields become `{{field}}` variables in the flow. Regenerate the URL anytime to revoke the old one.
+- **Email (IMAP)**: "when an email like this arrives, run" — the engine polls your inbox once a minute over IMAP (no browser, no CAPTCHA); a new mail matching your subject/sender filters triggers a run with `{{from}}` / `{{subject}}` / `{{body}}` available downstream, and attachments saved to disk as `{{filePath}}`. Mails already in the inbox when you enable it never fire; production workflows only. IMAP credentials live on the Settings page with a one-click connection test (Gmail: `imap.gmail.com` + the same app password as SMTP). There's also a standalone **read-mailbox node** to fetch the latest matching mail mid-flow.
+- **Telegram message**: text your bot and the flow runs, with `{{message}}` downstream — add a keyword filter ("記帳…") so several flows can share one bot. Locked to the Chat ID bound on the Settings page: strangers who find your bot can't trigger anything. Production workflows only.
+- **LINE message**: message your LINE Official Account and the flow runs (`{{message}}` / `{{userId}}` / `{{replyToken}}`). Two locks: a random token in the webhook URL *and* an `X-Line-Signature` check against your Channel Secret. Heads-up: LINE's platform can only call a public HTTPS URL, so you need a tunnel (`cloudflared` / `ngrok`, instructions in the panel) until the built-in secure remote mode ships.
 
-Unattended runs (all three trigger types) report success/failure via desktop notification — you'll know something broke without opening the app.
+Unattended runs (every trigger type) report success/failure via desktop notification — you'll know something broke without opening the app.
 
 Schedules and watchers need the engine running; install it as a daemon so it survives reboots:
 
@@ -130,8 +125,11 @@ lib/textExtract.ts             server-side text extraction for uploaded files (E
 lib/scheduler.ts               scheduling (cron matching / next_run_at / catch-up runs)
 lib/watchers.ts                folder-watch trigger (10s scan, DB-claimed dedup, silent seeding of pre-existing files)
 lib/webhookStore.ts            webhook token management (constant-time compare); endpoint at app/api/hooks/
+lib/mailClient.ts               shared IMAP layer (imapflow + mailparser): credentials, filters, fetch/parse
+lib/mailWatcher.ts              email trigger (60s IMAP poll, same claim/seed discipline as folder-watch)
+lib/telegramPoller.ts          single Telegram getUpdates consumer: approval buttons + message trigger
+lib/lineHook.ts                 LINE webhook token + X-Line-Signature verification; endpoint at app/api/line-hooks/
 lib/notify.ts                  desktop notifications for schedule success/failure (macOS)
-examples/                      built-in example workflows (read-only)
 data/                          local state (gitignored): DB, workflows, debug screenshots, output files
 docs/ARCHITECTURE_V2.md        the original design document (partially outdated; code and this README win)
 ```
@@ -141,7 +139,7 @@ docs/ARCHITECTURE_V2.md        the original design document (partially outdated;
 ```bash
 npm run test    # unit tests for core logic (relative-date resolution, graph lint, JSON extraction, cron, folder-watch rules — pure functions)
 npm run lint    # ESLint
-node scripts/regression.mjs [from to]  # complex-request regression suite: 20 representative plain-language cases, built by the AI for real and structurally verified (consumes model quota; run manually before releases)
+node scripts/regression.mjs [from to]  # complex-request regression suite: representative plain-language cases, built by the AI for real and structurally verified (consumes model quota; run manually before releases)
 ```
 
 ## Security
@@ -149,7 +147,6 @@ node scripts/regression.mjs [from to]  # complex-request regression suite: 20 re
 - **No keys in code**: read from `.env` (`AGENT_HUB_API_KEY`, gitignored) or the Settings page; never committed.
 - `data/` is fully gitignored; credentials are stored in plaintext in local SQLite (same trust model as a browser's saved passwords) — don't sync it to the cloud.
 - The AI always shows a preview for you to confirm before building or editing the graph, and auto-backups make everything restorable.
-- Built-in examples are read-only; duplicate before editing.
 - **This is a single-user local tool, bound to `127.0.0.1` by default** (`npm run dev` / `npm run start` both pass `-H 127.0.0.1`). **Do not change it to `-H 0.0.0.0` or host it publicly** — the `custom-code` node (AI-written custom steps) and the `http-request` node execute code / reach arbitrary URLs on your machine, so exposing them is equivalent to RCE/SSRF.
 - **Built-in cross-site protection** (`proxy.ts`): binding to 127.0.0.1 alone can't stop a malicious web page from making your own browser send requests to localhost. All `/api` requests verify the Host header (against DNS rebinding), and non-GET requests additionally require a local Origin — cross-site requests from external sites get 403.
 - **The `custom-code` node runs AI-generated code on your machine with your user permissions** — that's the nature of the "AI writes a custom step for you" feature. The code is visible before you apply it; if a workflow doesn't feel trustworthy, don't use custom-code nodes in it.

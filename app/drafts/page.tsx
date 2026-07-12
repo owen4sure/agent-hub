@@ -12,7 +12,7 @@ interface WorkflowSummary {
   builtin: boolean;
   description: string;
   nodeCount: number;
-  triggers?: { schedule: boolean; watch: boolean; webhook: boolean };
+  triggers?: { schedule: boolean; watch: boolean; webhook: boolean; email?: boolean; telegram?: boolean; line?: boolean };
 }
 
 export default function DraftsPage() {
@@ -73,12 +73,11 @@ export default function DraftsPage() {
   }
 
   const drafts = workflows?.filter((w) => w.status === "draft") ?? [];
-  const examples = workflows?.filter((w) => w.builtin) ?? [];
 
   return (
     <div className="max-w-6xl mx-auto px-8 py-8">
       <PageHeader
-        title="草稿 & 範例"
+        title="草稿"
         subtitle="草稿執行時用有頭瀏覽器，方便看到卡在哪一步；做好後在 workflow 裡按「設為正式」"
         actions={
           <>
@@ -95,23 +94,8 @@ export default function DraftsPage() {
       {loadError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>載入失敗，請確認伺服器是否正常，<button onClick={load} className="underline">重試</button>。</div>}
       {workflows === null && !loadError && <p className="text-sm muted mb-4">載入中…</p>}
 
-      {examples.length > 0 && (
-        <>
-          <h2 className="text-xs font-semibold uppercase tracking-wide faint mb-3">內建範例</h2>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 mb-8">
-            {examples.map((w) => (
-              <Link key={w.id} href={`/workflows/${w.id}`} className="card card-hover p-5 block">
-                <span className="font-medium tracking-tight">{w.name}</span>
-                <p className="text-sm muted line-clamp-2 mt-1">{w.description}</p>
-              </Link>
-            ))}
-          </div>
-        </>
-      )}
-
-      <h2 className="text-xs font-semibold uppercase tracking-wide faint mb-3">我的草稿</h2>
       {drafts.length === 0 ? (
-        <EmptyState icon="✎" title="還沒有草稿" hint="新建一個，或複製上面的範例來改，或匯入同事分享的檔案。" />
+        <EmptyState icon="✎" title="還沒有草稿" hint="新建一個，或匯入同事分享的檔案。" />
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {drafts.map((w) => (
@@ -122,10 +106,13 @@ export default function DraftsPage() {
               </div>
               <p className="text-sm muted mt-1 flex items-center gap-1.5 flex-wrap">
                 <span>{w.nodeCount} 個節點</span>
-                {/* 排程/Webhook 對草稿也會真的觸發；監聽只對正式生效——標示要照實區分 */}
+                {/* 排程/Webhook/LINE 對草稿也會真的觸發；監聽/收信/Telegram 只對正式生效——標示要照實區分 */}
                 {w.triggers?.schedule && <span className="text-xs" title="排程對草稿也會觸發">⏰ 排程</span>}
                 {w.triggers?.webhook && <span className="text-xs" title="Webhook 對草稿也會觸發">🔗 Webhook</span>}
+                {w.triggers?.line && <span className="text-xs" title="LINE 訊息對草稿也會觸發">💬 LINE</span>}
                 {w.triggers?.watch && <span className="text-xs faint" title="資料夾監聽只對「正式」流程生效，設為正式後才開始盯資料夾">📁 監聽(待設為正式)</span>}
+                {w.triggers?.email && <span className="text-xs faint" title="收信觸發只對「正式」流程生效，設為正式後才開始收信">📨 收信(待設為正式)</span>}
+                {w.triggers?.telegram && <span className="text-xs faint" title="Telegram 訊息觸發只對「正式」流程生效，設為正式後才開始接收">✈️ Telegram(待設為正式)</span>}
               </p>
             </Link>
           ))}

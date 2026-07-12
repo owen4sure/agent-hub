@@ -15,12 +15,17 @@ export function nodeSummary(type: string, config: Record<string, unknown> | unde
   switch (type) {
     case "trigger": {
       if (s("watchPath")) return `📁 ${s("watchPath")}`;
+      if (s("mailWatch") === "on") return `📨 ${first(s("mailSubjectFilter"), s("mailFromFilter"), "任何新信")}`;
+      if (s("telegramWatch") === "on") return `✈️ ${first(s("telegramKeyword"), "任何訊息")}`;
+      if (s("lineWatch") === "on") return "💬 LINE 訊息";
       return "";
     }
     case "browser-login":
       return s("url");
     case "find-email":
       return first(s("subjectContains"), s("date"));
+    case "email-read":
+      return first(s("subjectFilter"), s("fromFilter"), "最新一封信");
     case "download-attachment":
       return s("nameContains");
     case "excel-process":

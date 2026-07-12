@@ -40,3 +40,32 @@ test("需求驗收:沒有訊號就不出項目(不誤報)", () => {
   assert.equal(items.length, 0);
   assert.equal(checklistText(items), "");
 });
+
+const NC = (id: string, type: string, config: Record<string, unknown>): WorkflowNode => ({ id, type, label: id, config, position: { x: 0, y: 0 } });
+
+test("需求驗收:收信觸發訊號——mailWatch 有開才算達成;「寄信給我」不誤觸發", () => {
+  const unmet = checkRequirements("收到主管的信就整理成表格", g([N("t", "trigger"), N("e", "excel-process")]));
+  assert.ok(unmet.find((i) => i.key === "mailWatch" && !i.met));
+  const met = checkRequirements("收到主管的信就整理成表格", g([NC("t", "trigger", { mailWatch: "on" }), N("e", "excel-process")]));
+  assert.ok(met.find((i) => i.key === "mailWatch" && i.met));
+  const send = checkRequirements("整理完寄信給我", g([N("t", "trigger"), N("s", "send-email")]));
+  assert.equal(send.find((i) => i.key === "mailWatch"), undefined);
+});
+
+test("需求驗收:Telegram 訊息觸發訊號——「發 telegram 通知我」是通知不是觸發,不誤報", () => {
+  const unmet = checkRequirements("我傳 telegram 訊息給機器人就幫我記帳", g([N("t", "trigger"), N("c", "custom-code")]));
+  assert.ok(unmet.find((i) => i.key === "telegramWatch" && !i.met));
+  const met = checkRequirements("我傳 telegram 訊息給機器人就幫我記帳", g([NC("t", "trigger", { telegramWatch: "on" }), N("c", "custom-code")]));
+  assert.ok(met.find((i) => i.key === "telegramWatch" && i.met));
+  const notify = checkRequirements("流程失敗時發 telegram 通知我", g([N("t", "trigger"), N("n", "telegram-notify")]));
+  assert.equal(notify.find((i) => i.key === "telegramWatch"), undefined);
+});
+
+test("需求驗收:LINE 訊息觸發訊號——deadline 這種字不誤觸發", () => {
+  const unmet = checkRequirements("傳 LINE 給官方帳號就建一筆任務", g([N("t", "trigger"), N("c", "custom-code")]));
+  assert.ok(unmet.find((i) => i.key === "lineWatch" && !i.met));
+  const met = checkRequirements("傳 LINE 給官方帳號就建一筆任務", g([NC("t", "trigger", { lineWatch: "on" }), N("c", "custom-code")]));
+  assert.ok(met.find((i) => i.key === "lineWatch" && i.met));
+  const noise = checkRequirements("deadline 到了就提醒我", g([N("t", "trigger"), N("n", "desktop-notify")]));
+  assert.equal(noise.find((i) => i.key === "lineWatch"), undefined);
+});

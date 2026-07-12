@@ -44,6 +44,18 @@ export function checkRequirements(userText: string, graph: GraphLike): Requireme
     const visible = (graph.triggerParams ?? []).filter((p) => !p.derived);
     add("form", "表單欄位(觸發參數)", visible.length > 0, "要宣告 triggerParams(表單的欄位),下游用 {{key}} 引用");
   }
+  // 收信觸發(收到信就跑)——注意跟「寄信」「讀某封信的內容」是不同需求
+  if (/收到.{0,8}(信|郵件|email|mail)|有新(信|郵件)|來信(時|就)|(信|郵件|email).{0,6}(進來|寄來)(時|就)/i.test(t)) {
+    add("mailWatch", "收到 email 就觸發", trigger?.config?.mailWatch === "on", "trigger 節點的 config.mailWatch 設 \"on\"(可加 mailSubjectFilter/mailFromFilter 篩選),下游用 {{subject}}/{{body}}/{{filePath}}");
+  }
+  // Telegram 訊息觸發(傳訊息給 bot 就跑)——「跑完發 telegram 通知我」是通知不是觸發,別誤判
+  if (/telegram/i.test(t) && /訊息.{0,4}觸發|(收到|傳來)[^。,，]{0,12}訊息|(傳|發|丟|說)[^。,，]{0,14}(給)?(bot|機器人)|訊息(進來|來)就/i.test(t)) {
+    add("telegramWatch", "Telegram 訊息觸發", trigger?.config?.telegramWatch === "on", "trigger 節點的 config.telegramWatch 設 \"on\"(可加 telegramKeyword 篩關鍵字),下游用 {{message}}");
+  }
+  // LINE 訊息觸發(傳 LINE 給官方帳號就跑)——「跑完發 LINE 通知我」是通知不是觸發
+  if (/\bline\b/i.test(t) && /訊息.{0,4}觸發|(收到|傳來)[^。,，]{0,12}訊息|(傳|發|丟|說)[^。,，]{0,14}(給)?(官方帳號|bot|機器人)|訊息(進來|來)就/i.test(t)) {
+    add("lineWatch", "LINE 訊息觸發", trigger?.config?.lineWatch === "on", "trigger 節點的 config.lineWatch 設 \"on\"(套用時會給 webhook 網址,需公網隧道),下游用 {{message}}");
+  }
   // 真人簽核
   if (/簽核|核准|審核|批准|同意才|(要|等)我確認|過我這關/.test(t)) {
     add("approval", "真人簽核關卡", has("wait-approval"), "要放 wait-approval 節點,出線標 fromPort:\"approved\"/\"rejected\"");

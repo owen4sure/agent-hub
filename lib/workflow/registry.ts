@@ -2,6 +2,7 @@ import type { NodeDefinition } from "./types";
 import { triggerNode } from "./nodes/trigger";
 import { browserLoginNode } from "./nodes/browserLogin";
 import { findEmailNode } from "./nodes/findEmail";
+import { emailReadNode } from "./nodes/emailRead";
 import { downloadAttachmentNode } from "./nodes/downloadAttachment";
 import { excelProcessNode } from "./nodes/excelProcess";
 import { pdfReadNode } from "./nodes/pdfRead";
@@ -40,6 +41,7 @@ const ALL: NodeDefinition[] = [
   writeFileNode,
   webPageNode,
   rssReadNode,
+  emailReadNode,
   googleSheetReadNode,
   googleSheetAppendNode,
   httpRequestNode,

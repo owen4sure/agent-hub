@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+export const DATA_DIR = path.join(process.cwd(), "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const DB_PATH = path.join(DATA_DIR, "agent-hub.db");
@@ -192,6 +192,8 @@ function init(): Database.Database {
   addColumnIfMissing(db, "schedules", "params_json", "params_json TEXT");
   // Webhook 觸發用的秘密 token(每條流程一個)：URL 路徑就是認證，沒有 token 的人打不動
   addColumnIfMissing(db, "workflows_meta", "webhook_token", "webhook_token TEXT");
+  // LINE 訊息觸發的 webhook token(每條流程一個)——跟一般 webhook 分開，各自啟用/停用
+  addColumnIfMissing(db, "workflows_meta", "line_token", "line_token TEXT");
 
   // 帳密改成全域共用(依 key)：把舊的「每個 workflow 各存一份」搬進共用區 __shared__，
   // 使用者已填過的帳密不會不見。已有共用值就不覆蓋(第一筆為準)，搬完刪掉舊的各別列。冪等。

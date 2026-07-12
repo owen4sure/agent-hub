@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lintGraph, validateConfigTypes, withSchemaDefaults } from "./graphLint";
+import { lintGraph, lintVarRefWarnings, validateConfigTypes, withSchemaDefaults } from "./graphLint";
 import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
 
 function node(id: string, type: string, config: Record<string, unknown> = {}): WorkflowNode {
@@ -189,4 +189,22 @@ test("lintGraph：repeat-steps 的內嵌步驟裡放 wait-approval 要報錯", (
   const nodes = [node("n1", "trigger"), node("rp", "repeat-steps", { items: "{{list}}", steps })];
   const errors = lintGraph(nodes, [{ from: "n1", to: "rp" }]);
   assert.ok(errors.some((e) => e.includes("迴圈") && e.includes("簽核")));
+});
+
+test("lintVarRefWarnings:收信觸發有開 → {{body}}/{{subject}} 是合法上游欄位;沒開就警告", () => {
+  const edges: WorkflowEdge[] = [{ from: "n1", to: "n2" }];
+  const refBody = [node("n1", "trigger", { mailWatch: "on" }), node("n2", "write-file", { content: "{{body}}", filename: "{{subject}}.txt" })];
+  assert.deepEqual(lintVarRefWarnings(refBody, edges, []), []);
+  const noMail = [node("n1", "trigger"), node("n2", "write-file", { content: "{{body}}", filename: "a.txt" })];
+  assert.ok(lintVarRefWarnings(noMail, edges, []).length > 0);
+});
+
+test("lintVarRefWarnings:Telegram/LINE 觸發有開 → {{message}} 合法;沒開就警告", () => {
+  const edges: WorkflowEdge[] = [{ from: "n1", to: "n2" }];
+  const tg = [node("n1", "trigger", { telegramWatch: "on" }), node("n2", "write-file", { content: "{{message}} - {{fromName}}", filename: "a.txt" })];
+  assert.deepEqual(lintVarRefWarnings(tg, edges, []), []);
+  const line = [node("n1", "trigger", { lineWatch: "on" }), node("n2", "write-file", { content: "{{message}}", filename: "a.txt" })];
+  assert.deepEqual(lintVarRefWarnings(line, edges, []), []);
+  const off = [node("n1", "trigger"), node("n2", "write-file", { content: "{{message}}", filename: "a.txt" })];
+  assert.ok(lintVarRefWarnings(off, edges, []).length > 0);
 });

@@ -786,9 +786,18 @@ export default function WorkflowPage() {
         JSON.stringify(n.config ?? {}).includes("{{filePath}}"),
     ) && !(wf!.triggerParams ?? []).some((f) => f.key === "filePath");
 
+  // 收信/Telegram/LINE 觸發型流程手動執行：下游引用 {{body}}/{{message}}，要開表單讓人填測試值
+  const messageTestMode = (): "mail" | "telegram" | "line" | undefined => {
+    const trigger = wf!.nodes.find((n) => n.type === "trigger");
+    if (trigger?.config?.mailWatch === "on") return "mail";
+    if (trigger?.config?.telegramWatch === "on") return "telegram";
+    if (trigger?.config?.lineWatch === "on") return "line";
+    return undefined;
+  };
+
   function onClickRun() {
     const visible = (wf!.triggerParams ?? []).filter((f) => !f.derived);
-    if (visible.length > 0 || needsTestFile()) setShowRunForm(true);
+    if (visible.length > 0 || needsTestFile() || messageTestMode()) setShowRunForm(true);
     else run({}, wf!.status === "draft");
   }
 
@@ -886,13 +895,14 @@ export default function WorkflowPage() {
       appendAssistantNote(id, `⚠️ 套用到畫布時出錯了${errText ? `:${errText}` : ""}——你的流程圖預覽還留著，可以再按一次「套用」。`);
       return;
     }
-    const applied = (await res.json().catch(() => ({}))) as { webhookUrl?: string | null; formUrl?: string | null; onFailureLinked?: string | null; onFailureMissing?: string | null };
+    const applied = (await res.json().catch(() => ({}))) as { webhookUrl?: string | null; formUrl?: string | null; lineUrl?: string | null; onFailureLinked?: string | null; onFailureMissing?: string | null };
     clearPendingGraph(id);
-    // 觸發自動套用的結果講清楚:webhook/表單網址直接給、失敗備援關聯建了沒——不用使用者去面板翻
+    // 觸發自動套用的結果講清楚:webhook/表單/LINE 網址直接給、失敗備援關聯建了沒——不用使用者去面板翻
     const extras = [
       pendingGraph.schedule ? "排程也已建立並啟用。" : "",
       applied.webhookUrl ? `\n🔗 Webhook 已啟用:${applied.webhookUrl}` : "",
       applied.formUrl ? `\n📝 表單網址:${applied.formUrl}` : "",
+      applied.lineUrl ? `\n💬 LINE webhook 已啟用:${applied.lineUrl}\n(LINE 平台只能打公網 HTTPS——先用 cloudflared/ngrok 把這個網址開出去,再填進 LINE Developers;Channel Secret 記得到設定頁填)` : "",
       applied.onFailureLinked ? `\n🆘 失敗時會自動執行「${applied.onFailureLinked}」(已建立關聯)。` : "",
       applied.onFailureMissing ? `\n⚠️ 找不到叫「${applied.onFailureMissing}」的流程,失敗備援沒有建立——確認名稱後跟我說一聲。` : "",
     ].join("");
@@ -1058,7 +1068,7 @@ export default function WorkflowPage() {
             )}
             <button onClick={() => { setShowExplain((v) => !v); setShowHistory(false); setShowSchedule(false); setShowVersions(false); setSelectedNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showExplain ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="說明：這個流程每一步在做什麼" aria-label="說明">📖</button>
             <button onClick={() => { setShowHistory((v) => !v); setShowSchedule(false); setShowExplain(false); setShowVersions(false); setSelectedNode(null); loadRuns(); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showHistory ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="紀錄：最近的執行結果" aria-label="紀錄">📋</button>
-            <button onClick={() => { setShowSchedule((v) => !v); setShowHistory(false); setShowExplain(false); setShowVersions(false); setSelectedNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showSchedule ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="觸發：排程 / 資料夾監聽 / Webhook" aria-label="觸發">⚡</button>
+            <button onClick={() => { setShowSchedule((v) => !v); setShowHistory(false); setShowExplain(false); setShowVersions(false); setSelectedNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showSchedule ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="觸發：排程 / 資料夾監聽 / Webhook / 收信 / Telegram / LINE" aria-label="觸發">⚡</button>
             {/* 次要動作收進「⋯」：工具列擠到溢出要橫向捲(1440 寬就被截斷)是真實踩過的 UX 問題 */}
             <div className="relative shrink-0" ref={moreMenuRef}>
               <button
@@ -1440,6 +1450,7 @@ export default function WorkflowPage() {
           triggerParams={wf.triggerParams ?? []}
           isDraft={wf.status === "draft"}
           watchMode={needsTestFile()}
+          messageMode={messageTestMode()}
           onClose={() => setShowRunForm(false)}
           onRun={(params, headed) => { setShowRunForm(false); run(params, headed); }}
         />

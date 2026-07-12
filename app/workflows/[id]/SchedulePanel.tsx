@@ -3,8 +3,9 @@
 import { useEffect, useState } from "react";
 import { formatDate, humanizeCron } from "@/components/ui";
 import { SCHEDULE_MODES, WEEKDAY_NAMES, buildCron, timeValid } from "@/lib/cron";
+import { MailSection, TelegramSection, LineSection } from "./TriggerSections";
 
-/** 觸發面板：排程 / 資料夾監聽 / Webhook 三種自動觸發方式都在這裡設定。 */
+/** 觸發面板：排程 / 資料夾監聽 / Webhook / 收信 / Telegram / LINE 六種自動觸發方式都在這裡設定。 */
 export function SchedulePanel({ workflowId, onClose }: { workflowId: string; onClose: () => void }) {
   return (
     <div className="flex flex-col h-full">
@@ -16,13 +17,16 @@ export function SchedulePanel({ workflowId, onClose }: { workflowId: string; onC
         <ScheduleSection workflowId={workflowId} />
         <WatchSection workflowId={workflowId} />
         <WebhookSection workflowId={workflowId} />
+        <MailSection workflowId={workflowId} />
+        <TelegramSection workflowId={workflowId} />
+        <LineSection workflowId={workflowId} />
         <OnFailureSection workflowId={workflowId} />
       </div>
     </div>
   );
 }
 
-function SectionTitle({ icon, title, badge }: { icon: string; title: string; badge?: React.ReactNode }) {
+export function SectionTitle({ icon, title, badge }: { icon: string; title: string; badge?: React.ReactNode }) {
   return (
     <div className="flex items-center gap-2 mb-2">
       <span className="text-sm font-medium">{icon} {title}</span>
@@ -31,7 +35,7 @@ function SectionTitle({ icon, title, badge }: { icon: string; title: string; bad
   );
 }
 
-function StateBadge({ on, onText, offText }: { on: boolean; onText: string; offText: string }) {
+export function StateBadge({ on, onText, offText }: { on: boolean; onText: string; offText: string }) {
   return (
     <span className="text-xs px-1.5 py-0.5 rounded-full" style={on
       ? { background: "color-mix(in srgb, var(--green) 14%, transparent)", color: "var(--green)" }

@@ -13,6 +13,7 @@ import { resolveParams } from "@/lib/relativeDate";
 import { CancelledError } from "@/lib/aiRetry";
 import { getDb } from "@/lib/db";
 import { fillSampleParams, fileSampleKind, writeSampleFile } from "@/lib/workflow/sampleData";
+import { sampleMailForTest } from "@/lib/mailWatcher";
 import { getWorkflowCoverage } from "@/lib/workflow/coverage";
 import type { WorkflowNode } from "@/lib/workflow/types";
 
@@ -135,6 +136,29 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
       triggerParams.fileName = newest.name;
       steps.push({ kind: "info", title: "用監聽資料夾裡的檔案當測試樣本", detail: newest.name });
     }
+  }
+
+  // 收信觸發型：有 IMAP 帳密就拿信箱裡「最新一封符合篩選的信」當真測試樣本；
+  // 沒帳密/沒符合的信就用模擬信件值(誠實標注)，先驗流程接線。
+  const trigger = wf.nodes.find((n) => n.type === "trigger");
+  if (trigger?.config?.mailWatch === "on" && triggerParams.body === undefined) {
+    const sample = await sampleMailForTest(trigger.config, wf.id);
+    if (sample.real) {
+      Object.assign(triggerParams, sample.params);
+      steps.push({ kind: "info", title: "用信箱裡最新一封符合條件的信當測試樣本", detail: String(sample.params.subject ?? "") });
+    } else {
+      Object.assign(triggerParams, sample.params);
+      steps.push({ kind: "info", title: "自動用模擬信件當測試樣本", detail: sample.note });
+    }
+  }
+  // Telegram/LINE 訊息觸發型：訊息沒法回放，用模擬訊息(誠實標注)驗流程接線
+  if (trigger?.config?.telegramWatch === "on" && triggerParams.message === undefined) {
+    Object.assign(triggerParams, { message: "(測試訊息)", fromName: "測試", chatId: "", messageId: 0 });
+    steps.push({ kind: "info", title: "自動用模擬 Telegram 訊息當測試樣本", detail: "(測試訊息)——設為正式後真的傳訊息給 bot 建議再實測一次" });
+  }
+  if (trigger?.config?.lineWatch === "on" && triggerParams.message === undefined) {
+    Object.assign(triggerParams, { message: "(測試訊息)", userId: "", replyToken: "" });
+    steps.push({ kind: "info", title: "自動用模擬 LINE 訊息當測試樣本", detail: "(測試訊息)——接上 LINE 後真的傳訊息建議再實測一次" });
   }
 
   // 表單/webhook 型參數:「沒預設值也沒人填」的洞用安全模擬值補滿——不然測試第一步就死在空參數,

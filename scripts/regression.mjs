@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * 複雜需求回歸庫(GPT 體檢 #8):20 個代表性白話需求,每個都真的讓 AI 建圖,
- * 驗「有沒有建出該有的結構」(節點型別/分支 port/需求核對清單全 ✅)。
+ * 複雜需求回歸庫(GPT 體檢 #8):代表性白話需求,每個都真的讓 AI 建圖,
+ * 驗「有沒有建出該有的結構」(節點型別/分支 port/觸發設定/需求核對清單全 ✅)。
  * 改了 builder / lint / engine / 模型清單之後跑這支,避免修好一種需求弄壞另一種。
  *
  * 用法:先 npm start(或 dev)起服務,再 `node scripts/regression.mjs [起始編號] [結束編號]`
- * 注意:全跑 20 案會打 20+ 次模型(幾十分鐘、吃 API 額度),平常可只跑受影響的區段。
+ * 注意:全跑會打一輪模型(幾十分鐘、吃 API 額度),平常可只跑受影響的區段。
  */
 
 const BASE = process.env.AGENT_HUB_URL ?? "http://127.0.0.1:3000";
@@ -31,6 +31,9 @@ const CASES = [
   { name: "來信變任務", need: "webhook 收到郵件內容(欄位 subject/body),AI 判斷是不是待辦,是的話整理成任務格式存檔並通知。細節用合理預設。", expect: ["llm-decide"], expectAny: ["write-file", "http-request"] },
   { name: "內容草稿產生", need: "每週讀 RSS 靈感,AI 寫一篇貼文草稿(含 hashtag)存檔等我過目。細節用合理預設。", expect: ["rss-read", "llm-decide", "write-file"] },
   { name: "PDF批次抽表", need: "PDF 丟進資料夾自動抽文字,AI 抽出表格資料轉成 CSV 存檔。細節用合理預設。", expect: ["pdf-read"], expectAny: ["custom-code", "llm-decide"] },
+  { name: "收信觸發→整理→通知", need: "收到主旨含「日報」的 email 就自動整理成一份檔案,完成後通知我。細節用合理預設。", expect: ["write-file"], triggerConfig: "mailWatch" },
+  { name: "Telegram訊息觸發記帳", need: "我傳 telegram 訊息給機器人(內容是品項和金額)就幫我記一筆帳存檔。細節用合理預設。", expectAny: ["write-file", "custom-code"], triggerConfig: "telegramWatch" },
+  { name: "LINE訊息觸發建任務", need: "我傳 LINE 訊息給官方帳號,內容就變成一筆任務存檔。細節用合理預設。", expectAny: ["write-file", "custom-code"], triggerConfig: "lineWatch" },
 ];
 
 const api = async (m, p, b, timeout = 600000) => {
@@ -79,6 +82,10 @@ for (let i = from - 1; i < Math.min(to, CASES.length); i++) {
     if (c.triggerParam && !(resp.triggerParams ?? []).some((p) => p.key === c.triggerParam)) problems.push(`缺觸發參數 ${c.triggerParam}`);
     if (c.triggerParamCount && (resp.triggerParams ?? []).filter((p) => !p.derived).length < c.triggerParamCount) problems.push(`觸發參數少於 ${c.triggerParamCount}`);
     if (c.onFailure && !resp.onFailureWorkflow) problems.push("沒帶 onFailureWorkflow");
+    if (c.triggerConfig) {
+      const trigger = resp.nodes.find((n) => n.type === "trigger");
+      if (trigger?.config?.[c.triggerConfig] !== "on") problems.push(`trigger config.${c.triggerConfig} 沒設 on`);
+    }
     if (/⚠️/.test(String(resp.message)) && String(resp.message).includes("需求核對")) problems.push("需求核對清單有 ⚠️ 未達項");
   }
   const secs = Math.round((Date.now() - t0) / 1000);

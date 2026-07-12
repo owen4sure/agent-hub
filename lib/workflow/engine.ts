@@ -24,8 +24,8 @@ const MAX_ATTEMPTS = 3;
 const NODE_TIMEOUT_MS = 3 * 60 * 1000;
 
 /** manual=使用者按執行；其餘都是無人值守的自動觸發(結果要靠桌面通知讓人知道) */
-export type TriggerSource = "manual" | "schedule" | "watch" | "webhook" | "form" | "error";
-const TRIGGER_LABEL: Record<TriggerSource, string> = { manual: "手動", schedule: "排程", watch: "資料夾監聽", webhook: "Webhook", form: "表單", error: "錯誤觸發" };
+export type TriggerSource = "manual" | "schedule" | "watch" | "webhook" | "form" | "error" | "email" | "telegram" | "line";
+const TRIGGER_LABEL: Record<TriggerSource, string> = { manual: "手動", schedule: "排程", watch: "資料夾監聽", webhook: "Webhook", form: "表單", error: "錯誤觸發", email: "收信觸發", telegram: "Telegram 訊息", line: "LINE 訊息" };
 
 /** 續跑規格：從某個節點接著跑，之前成功的節點沿用結果不重跑(修好一步不用整條從頭來、簽核恢復也靠它) */
 export interface ResumeSpec {

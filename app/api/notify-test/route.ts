@@ -70,6 +70,27 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, message: `已寫入${r.row ? `第 ${r.row} 列` : "一列"}！打開試算表看最下面(這列測試資料可自行刪除)` });
     }
 
+    if (action === "imap-test") {
+      const { imapCredsFromSecrets, openImap, listMailSince } = await import("@/lib/mailClient");
+      const creds = imapCredsFromSecrets(secrets);
+      if (!creds) {
+        return NextResponse.json({ ok: false, message: "請先填好 IMAP 主機/帳號/密碼再測試(Gmail 要用「應用程式密碼」，主機是 imap.gmail.com)" });
+      }
+      const client = await openImap(creds).catch((err) => {
+        throw new Error(`連線或登入失敗：${(err as Error).message ?? String(err)}。Gmail/大多數信箱要用「應用程式密碼」，主機/連接埠也再確認一下(常見 993)`);
+      });
+      try {
+        const { mails } = await listMailSince(client, "INBOX", new Date(Date.now() - 3 * 24 * 60 * 60 * 1000));
+        const latest = mails[mails.length - 1];
+        return NextResponse.json({
+          ok: true,
+          message: `連線成功！收件匣最近 3 天有 ${mails.length} 封信${latest ? `，最新一封：「${latest.subject.slice(0, 40)}」` : ""}。收信觸發和「讀取信箱」步驟都能用了`,
+        });
+      } finally {
+        await client.logout().catch(() => {});
+      }
+    }
+
     if (action === "email-test") {
       if (!secrets.smtpHost || !secrets.smtpAccount || !secrets.smtpPassword) {
         return NextResponse.json({ ok: false, message: "請先填好 SMTP 主機/帳號/密碼再測試(Gmail 要用「應用程式密碼」，不是登入密碼)" });

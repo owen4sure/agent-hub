@@ -14,7 +14,7 @@ interface WorkflowSummary {
   nodeCount: number;
   group?: string;
   lastRun?: { status: string; started_at: string } | null;
-  triggers?: { schedule: boolean; watch: boolean; webhook: boolean };
+  triggers?: { schedule: boolean; watch: boolean; webhook: boolean; email?: boolean; telegram?: boolean; line?: boolean };
 }
 interface Overview {
   officialCount: number;
@@ -156,6 +156,24 @@ export default function HomePage() {
   const [groupFilter, setGroupFilter] = useState<string | null>(null);
   const [groupMenuFor, setGroupMenuFor] = useState<string | null>(null);
   const [newGroupName, setNewGroupName] = useState("");
+  // 群組區塊可收合(Owen:「一多就看著砸」)——收合狀態存 localStorage,重整/下次來還記得
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("agenthub_collapsed_groups") ?? "[]") as string[];
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCollapsedGroups(new Set(saved));
+    } catch {}
+  }, []);
+  function toggleGroupCollapsed(title: string) {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(title)) next.delete(title);
+      else next.add(title);
+      localStorage.setItem("agenthub_collapsed_groups", JSON.stringify([...next]));
+      return next;
+    });
+  }
   useEffect(() => {
     if (!groupMenuFor) return;
     // 點選單「外面」才關。不能靠選單內 stopPropagation 擋——Next App Router 的 React 根就是
@@ -298,7 +316,7 @@ export default function HomePage() {
         <EmptyState
           icon="◈"
           title="還沒有正式 workflow"
-          hint="按「新建 workflow」用白話跟 AI 建一個流程，或到「草稿 & 範例」複製內建範例來改。"
+          hint="按「新建 workflow」用白話跟 AI 建一個流程。"
           action={<button onClick={createNew} className="btn btn-primary">＋ 新建 workflow</button>}
         />
       )}
@@ -326,13 +344,23 @@ export default function HomePage() {
         </div>
       )}
 
-      {sections.map(({ title, items }) => (
+      {sections.map(({ title, items }) => {
+        const showHeader = groups.length > 0 || title !== "未分組";
+        const collapsed = showHeader && collapsedGroups.has(title);
+        return (
         <div key={title} className="mb-8">
-          {(groups.length > 0 || title !== "未分組") && (
-            <h2 className="text-sm font-semibold mb-3 flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
+          {showHeader && (
+            <button
+              onClick={() => toggleGroupCollapsed(title)}
+              className="text-sm font-semibold mb-3 flex items-center gap-2 hover:text-[var(--text)]"
+              style={{ color: "var(--text-muted)" }}
+              aria-expanded={!collapsed}
+            >
+              <span className="text-xs faint w-3 inline-block">{collapsed ? "▸" : "▾"}</span>
               🗂 {title} <span className="faint font-normal">{items.length}</span>
-            </h2>
+            </button>
           )}
+          {!collapsed && (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {items.map((w) => (
           <article key={w.id} className="card card-hover p-5 relative">
@@ -354,6 +382,9 @@ export default function HomePage() {
                   {w.triggers?.schedule && <span title="有啟用的排程，時間到自動執行">⏰ 排程</span>}
                   {w.triggers?.watch && <span title="正在監聽資料夾，新檔案會自動觸發">📁 監聽</span>}
                   {w.triggers?.webhook && <span title="Webhook 已啟用，外部工具可觸發">🔗 Webhook</span>}
+                  {w.triggers?.email && <span title="收信觸發已開啟，符合條件的新 email 會自動觸發">📨 收信</span>}
+                  {w.triggers?.telegram && <span title="Telegram 訊息觸發已開啟，傳訊息給 bot 就自動執行">✈️ Telegram</span>}
+                  {w.triggers?.line && <span title="LINE 訊息觸發已啟用，傳訊息給官方帳號就自動執行">💬 LINE</span>}
                 </p>
               </div>
               {!w.builtin && (
@@ -413,8 +444,10 @@ export default function HomePage() {
           </article>
             ))}
           </div>
+          )}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
