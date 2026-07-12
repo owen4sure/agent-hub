@@ -27,7 +27,7 @@ export function isSystemErrorMsg(m: ChatMsg): boolean {
   return m.role === "assistant" && m.parts.some((p) => p.kind === "text" && ERROR_TEXT_PATTERNS.some((r) => r.test(p.text.trim())));
 }
 export interface AutoStep { kind: "run" | "fix" | "done" | "human" | "giveup" | "info"; title: string; detail?: string; nodeLabel?: string; runId?: string }
-export interface PendingGraph { nodes: WorkflowNode[]; edges: WorkflowEdge[]; message: string; triggerParams?: ParamField[]; schedule?: SuggestedSchedule }
+export interface PendingGraph { nodes: WorkflowNode[]; edges: WorkflowEdge[]; message: string; triggerParams?: ParamField[]; schedule?: SuggestedSchedule; autoWebhook?: boolean; onFailureWorkflow?: string }
 export interface AutoTestState { running: boolean; steps: AutoStep[]; ok?: boolean; needsHuman?: boolean }
 
 export interface WFChatState {
@@ -131,7 +131,7 @@ export async function sendChatToAI(id: string, history: ChatMsg[]) {
     if (res.ok && data.phase === "ready") {
       commit({
         chat: [...history, { role: "assistant", parts: [{ kind: "text", text: `${data.message}\n\n(下方預覽新流程，確認後按「套用」)` }] }],
-        pendingGraph: { nodes: data.nodes, edges: data.edges, message: data.message, triggerParams: data.triggerParams, schedule: data.schedule },
+        pendingGraph: { nodes: data.nodes, edges: data.edges, message: data.message, triggerParams: data.triggerParams, schedule: data.schedule, autoWebhook: data.autoWebhook, onFailureWorkflow: data.onFailureWorkflow },
       });
     } else if (res.ok && data.phase === "edits") {
       // AI 直接改好了現有節點(server 端已套用)：在對話明確回報「實際改了哪些節點的什麼」，讓使用者

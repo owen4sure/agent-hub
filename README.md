@@ -141,6 +141,7 @@ docs/ARCHITECTURE_V2.md        the original design document (partially outdated;
 ```bash
 npm run test    # unit tests for core logic (relative-date resolution, graph lint, JSON extraction, cron, folder-watch rules — pure functions)
 npm run lint    # ESLint
+node scripts/regression.mjs [from to]  # complex-request regression suite: 20 representative plain-language cases, built by the AI for real and structurally verified (consumes model quota; run manually before releases)
 ```
 
 ## Security

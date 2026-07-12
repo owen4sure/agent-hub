@@ -29,7 +29,7 @@ export interface ChatMessage {
 
 export type BuildResult =
   | { phase: "clarify"; message: string }
-  | { phase: "ready"; message: string; nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[]; schedule?: SuggestedSchedule }
+  | { phase: "ready"; message: string; nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[]; schedule?: SuggestedSchedule; autoWebhook?: boolean; onFailureWorkflow?: string }
   | { phase: "edits"; message: string; edits: { nodeId: string; stepIndex?: number; config: Record<string, unknown> }[] };
 
 export interface SuggestedSchedule {
@@ -78,6 +78,8 @@ const graphSchema = z.object({
     cron: z.string(),
     params: z.record(z.string(), z.unknown()).optional(),
   }).optional(),
+  // 使用者說「失敗時執行 X 流程」→ 模型帶回那條流程的名稱,套用時自動建立關聯(不用進面板設定)
+  onFailureWorkflow: z.string().optional(),
 });
 
 /**
@@ -369,7 +371,7 @@ ${runtimeSection(rc)}
 【失敗備案(Plan B)——「這步出錯就改走那條」】
 - 任何節點都可以接一條 fromPort:"error" 的出線:那一步失敗(重試完仍失敗)時不讓整條流程倒下,改走這條線繼續(例如「抓不到 A 網站→改抓 B 網站」「下載失敗→發 Telegram 告警」)。失敗分支的下游可用 {{error}}(錯誤訊息)、{{errorStep}}(哪一步出錯)。
 - 節點成功時失敗分支不會走;只在使用者明確表達「出錯要有備案/要告警」時才畫,不要每個節點都預防性地掛一條(圖會亂)。
-- 「整條流程失敗時自動跑另一條流程」不是節點——請使用者到 ⚡ 觸發面板的「🆘 失敗時自動執行」設定,在 message 裡指路即可。
+- 「整條流程失敗時自動跑另一條流程」不是節點——在回覆的 JSON 帶 onFailureWorkflow:"那條流程的名稱"(套用時會自動建立關聯);使用者沒講清楚是哪條就先 clarify 問。
 
 【使用者不懂技術，節點數要盡量少——不要為了「感覺比較清楚」多畫節點】
 - **上游任何節點算出來的欄位，下游天生就能直接用 {{欄位名}} 引用，全程自動往下傳，不需要中間再接一個 set-variable 節點才能「讓後面看得到」**。custom-code 節點的 return 已經把欄位交出來了，這件事本身就完成了，不要在後面加 8 個 set-variable 節點各自把同一個欄位「存」一次——那是純粹的空節點，什麼都沒做，只會讓使用者以為每一步都不一樣、看得眼花。
@@ -398,7 +400,7 @@ ${runtimeSection(rc)}
 【觸發方式：排程/資料夾監聽/Webhook】
 - 使用者說「每天/每週/每月/每季幾點自動跑」：排程不是節點，不要為它畫節點；請在 phase:"ready" 根層加 schedule:{"cron":"五欄 cron","params":{}}。系統會在使用者按「套用」時一併建立並啟用排程，不要再叫使用者自己去觸發面板設定。時區固定 Asia/Taipei。例：每天 09:00 = "0 9 * * *"；每週一 09:00 = "0 9 * * 1"；每月 1 日 09:00 = "0 9 1 * *"；每季首月 1 日 09:00 = "0 9 1 1,4,7,10 *"。
 - 使用者說「把檔案丟進某個資料夾就自動處理」：在 trigger 節點的 config 填 watchPath(那個資料夾的絕對路徑；使用者沒講清楚路徑就先 clarify 問)，需要過濾檔名就填 watchPattern。下游節點用 {{filePath}} 拿到新檔案的完整路徑(例如 read-file 的 path 填 {{filePath}})、{{fileName}} 拿檔名。記得在 message 提醒「設為正式後才會開始監聽」。
-- 使用者說「讓別的程式/捷徑/工具能觸發這個流程」：這是 Webhook——流程圖照建，在 message 告訴使用者「到 ⚡ 觸發面板啟用 Webhook 會拿到專屬網址」。外部 POST 的 JSON 欄位會直接變成下游可用的 {{欄位}}；如果需求裡講明外部會送哪些欄位(如 title、amount)，下游節點就直接引用那些欄位名。
+- 使用者說「讓別的程式/捷徑/工具能觸發這個流程」：這是 Webhook——流程圖照建;系統會在套用時**自動啟用 Webhook 並把網址顯示給使用者**,你不用叫他去面板設定。外部 POST 的 JSON 欄位會直接變成下游可用的 {{欄位}}；如果需求裡講明外部會送哪些欄位(如 title、amount)，下游節點就直接引用那些欄位名。
 【熱門服務的免 OAuth 接法——使用者提到這些服務時,用 http-request 節點+這些配方直接建,不要說做不到】
 - **Notion**:整合 token(notion.so/my-integrations 建立,secret 欄名 notionToken)。寫入資料庫=POST https://api.notion.com/v1/pages,headers {"Authorization":"Bearer {{notionToken}}","Notion-Version":"2022-06-28","Content-Type":"application/json"}。提醒使用者:資料庫要「加入連接」給那個整合。
 - **Airtable**:個人存取權杖(airtable.com/create/tokens,secret 欄名 airtableToken)。新增列=POST https://api.airtable.com/v0/{baseId}/{tableName},Authorization Bearer。
@@ -407,7 +409,7 @@ ${runtimeSection(rc)}
 - **Google Drive/Calendar 寫入**:跟「寫入 Google 試算表」同一招——使用者在自己的 Apps Script 部署一個 doPost 網頁應用程式(可存檔到 Drive/建日曆事件),流程 POST 過去。在 message 裡講清楚這個做法。
 - 通用原則:API 金鑰一律放共用帳密(宣告 requiresSecrets 讓設定頁長出欄位),節點 headers/body 用 {{金鑰欄名}} 引用;不確定某服務的 API 細節就在 message 裡老實說明你用的端點與假設。
 
-- 使用者說「給同事一個網頁表單填,填完就跑」：這是表單觸發——啟用 Webhook 時會同時拿到一個「表單網址」,用瀏覽器打開就是一張現成表單。**表單的欄位=這條流程的 triggerParams**:把要填的欄位宣告成 triggerParams(key/label/type/select 選項),下游用 {{key}} 引用;沒宣告參數時表單只有一個通用「備註」欄({{note}})。
+- 使用者說「給同事一個網頁表單填,填完就跑」：這是表單觸發——系統會在套用時**自動啟用並把表單網址顯示給使用者**。**表單的欄位=這條流程的 triggerParams**:把要填的欄位宣告成 triggerParams(key/label/type/select 選項),下游用 {{key}} 引用;沒宣告參數時表單只有一個通用「備註」欄({{note}})。
 
 【回覆格式】一律回一個 JSON 物件(不要加程式碼框以外的文字說明放在 message 欄)：
 - 還需要問問題：{"phase":"clarify","message":"你要問使用者的話(可條列)"}
@@ -416,7 +418,7 @@ ${runtimeSection(rc)}
   - edits 可以一個或多個節點。config 是那個節點「改好後的完整設定」。
   - custom-code 節點可直接改 config.code(一段 async 函式主體，用 ...ctx.input 把上游資料往下傳；要用套件就 await import("exceljs"))。
   - **要改的是 repeat-steps(重複執行)節點「裡面的某一步」時，一定用定點修改**：edits 元素帶 "stepIndex"(第幾步，從 0 起，對照上面「步驟編號對照」裡的 stepIndex)，config 只放「那一步」改好後的設定——**絕對不要整包重寫外層的 steps JSON**(幾千字的 JSON 重新輸出幾乎必錯，複述時很容易弄壞其他步驟)。例如：{"nodeId":"repeat-steps節點id","stepIndex":1,"config":{ 那一步改好後的 config }}
-- 建全新流程/大改結構：{"phase":"ready","message":"一句話說明這個流程","nodes":[{"id","type","label","config"}],"edges":[{"from","to","fromPort"}],"triggerParams":[可省略，見上面週期性資料的規則],"schedule":{"cron":"需求有指定自動時間時才填","params":{}}}
+- 建全新流程/大改結構：{"phase":"ready","message":"一句話說明這個流程","nodes":[{"id","type","label","config"}],"edges":[{"from","to","fromPort"}],"triggerParams":[可省略，見上面週期性資料的規則],"schedule":{"cron":"需求有指定自動時間時才填","params":{}},"onFailureWorkflow":"使用者說失敗要跑哪條流程時才填(流程名稱)"}
   - node.id 用簡短英數(如 n1,n2)；第一個節點通常是 type:"trigger"。
   - 節點的 config 依該型別的參數填；日期類參數可用相對日期變數，**只有這些名稱會被解析**(可加 -N 位移天數，如 {{today-7}})：
     ${DATE_TOKENS.map((t) => `{{${t}}}`).join("、")}
@@ -464,6 +466,8 @@ export async function buildWorkflow(
   currentGraph: { nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[] },
   runtimeContext?: RuntimeContext,
   signal?: AbortSignal,
+  /** 建圖進度回報(理解需求→畫圖→驗證→修正第N輪)——前端輪詢顯示,使用者才知道慢在哪一步 */
+  onStage?: (stage: string) => void,
 ): Promise<BuildResult> {
   // 使用者最新訊息裡引號點名的字串——出現在哪個節點的程式碼裡，那個節點的 code 就不截斷(讓模型
   // 做針對性修改時看得到內文；其餘節點照常截斷控制提示大小)
@@ -538,7 +542,15 @@ export async function buildWorkflow(
   let reqFeedbackGiven = false; // 需求完整性補齊只餵回一輪(見 ready 路徑)
 
   for (let attempt = 0; attempt <= MAX_CORRECTIONS; attempt++) {
+    onStage?.(
+      attempt === 0
+        ? "🧠 理解需求、對照社群藍圖,正在畫流程圖…"
+        : reqFeedbackGiven
+          ? `🧩 補齊漏掉的需求(第 ${attempt} 輪修正)…`
+          : `🔧 修正圖形問題(第 ${attempt} 輪)…`,
+    );
     const raw = await callOnce(feedback, feedbackCC);
+    onStage?.("🔍 驗證圖形與需求完整性…");
     // 用括號配對+逐候選解析抽 JSON，絕不能用貪婪 regex(見 AGENTS.md 鐵則4)。
     // predicate 收緊成「phase 是三個已知值之一、或結構欄位齊全」——太寬的話模型思考過程裡
     // 順手寫的小 JSON 物件(剛好有個 phase 字串)會被誤抓成答案。
@@ -645,10 +657,17 @@ export async function buildWorkflow(
               ? "\n\n📅 這條流程可以在每次執行前選擇要抓哪一期的資料(執行時會跳出選擇表單)。"
               : "";
             const scheduleNote = schedule ? `\n\n⏰ 套用流程時會一併建立並啟用排程（${schedule.cron}，台北時間）。` : "";
+            // 觸發全自動套用(GPT 體檢 #5):白話提到 webhook/捷徑/表單 → 套用時自動啟用並回網址,
+            // 不再叫使用者自己進 ⚡ 面板按啟用
+            const autoWebhook = /webhook|捷徑|表單|外部(工具|程式|系統|服務).{0,8}(觸發|打進|串接)/i.test(allUserText);
+            const onFailureWorkflow = typeof validated.data.onFailureWorkflow === "string" && validated.data.onFailureWorkflow.trim()
+              ? validated.data.onFailureWorkflow.trim()
+              : undefined;
+            const webhookNote = autoWebhook ? "\n\n🔗 套用時會自動啟用 Webhook/表單網址(套用後顯示在對話裡,⚡ 面板也看得到)。" : "";
             return {
               phase: "ready",
-              message: String(obj.message ?? "流程已建好") + checklistText(reqItems) + readinessNotes(nodes) + warnNote + periodNote + scheduleNote,
-              nodes, edges, triggerParams, schedule,
+              message: String(obj.message ?? "流程已建好") + checklistText(reqItems) + readinessNotes(nodes) + warnNote + periodNote + scheduleNote + webhookNote,
+              nodes, edges, triggerParams, schedule, autoWebhook, onFailureWorkflow,
             };
           }
         } else {

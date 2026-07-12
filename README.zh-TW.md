@@ -139,6 +139,7 @@ docs/ARCHITECTURE_V2.md        當初的設計規劃文件(部分已過時，程
 ```bash
 npm run test    # 跑核心邏輯的單元測試(相對日期解析、節點圖檢查、JSON 抽取、cron、資料夾監聽規則等純函式)
 npm run lint    # ESLint
+node scripts/regression.mjs [起 訖]   # 複雜需求回歸庫:20 個代表性白話需求真的讓 AI 建圖並驗結構(吃模型額度,發版前手動跑)
 ```
 
 ## 安全性

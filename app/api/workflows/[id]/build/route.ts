@@ -1,13 +1,15 @@
 import { NextResponse } from "next/server";
 import { getClient } from "@/lib/modelClient";
-import { getWorkflow, saveWorkflow, backupWorkflow } from "@/lib/workflow/store";
+import { getWorkflow, saveWorkflow, backupWorkflow, findWorkflowByRef } from "@/lib/workflow/store";
 import { getWorkflowModel } from "@/lib/settingsStore";
 import { buildWorkflow, type ChatMessage } from "@/lib/workflow/builder";
 import { getLastFailureContext } from "@/lib/workflow/repairContext";
 import { applyNodeConfigEdits } from "@/lib/workflow/graphRepair";
 import { parseReplacePairs, applyTextReplace } from "@/lib/workflow/textReplace";
 import { autorunActive } from "@/lib/workflow/busyLocks";
-import { createSchedule, isValidCron, listSchedules } from "@/lib/scheduler";
+import { createSchedule, deleteSchedule, isValidCron, listSchedules } from "@/lib/scheduler";
+import { setBuildStage, clearBuildStage } from "@/lib/workflow/buildProgress";
+import { getWebhookToken, rotateWebhookToken } from "@/lib/webhookStore";
 
 // 提出建圖(可能回問題、回可套用的圖、或直接改好現有節點)
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -85,7 +87,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       : undefined;
     // 快速通道剛替換過的話,模型看到的圖必須是「替換後的最新版」,不能用函式開頭那份過期快照
     const cur = pairs.length > 0 ? (getWorkflow(id) ?? wf) : wf;
-    const result = await buildWorkflow(client, model, body.history, { nodes: cur.nodes, edges: cur.edges, triggerParams: cur.triggerParams }, runtimeContext, req.signal);
+    setBuildStage(id, "🧠 理解需求、檢索社群藍圖…");
+    let result;
+    try {
+      result = await buildWorkflow(
+        client, model, body.history,
+        { nodes: cur.nodes, edges: cur.edges, triggerParams: cur.triggerParams },
+        runtimeContext, req.signal,
+        (stage) => setBuildStage(id, stage),
+      );
+    } finally {
+      clearBuildStage(id); // 成功/失敗/中斷都要清,不然下次會看到殭屍階段
+    }
     // 快速通道有做事的話,回覆開頭要先講「已完成的替換」——不講的話使用者只看到模型對剩餘需求的回覆,
     // 會以為替換沒做
     if (replaceNote) result.message = `${replaceNote}\n\n${result.message}`;
@@ -154,10 +167,19 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   if (autorunActive.has(id)) {
     return NextResponse.json({ error: "這條流程的自動測試/修復正在進行中，等它跑完再套用新流程(不然會互相蓋掉對方的修改)" }, { status: 409 });
   }
+  // ── 套用計畫(GPT 體檢 #6 交易一致性):①先驗證所有內容 ②備份 ③寫圖 ④觸發設定
+  //    ⑤任一步失敗 → 圖回滾成套用前的樣子+清掉剛建的排程,不留「半套用」狀態 ──
+
+  // ① 驗證(還沒動任何狀態)
   const schedule = body.schedule as { cron?: unknown; params?: unknown } | undefined;
   if (schedule !== undefined && (typeof schedule.cron !== "string" || !isValidCron(schedule.cron))) {
     return NextResponse.json({ error: "AI 建立的排程格式不正確，流程圖與排程都沒有套用" }, { status: 400 });
   }
+  // 失敗備援流程(使用者白話講了「失敗就跑 X」→ AI 帶回名稱):先解析,找不到不擋套用、但要講明
+  const onFailureRef = typeof body.onFailureWorkflow === "string" ? body.onFailureWorkflow.trim().slice(0, 120) : "";
+  const onFailureTarget = onFailureRef ? findWorkflowByRef(onFailureRef) : null;
+
+  // ② 備份 + 記住套用前狀態(回滾用)
   backupWorkflow(id);
   // 以磁碟最新版為底(不是函式開頭那份過期快照)——await req.json() 期間並發改的 name/status/requiresSecrets
   // 不能被舊 wf 整包蓋掉(違反 AGENTS 存檔鐵則2)，只換 nodes/edges(/triggerParams)。
@@ -165,20 +187,54 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   // triggerParams 選填：AI 只有在這條流程需要「執行前選期間/參數」時才會給(見 builder.ts 週期性資料規則)。
   // 沒給就沿用現有的，不能無條件清空——不然沒帶 triggerParams 的整圖套用會把使用者手動加的參數洗掉。
   const triggerParams = Array.isArray(body.triggerParams) ? body.triggerParams : cur.triggerParams;
-  saveWorkflow({ ...cur, nodes: body.nodes, edges: body.edges, triggerParams });
+
   let scheduleCreated = false;
-  if (schedule !== undefined) {
-    const cron = schedule.cron as string;
-    const scheduleParams = schedule.params && typeof schedule.params === "object" && !Array.isArray(schedule.params)
-      ? schedule.params as Record<string, unknown>
-      : {};
-    const paramsJson = JSON.stringify(scheduleParams);
-    // Applying the same preview twice must not create two schedules that fire together.
-    const duplicate = listSchedules(id).some((s) => s.cron === cron && s.params_json === paramsJson);
-    if (!duplicate) {
-      createSchedule(id, cron, scheduleParams);
-      scheduleCreated = true;
+  let createdScheduleId: string | null = null;
+  try {
+    // ③ 寫圖(連同失敗備援關聯一次寫入)
+    saveWorkflow({
+      ...cur,
+      nodes: body.nodes,
+      edges: body.edges,
+      triggerParams,
+      ...(onFailureTarget ? { onFailureWorkflow: onFailureTarget.id } : {}),
+    });
+    // ④ 觸發設定:排程(防重複)+Webhook 自動啟用(使用者白話提到 webhook/捷徑/表單)
+    if (schedule !== undefined) {
+      const cron = schedule.cron as string;
+      const scheduleParams = schedule.params && typeof schedule.params === "object" && !Array.isArray(schedule.params)
+        ? schedule.params as Record<string, unknown>
+        : {};
+      const paramsJson = JSON.stringify(scheduleParams);
+      // Applying the same preview twice must not create two schedules that fire together.
+      const duplicate = listSchedules(id).some((s) => s.cron === cron && s.params_json === paramsJson);
+      if (!duplicate) {
+        createdScheduleId = createSchedule(id, cron, scheduleParams);
+        scheduleCreated = true;
+      }
     }
+    let webhookUrl: string | null = null;
+    if (body.autoWebhook === true) {
+      const token = getWebhookToken(id) ?? rotateWebhookToken(id); // 已啟用就沿用舊網址,不作廢別人手上的
+      webhookUrl = `http://127.0.0.1:${process.env.PORT ?? 3000}/api/hooks/${id}/${token}`;
+    }
+    return NextResponse.json({
+      ok: true,
+      scheduleCreated,
+      webhookUrl,
+      formUrl: webhookUrl ? webhookUrl.replace("/api/hooks/", "/form/") : null,
+      onFailureLinked: onFailureTarget ? onFailureTarget.name : null,
+      onFailureMissing: onFailureRef && !onFailureTarget ? onFailureRef : null,
+    });
+  } catch (err) {
+    // ⑤ 回滾:圖存回套用前快照、剛建的排程刪掉——寧可整包失敗,不留半套用
+    try {
+      saveWorkflow(cur);
+      if (createdScheduleId) deleteSchedule(createdScheduleId);
+    } catch { /* 回滾也失敗:備份還在,versions 面板可手動還原 */ }
+    return NextResponse.json(
+      { error: `套用過程出錯,已回復成套用前的狀態(可在「版本」面板確認):${err instanceof Error ? err.message : String(err)}` },
+      { status: 500 },
+    );
   }
-  return NextResponse.json({ ok: true, scheduleCreated });
 }

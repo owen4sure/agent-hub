@@ -68,6 +68,21 @@ export default function WorkflowPage() {
   const toastSeq = useRef(0);
   const flashToast = useCallback((text: string) => setToast({ text, token: ++toastSeq.current }), []);
   const [thinkingLong, setThinkingLong] = useState(false);
+  // 建圖進度階段(理解需求→畫圖→驗證→修正):thinking 期間每秒輪詢,讓使用者知道慢在哪一步
+  const [buildStage, setBuildStage] = useState<{ stage: string; seconds: number } | null>(null);
+  useEffect(() => {
+    if (!thinking) { setBuildStage(null); return; }
+    let alive = true;
+    const poll = async () => {
+      try {
+        const d = await (await fetch(`/api/workflows/${id}/build-progress`)).json();
+        if (alive) setBuildStage(d?.stage ? d : null);
+      } catch { /* 拿不到就維持通用文案 */ }
+    };
+    poll();
+    const t = setInterval(poll, 1000);
+    return () => { alive = false; clearInterval(t); };
+  }, [thinking, id]);
   // 免費/共用的模型服務有時會不穩定，AI 這邊會自動重試到成功而不是一次失敗就放棄(見 lib/aiRetry.ts)，
   // 但這樣使用者會看到「思考中」卡很久——加一句提示讓他知道「還在動，不是壞掉」，不要只讓他猜。
   useEffect(() => {
@@ -856,15 +871,32 @@ export default function WorkflowPage() {
     const res = await fetch(`/api/workflows/${id}/build`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ nodes: pendingGraph.nodes, edges: pendingGraph.edges, triggerParams: pendingGraph.triggerParams, schedule: pendingGraph.schedule }),
+      body: JSON.stringify({
+        nodes: pendingGraph.nodes,
+        edges: pendingGraph.edges,
+        triggerParams: pendingGraph.triggerParams,
+        schedule: pendingGraph.schedule,
+        autoWebhook: pendingGraph.autoWebhook,
+        onFailureWorkflow: pendingGraph.onFailureWorkflow,
+      }),
     }).catch(() => null);
     if (!res || !res.ok) {
       // 套用失敗別默默把預覽清掉、讓 AI 的成果消失——留著預覽並在對話區告知，讓使用者可以重試
-      appendAssistantNote(id, "⚠️ 套用到畫布時出錯了，你的流程圖預覽還留著，可以再按一次「套用」。");
+      const errText = res ? ((await res.json().catch(() => ({}))) as { error?: string }).error : null;
+      appendAssistantNote(id, `⚠️ 套用到畫布時出錯了${errText ? `:${errText}` : ""}——你的流程圖預覽還留著，可以再按一次「套用」。`);
       return;
     }
+    const applied = (await res.json().catch(() => ({}))) as { webhookUrl?: string | null; formUrl?: string | null; onFailureLinked?: string | null; onFailureMissing?: string | null };
     clearPendingGraph(id);
-    appendAssistantNote(id, `✅ 已套用到畫布，共 ${count} 個節點。${pendingGraph.schedule ? "排程也已建立並啟用。" : ""}`);
+    // 觸發自動套用的結果講清楚:webhook/表單網址直接給、失敗備援關聯建了沒——不用使用者去面板翻
+    const extras = [
+      pendingGraph.schedule ? "排程也已建立並啟用。" : "",
+      applied.webhookUrl ? `\n🔗 Webhook 已啟用:${applied.webhookUrl}` : "",
+      applied.formUrl ? `\n📝 表單網址:${applied.formUrl}` : "",
+      applied.onFailureLinked ? `\n🆘 失敗時會自動執行「${applied.onFailureLinked}」(已建立關聯)。` : "",
+      applied.onFailureMissing ? `\n⚠️ 找不到叫「${applied.onFailureMissing}」的流程,失敗備援沒有建立——確認名稱後跟我說一聲。` : "",
+    ].join("");
+    appendAssistantNote(id, `✅ 已套用到畫布，共 ${count} 個節點。${extras}`);
     // 「以使用者擺好的位置為準」：已經存在的節點(同 id)保留它目前的座標，只有全新的節點才自動排版。
     // 之前不管三七二十一對整張圖重跑 autoLayout，會把使用者辛苦拖好的排列整個洗掉、還可能擠成一團(踩過)。
     // (要整張重新自動對齊是「排列」按鈕的事，套用/修改流程不該偷改使用者的手動位置)
@@ -1335,12 +1367,17 @@ export default function WorkflowPage() {
                 </div>
               ))}
               {thinking && (
-                <div className="faint">
-                  <p className="flex items-center gap-2">
-                    <span className="animate-pulse">●</span> AI 思考中…
-                    <button onClick={() => stopChatToAI(id)} className="btn btn-ghost text-xs ml-auto">⏹ 停止</button>
+                <div className="card p-3" style={{ borderColor: "color-mix(in srgb, var(--accent) 35%, var(--border))" }}>
+                  <p className="flex items-center gap-2 text-sm">
+                    <span className="inline-block w-3.5 h-3.5 rounded-full border-2 animate-spin shrink-0" style={{ borderColor: "var(--border-strong)", borderTopColor: "var(--accent)" }} />
+                    <span className="font-medium" style={{ color: "var(--text)" }}>{buildStage?.stage ?? "🧠 AI 思考中…"}</span>
+                    <button onClick={() => stopChatToAI(id)} className="btn btn-ghost text-xs ml-auto shrink-0">⏹ 停止</button>
                   </p>
-                  {thinkingLong && <p className="text-xs mt-1">模型服務目前不太穩定，AI 正在自動重試中，不是卡住了，可能還要再等一下…</p>}
+                  {/* 建圖是幾十秒~幾分鐘的工作:顯示「做到哪一步+已花時間」,慢也不會不知所措 */}
+                  {buildStage && buildStage.seconds > 3 && (
+                    <p className="text-[11px] faint mt-1.5 pl-6">已進行 {buildStage.seconds >= 60 ? `${Math.floor(buildStage.seconds / 60)} 分 ${buildStage.seconds % 60} 秒` : `${buildStage.seconds} 秒`}——複雜流程要多想一下,畫好會自動出現預覽。</p>
+                  )}
+                  {thinkingLong && !buildStage && <p className="text-xs mt-1 faint">模型服務目前不太穩定，AI 正在自動重試中，不是卡住了，可能還要再等一下…</p>}
                 </div>
               )}
               {pendingGraph && (

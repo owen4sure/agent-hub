@@ -52,8 +52,8 @@ export function checkRequirements(userText: string, graph: GraphLike): Requireme
   if (/超過|低於|大於|小於|門檻|以上|以下|超標/.test(t)) {
     add("threshold", "門檻/條件判斷", has("if-condition", "switch"), "要放 if-condition(或 switch)依數值分流");
   }
-  // 多路分類
-  if (/分類|分流|哪一類|類別/.test(t) && /三|多|各自|不同/.test(t)) {
+  // 多路分類(「分成三類」「分類成 A/B/C」這種說法也要接得住)
+  if (/分類|分流|哪一類|類別|分成.{0,12}類|[三四五]類/.test(t) && /三|四|五|多|各自|不同/.test(t)) {
     add("triage", "多路分類分流", has("switch"), "三路以上分流用 switch 節點,出線 fromPort=選項文字");
   }
   // 失敗備案
