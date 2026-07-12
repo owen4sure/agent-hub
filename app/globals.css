@@ -190,6 +190,11 @@
   border-color: var(--border);
 }
 
+:where(a, button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 html {
   font-feature-settings: "cv01", "ss03";
 }
@@ -205,6 +210,13 @@ body {
   font-family: var(--font-inter), -apple-system, "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   letter-spacing: -0.006em;
+}
+
+@media (max-width: 767px) {
+  main > div {
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+  }
 }
 
 h1, h2, h3 { letter-spacing: -0.018em; }

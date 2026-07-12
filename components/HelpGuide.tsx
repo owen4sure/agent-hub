@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 const STORAGE_KEY = "agenthub_seen_welcome";
@@ -40,9 +40,10 @@ const STEPS: { icon: string; title: string; body: string }[] = [
 
 export default function HelpGuide() {
   const [open, setOpen] = useState(false);
+  const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    if (!localStorage.getItem(STORAGE_KEY)) setOpen(true);
+    if (!localStorage.getItem(STORAGE_KEY)) queueMicrotask(() => setOpen(true));
   }, []);
 
   function close() {
@@ -54,8 +55,14 @@ export default function HelpGuide() {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeRef.current?.focus();
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKey);
+    };
   }, [open]);
 
   return (
@@ -75,11 +82,14 @@ export default function HelpGuide() {
           它就會贏過整個 <aside>(連同裡面的彈窗)，導致彈窗開了卻點不到、看起來像「卡住」。
           用 portal 讓彈窗直接是 body 的子元素，才能真正跟頁面上任何東西公平比較 z-index。 */}
       {open && createPortal(
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.5)" }} onClick={close}>
-          <div className="card w-full max-w-xl max-h-[88vh] flex flex-col" style={{ boxShadow: "var(--shadow-lg)" }} onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-4" style={{ background: "rgba(0,0,0,0.5)" }} onClick={close}>
+          <div role="dialog" aria-modal="true" aria-labelledby="help-title" aria-describedby="help-description" className="card w-full max-w-xl max-h-[calc(100dvh-1.5rem)] sm:max-h-[88vh] flex flex-col" style={{ boxShadow: "var(--shadow-lg)" }} onClick={(e) => e.stopPropagation()}>
             <div className="px-6 pt-6 pb-4 border-b shrink-0">
-              <h2 className="text-lg font-semibold tracking-tight">歡迎使用 Agent Hub 👋</h2>
-              <p className="text-sm muted mt-1 leading-relaxed">
+              <div className="flex items-start gap-3">
+                <h2 id="help-title" className="text-lg font-semibold tracking-tight flex-1">歡迎使用 Agent Hub 👋</h2>
+                <button ref={closeRef} onClick={close} className="btn btn-ghost px-2" aria-label="關閉使用說明">✕</button>
+              </div>
+              <p id="help-description" className="text-sm muted mt-1 leading-relaxed">
                 這是一個「用講的」就能建自動化流程的工具——你負責<b>用白話描述要做什麼</b>，AI 負責把它做出來、測到會動、壞了自己修。<b>你永遠不用寫程式、也不用看程式碼。</b>沒用過類似工具也沒關係，照下面幾步走就會了。
               </p>
             </div>

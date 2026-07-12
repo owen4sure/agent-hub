@@ -2,7 +2,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 import ExcelJS from "exceljs";
-import type { NodeDefinition, NodeContext } from "../types";
+import type { NodeDefinition } from "../types";
 import { PermanentError } from "../types";
 import { cfgStr, cfgNum } from "../nodeHelpers";
 

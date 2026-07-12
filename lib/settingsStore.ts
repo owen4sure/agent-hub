@@ -78,11 +78,13 @@ const SHARED = "__shared__";
 
 /** 讀某個 workflow 需要的帳密：實際上是讀全域共用值(依 key)。 */
 export function getWorkflowSecrets(_workflowId: string): Record<string, string> {
+  void _workflowId;
   return getSharedSecrets();
 }
 
 /** 存帳密：寫進全域共用(依 key)，任何 workflow 存的都彼此看得到。 */
 export function setWorkflowSecrets(_workflowId: string, secrets: Record<string, string>) {
+  void _workflowId;
   setSharedSecrets(secrets);
 }
 

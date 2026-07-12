@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { resolveParams, computePeriod, type PeriodUnit } from "@/lib/relativeDate";
 import type { ParamField } from "./types";
 
@@ -24,6 +24,15 @@ export function RunForm({
   );
   const [headed, setHeaded] = useState(isDraft);
   const [testFile, setTestFile] = useState("");
+  const titleId = useId();
+  const cancelRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    cancelRef.current?.focus();
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   function submit() {
     const params = { ...values };
@@ -74,8 +83,8 @@ export function RunForm({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6" style={{ background: "rgba(0,0,0,0.4)" }} onClick={onClose}>
-      <div className="card p-6 w-[460px] max-w-full space-y-4" style={{ boxShadow: "var(--shadow-lg)" }} onClick={(e) => e.stopPropagation()}>
-        <h2 className="font-semibold">執行設定</h2>
+      <div role="dialog" aria-modal="true" aria-labelledby={titleId} className="card p-6 w-[460px] max-w-full max-h-[calc(100dvh-2rem)] overflow-auto space-y-4" style={{ boxShadow: "var(--shadow-lg)" }} onClick={(e) => e.stopPropagation()}>
+        <h2 id={titleId} className="font-semibold">執行設定</h2>
         {watchMode && (
           <label className="block text-sm">
             <span className="muted">測試用檔案(完整路徑)</span>
@@ -119,7 +128,7 @@ export function RunForm({
         </label>
 
         <div className="flex gap-2 justify-end">
-          <button onClick={onClose} className="btn btn-ghost">取消</button>
+          <button ref={cancelRef} onClick={onClose} className="btn btn-ghost">取消</button>
           <button onClick={submit} className="btn btn-primary">▶ 執行</button>
         </div>
       </div>

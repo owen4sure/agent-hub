@@ -4,20 +4,20 @@ import { getDb } from "../db";
 
 /** 找這個 run/node 的除錯截圖(最後一張)的實際路徑；本機 Claude Code 直接用路徑讀，不用轉 base64 */
 export function findLatestScreenshotPath(runId: string, nodeId: string): string | null {
-  const dir = path.join(process.cwd(), "data", "runs", runId, nodeId);
+  const dir = path.join(/* turbopackIgnore: true */ process.cwd(), "data", "runs", runId, nodeId);
   if (!fs.existsSync(dir)) return null;
   const pngs = fs.readdirSync(dir).filter((f) => f.endsWith(".png")).sort();
   if (pngs.length === 0) return null;
-  return path.join(dir, pngs[pngs.length - 1]);
+  return path.join(/* turbopackIgnore: true */ dir, pngs[pngs.length - 1]);
 }
 
 /** 找這個 run/node 的實際頁面 HTML(最後一份)，讓 AI 從真實 DOM 找出正確選擇器，而不是用猜的 */
 export function findLatestHtml(runId: string, nodeId: string): string | null {
-  const dir = path.join(process.cwd(), "data", "runs", runId, nodeId);
+  const dir = path.join(/* turbopackIgnore: true */ process.cwd(), "data", "runs", runId, nodeId);
   if (!fs.existsSync(dir)) return null;
   const htmls = fs.readdirSync(dir).filter((f) => f.endsWith(".html")).sort();
   if (htmls.length === 0) return null;
-  return fs.readFileSync(path.join(dir, htmls[htmls.length - 1]), "utf-8");
+  return fs.readFileSync(path.join(/* turbopackIgnore: true */ dir, htmls[htmls.length - 1]), "utf-8");
 }
 
 /**

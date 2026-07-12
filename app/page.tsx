@@ -63,6 +63,8 @@ export default function HomePage() {
     }
   }
   useEffect(() => {
+    // Initial client-side synchronization with the local API.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
     loadProposals();
     try { setDismissedFailures(JSON.parse(localStorage.getItem("agenthub_dismissed_failures") ?? "[]")); } catch {}
@@ -333,8 +335,9 @@ export default function HomePage() {
           )}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {items.map((w) => (
-          <Link key={w.id} href={`/workflows/${w.id}`} className="card card-hover p-5 block relative">
-            <div className="flex items-start gap-3 mb-2">
+          <article key={w.id} className="card card-hover p-5 relative">
+            <Link href={`/workflows/${w.id}`} className="absolute inset-0 rounded-[var(--radius-md)] z-0" aria-label={`開啟流程：${w.name}`} />
+            <div className="flex items-start gap-3 mb-2 relative z-[1] pointer-events-none">
               <span
                 className="grid place-items-center w-9 h-9 rounded-lg text-base shrink-0"
                 style={{ background: "var(--accent-soft)", border: "1px solid color-mix(in srgb, var(--accent) 22%, transparent)" }}
@@ -355,8 +358,8 @@ export default function HomePage() {
               </div>
               {!w.builtin && (
                 <button
-                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setGroupMenuFor((cur) => (cur === w.id ? null : w.id)); }}
-                  className="faint hover:text-[var(--text)] text-sm shrink-0 px-1"
+                  onClick={(e) => { e.stopPropagation(); setGroupMenuFor((cur) => (cur === w.id ? null : w.id)); }}
+                  className="faint hover:text-[var(--text)] text-sm shrink-0 px-1 pointer-events-auto relative z-10"
                   title="移到群組(工作/私人…)"
                   aria-label="移到群組"
                 >
@@ -365,7 +368,7 @@ export default function HomePage() {
               )}
             </div>
             {groupMenuFor === w.id && (
-              <div className="menu absolute right-3 top-12 z-30" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
+              <div className="menu absolute right-3 top-12 z-30" onClick={(e) => e.stopPropagation()}>
                 <p className="text-[11px] faint px-2.5 pt-1.5 pb-1">移到群組</p>
                 {groups.map((g) => (
                   <button key={g} className="menu-item" onClick={() => assignGroup(w.id, g)}>
@@ -395,8 +398,8 @@ export default function HomePage() {
                 </div>
               </div>
             )}
-            <p className="text-sm muted line-clamp-2 min-h-[2.5rem]">{w.description || <span className="faint">（還沒有說明——點進去跟 AI 對話時會自動補上）</span>}</p>
-            <div className="flex items-center gap-2 mt-4 pt-3 border-t text-xs">
+            <p className="text-sm muted line-clamp-2 min-h-[2.5rem] relative z-[1] pointer-events-none">{w.description || <span className="faint">（還沒有說明——點進去跟 AI 對話時會自動補上）</span>}</p>
+            <div className="flex items-center gap-2 mt-4 pt-3 border-t text-xs relative z-[1] pointer-events-none">
               {w.lastRun ? (
                 <span className="flex items-center gap-1.5" style={{ color: w.lastRun.status === "failed" ? "var(--red)" : w.lastRun.status === "success" ? "var(--green)" : "var(--text-faint)" }}>
                   <StatusDot status={w.lastRun.status} size={6} />
@@ -405,9 +408,9 @@ export default function HomePage() {
               ) : (
                 <span className="faint">還沒執行過</span>
               )}
-              <button onClick={(e) => runNow(e, w.id)} disabled={running[w.id]} title="用預設參數立即執行(有可調參數的流程會用預設值；要指定請點進流程頁按執行)" className="btn btn-ghost text-xs ml-auto shrink-0">{running[w.id] ? "已開始" : "▶ 執行"}</button>
+              <button onClick={(e) => runNow(e, w.id)} disabled={running[w.id]} title="用預設參數立即執行(有可調參數的流程會用預設值；要指定請點進流程頁按執行)" className="btn btn-ghost text-xs ml-auto shrink-0 pointer-events-auto relative z-10">{running[w.id] ? "已開始" : "▶ 執行"}</button>
             </div>
-          </Link>
+          </article>
             ))}
           </div>
         </div>

@@ -20,7 +20,13 @@ export function VersionsPanel({ workflowId, onClose, onRestored }: { workflowId:
       setError(true);
     }
   }
-  useEffect(() => { load(); }, [workflowId]);
+  useEffect(() => {
+    // Reload when the selected workflow changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    load();
+    // load is intentionally scoped to this panel and keyed by workflowId.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflowId]);
 
   async function restore(filename: string) {
     if (!window.confirm("確定要還原到這個版本嗎？目前的內容會先自動備份一份，還原這個動作本身也可以再復原。")) return;

@@ -20,7 +20,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { autoLayout } from "@/lib/workflow/layout";
-import { useWFChat, sendChatToAI, startAutoTest, stopAutoTest, clearPendingGraph, closeAutoTest, clearChat, appendAssistantNote, type Part, type ChatMsg } from "@/lib/wfChatStore";
+import { useWFChat, sendChatToAI, stopChatToAI, startAutoTest, stopAutoTest, clearPendingGraph, closeAutoTest, clearChat, appendAssistantNote, type Part, type ChatMsg } from "@/lib/wfChatStore";
 import { MODELS, KNOWN_WORKING_MODELS, supportsVision } from "@/lib/models";
 import type { Workflow, NodeRun, RunRecord, ExplainData } from "./types";
 import { nodeTypes } from "./nodeVisuals";
@@ -33,6 +33,7 @@ import { HistoryPanel } from "./HistoryPanel";
 import { ExplainPanel } from "./ExplainPanel";
 import { VersionsPanel } from "./VersionsPanel";
 import { SchedulePanel } from "./SchedulePanel";
+import { humanizeCron } from "@/components/ui";
 
 /** Ctrl-Z 的反向操作(每筆對應一個手動編輯動作;復原=把反向操作送給伺服器端合併) */
 type UndoAction =
@@ -70,7 +71,10 @@ export default function WorkflowPage() {
   // 免費/共用的模型服務有時會不穩定，AI 這邊會自動重試到成功而不是一次失敗就放棄(見 lib/aiRetry.ts)，
   // 但這樣使用者會看到「思考中」卡很久——加一句提示讓他知道「還在動，不是壞掉」，不要只讓他猜。
   useEffect(() => {
-    if (!thinking) { setThinkingLong(false); return; }
+    if (!thinking) {
+      queueMicrotask(() => setThinkingLong(false));
+      return;
+    }
     const t = setTimeout(() => setThinkingLong(true), 12_000);
     return () => clearTimeout(t);
   }, [thinking]);
@@ -103,10 +107,10 @@ export default function WorkflowPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const wfRef = useRef<Workflow | null>(null);
-  wfRef.current = wf;
   const rfInstance = useRef<ReactFlowInstance | null>(null);
   const chatInputRef = useRef("");
-  chatInputRef.current = chatInput;
+  useEffect(() => { wfRef.current = wf; }, [wf]);
+  useEffect(() => { chatInputRef.current = chatInput; }, [chatInput]);
 
   // 工具列「⋯」選單：點選單以外任何地方就關閉
   useEffect(() => {
@@ -328,6 +332,8 @@ export default function WorkflowPage() {
   }, [id]);
 
   useEffect(() => {
+    // Initial client-side synchronization with the local API.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
     loadRuns();
   }, [load, loadRuns]);
@@ -335,6 +341,8 @@ export default function WorkflowPage() {
   // AI 在對話裡直接改好現有節點時(reloadToken 變動)，重新載入畫布把新設定顯示出來——
   // 使用者不用按任何「套用」。初始值 0，>0 才是真的發生過一次對話修改。
   useEffect(() => {
+    // reloadToken is an external store signal; reloading is the synchronization itself.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (reloadToken > 0) load();
   }, [reloadToken, load]);
 
@@ -536,7 +544,7 @@ export default function WorkflowPage() {
         }
       }
     },
-    [onNodesChange, persistPositions, setNodes, id],
+    [onNodesChange, persistPositions, setNodes, id, load],
   );
 
   const onConnect = useCallback(
@@ -848,7 +856,7 @@ export default function WorkflowPage() {
     const res = await fetch(`/api/workflows/${id}/build`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ nodes: pendingGraph.nodes, edges: pendingGraph.edges, triggerParams: pendingGraph.triggerParams }),
+      body: JSON.stringify({ nodes: pendingGraph.nodes, edges: pendingGraph.edges, triggerParams: pendingGraph.triggerParams, schedule: pendingGraph.schedule }),
     }).catch(() => null);
     if (!res || !res.ok) {
       // 套用失敗別默默把預覽清掉、讓 AI 的成果消失——留著預覽並在對話區告知，讓使用者可以重試
@@ -856,7 +864,7 @@ export default function WorkflowPage() {
       return;
     }
     clearPendingGraph(id);
-    appendAssistantNote(id, `✅ 已套用到畫布，共 ${count} 個節點。`);
+    appendAssistantNote(id, `✅ 已套用到畫布，共 ${count} 個節點。${pendingGraph.schedule ? "排程也已建立並啟用。" : ""}`);
     // 「以使用者擺好的位置為準」：已經存在的節點(同 id)保留它目前的座標，只有全新的節點才自動排版。
     // 之前不管三七二十一對整張圖重跑 autoLayout，會把使用者辛苦拖好的排列整個洗掉、還可能擠成一團(踩過)。
     // (要整張重新自動對齊是「排列」按鈕的事，套用/修改流程不該偷改使用者的手動位置)
@@ -1328,13 +1336,21 @@ export default function WorkflowPage() {
               ))}
               {thinking && (
                 <div className="faint">
-                  <p className="flex items-center gap-2"><span className="animate-pulse">●</span> AI 思考中…</p>
+                  <p className="flex items-center gap-2">
+                    <span className="animate-pulse">●</span> AI 思考中…
+                    <button onClick={() => stopChatToAI(id)} className="btn btn-ghost text-xs ml-auto">⏹ 停止</button>
+                  </p>
                   {thinkingLong && <p className="text-xs mt-1">模型服務目前不太穩定，AI 正在自動重試中，不是卡住了，可能還要再等一下…</p>}
                 </div>
               )}
               {pendingGraph && (
                 <div className="card p-3 space-y-2" style={{ borderColor: "color-mix(in srgb, var(--green) 40%, var(--border))" }}>
                   <p className="text-xs font-medium">新流程：{pendingGraph.nodes.length} 個節點</p>
+                  {pendingGraph.schedule && (
+                    <p className="text-xs rounded-lg px-2.5 py-2" style={{ background: "var(--surface-2)", color: "var(--text-muted)" }}>
+                      ⏰ 套用時會一併啟用：{humanizeCron(pendingGraph.schedule.cron)}（台北時間）
+                    </p>
+                  )}
                   <div className="flex gap-2">
                     <button onClick={applyGraph} className="btn btn-primary text-xs" style={{ background: "var(--green)" }}>✅ 套用到畫布</button>
                     <button onClick={() => clearPendingGraph(id)} className="btn btn-ghost text-xs">捨棄</button>
@@ -1394,4 +1410,3 @@ export default function WorkflowPage() {
     </div>
   );
 }
-

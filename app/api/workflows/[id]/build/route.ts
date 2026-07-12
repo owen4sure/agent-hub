@@ -7,6 +7,7 @@ import { getLastFailureContext } from "@/lib/workflow/repairContext";
 import { applyNodeConfigEdits } from "@/lib/workflow/graphRepair";
 import { parseReplacePairs, applyTextReplace } from "@/lib/workflow/textReplace";
 import { autorunActive } from "@/lib/workflow/busyLocks";
+import { createSchedule, isValidCron, listSchedules } from "@/lib/scheduler";
 
 // 提出建圖(可能回問題、回可套用的圖、或直接改好現有節點)
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -84,7 +85,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       : undefined;
     // 快速通道剛替換過的話,模型看到的圖必須是「替換後的最新版」,不能用函式開頭那份過期快照
     const cur = pairs.length > 0 ? (getWorkflow(id) ?? wf) : wf;
-    const result = await buildWorkflow(client, model, body.history, { nodes: cur.nodes, edges: cur.edges, triggerParams: cur.triggerParams }, runtimeContext);
+    const result = await buildWorkflow(client, model, body.history, { nodes: cur.nodes, edges: cur.edges, triggerParams: cur.triggerParams }, runtimeContext, req.signal);
     // 快速通道有做事的話,回覆開頭要先講「已完成的替換」——不講的話使用者只看到模型對剩餘需求的回覆,
     // 會以為替換沒做
     if (replaceNote) result.message = `${replaceNote}\n\n${result.message}`;
@@ -153,6 +154,10 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   if (autorunActive.has(id)) {
     return NextResponse.json({ error: "這條流程的自動測試/修復正在進行中，等它跑完再套用新流程(不然會互相蓋掉對方的修改)" }, { status: 409 });
   }
+  const schedule = body.schedule as { cron?: unknown; params?: unknown } | undefined;
+  if (schedule !== undefined && (typeof schedule.cron !== "string" || !isValidCron(schedule.cron))) {
+    return NextResponse.json({ error: "AI 建立的排程格式不正確，流程圖與排程都沒有套用" }, { status: 400 });
+  }
   backupWorkflow(id);
   // 以磁碟最新版為底(不是函式開頭那份過期快照)——await req.json() 期間並發改的 name/status/requiresSecrets
   // 不能被舊 wf 整包蓋掉(違反 AGENTS 存檔鐵則2)，只換 nodes/edges(/triggerParams)。
@@ -161,5 +166,19 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   // 沒給就沿用現有的，不能無條件清空——不然沒帶 triggerParams 的整圖套用會把使用者手動加的參數洗掉。
   const triggerParams = Array.isArray(body.triggerParams) ? body.triggerParams : cur.triggerParams;
   saveWorkflow({ ...cur, nodes: body.nodes, edges: body.edges, triggerParams });
-  return NextResponse.json({ ok: true });
+  let scheduleCreated = false;
+  if (schedule !== undefined) {
+    const cron = schedule.cron as string;
+    const scheduleParams = schedule.params && typeof schedule.params === "object" && !Array.isArray(schedule.params)
+      ? schedule.params as Record<string, unknown>
+      : {};
+    const paramsJson = JSON.stringify(scheduleParams);
+    // Applying the same preview twice must not create two schedules that fire together.
+    const duplicate = listSchedules(id).some((s) => s.cron === cron && s.params_json === paramsJson);
+    if (!duplicate) {
+      createSchedule(id, cron, scheduleParams);
+      scheduleCreated = true;
+    }
+  }
+  return NextResponse.json({ ok: true, scheduleCreated });
 }

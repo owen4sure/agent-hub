@@ -2,6 +2,7 @@
 
 import { useSyncExternalStore } from "react";
 import type { WorkflowNode, WorkflowEdge, ParamField } from "@/lib/workflow/types";
+import type { SuggestedSchedule } from "@/lib/workflow/builder";
 
 // 這些 AI 長時間工作的狀態(對話、思考中、待套用的新流程、自動測試)本來存在頁面元件裡，
 // 一切換畫面元件就被銷毀、結果就不見。改存在這個「模組層」store：它不隨頁面卸載而消失，
@@ -26,7 +27,7 @@ export function isSystemErrorMsg(m: ChatMsg): boolean {
   return m.role === "assistant" && m.parts.some((p) => p.kind === "text" && ERROR_TEXT_PATTERNS.some((r) => r.test(p.text.trim())));
 }
 export interface AutoStep { kind: "run" | "fix" | "done" | "human" | "giveup" | "info"; title: string; detail?: string; nodeLabel?: string; runId?: string }
-export interface PendingGraph { nodes: WorkflowNode[]; edges: WorkflowEdge[]; message: string; triggerParams?: ParamField[] }
+export interface PendingGraph { nodes: WorkflowNode[]; edges: WorkflowEdge[]; message: string; triggerParams?: ParamField[]; schedule?: SuggestedSchedule }
 export interface AutoTestState { running: boolean; steps: AutoStep[]; ok?: boolean; needsHuman?: boolean }
 
 export interface WFChatState {
@@ -48,6 +49,7 @@ const listeners = new Set<() => void>();
 // 每次「清除對話」就把這個 workflow 的 epoch +1；進行中的 sendChatToAI 記住送出當下的 epoch，
 // 回來時若 epoch 變了(代表使用者中途清了對話)，就丟棄這次結果、不要把清掉的舊對話又寫回去。
 const chatEpoch = new Map<string, number>();
+const chatControllers = new Map<string, AbortController>();
 
 function emit() { listeners.forEach((l) => l()); }
 function subscribe(cb: () => void) { listeners.add(cb); return () => { listeners.delete(cb); }; }
@@ -116,17 +118,20 @@ export async function sendChatToAI(id: string, history: ChatMsg[]) {
   set(id, { chat: history, thinking: true, pendingGraph: null });
   // 送給模型前把「系統錯誤提示」從歷史裡濾掉——那些不是 AI 說的話，混進去模型會模仿著回「連線失敗」
   const cleanHistory = history.filter((m) => !isSystemErrorMsg(m));
+  chatControllers.get(id)?.abort();
+  const controller = new AbortController();
+  chatControllers.set(id, controller);
   // 這次結果要不要寫回：只有 epoch 沒變(中途沒被清除對話)才寫。thinking 一律歸位(但也只在同 epoch 時)。
   const commit = (patch: Partial<WFChatState>) => { if ((chatEpoch.get(id) ?? 0) === epoch) set(id, patch); };
   try {
     const res = await fetch(`/api/workflows/${id}/build`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ history: cleanHistory }),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ history: cleanHistory }), signal: controller.signal,
     });
     const data = await res.json();
     if (res.ok && data.phase === "ready") {
       commit({
         chat: [...history, { role: "assistant", parts: [{ kind: "text", text: `${data.message}\n\n(下方預覽新流程，確認後按「套用」)` }] }],
-        pendingGraph: { nodes: data.nodes, edges: data.edges, message: data.message, triggerParams: data.triggerParams },
+        pendingGraph: { nodes: data.nodes, edges: data.edges, message: data.message, triggerParams: data.triggerParams, schedule: data.schedule },
       });
     } else if (res.ok && data.phase === "edits") {
       // AI 直接改好了現有節點(server 端已套用)：在對話明確回報「實際改了哪些節點的什麼」，讓使用者
@@ -150,10 +155,24 @@ export async function sendChatToAI(id: string, history: ChatMsg[]) {
       commit({ chat: [...history, { role: "assistant", parts: [{ kind: "text", text: data.error ?? "發生錯誤，請再試一次" }], isError: true }] });
     }
   } catch {
+    if (controller.signal.aborted) return;
     commit({ chat: [...history, { role: "assistant", parts: [{ kind: "text", text: "（連線出錯，AI 沒回覆，請再試一次）" }], isError: true }] });
   } finally {
+    if (chatControllers.get(id) === controller) chatControllers.delete(id);
     if ((chatEpoch.get(id) ?? 0) === epoch) set(id, { thinking: false });
   }
+}
+
+/** Stop an interactive build immediately, including retries and Claude CLI fallback. */
+export function stopChatToAI(id: string) {
+  chatEpoch.set(id, (chatEpoch.get(id) ?? 0) + 1);
+  chatControllers.get(id)?.abort();
+  chatControllers.delete(id);
+  const s = get(id);
+  set(id, {
+    thinking: false,
+    chat: [...s.chat, { role: "assistant", parts: [{ kind: "text", text: "已停止這次建圖。你可以修改需求後再送出。" }] }],
+  });
 }
 
 /** 在對話區補一則系統提示(如「已套用到畫布」)。標成 isError 只在真的是錯誤時；一般提示 isError 省略。
@@ -168,6 +187,8 @@ export function appendAssistantNote(id: string, text: string) {
  * bump epoch 讓正在飛的 sendChatToAI 回來時不會把清掉的對話又寫回去。 */
 export function clearChat(id: string) {
   chatEpoch.set(id, (chatEpoch.get(id) ?? 0) + 1);
+  chatControllers.get(id)?.abort();
+  chatControllers.delete(id);
   set(id, { chat: [], pendingGraph: null, thinking: false });
 }
 

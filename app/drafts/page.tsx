@@ -35,6 +35,8 @@ export default function DraftsPage() {
     }
   }
   useEffect(() => {
+    // Initial client-side synchronization with the local API.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
   }, []);
 

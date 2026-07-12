@@ -26,7 +26,11 @@ export default function SchedulesPage() {
     setWorkflows(w.workflows ?? []);
     setMaxConcurrent(settings.maxConcurrent ?? 1);
   }
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    // Initial client-side synchronization with the local API.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    load();
+  }, []);
 
   async function setConcurrency(n: number) {
     setMaxConcurrent(n);

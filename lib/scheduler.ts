@@ -72,7 +72,7 @@ function matchesField(spec: string, value: number, min = 0): boolean {
 }
 
 /** 檢查單一 cron 欄位的格式是否合法：* 、數字、範圍(a-b)、步進(/N)、逗號清單的任意組合 */
-function isValidCronField(spec: string): boolean {
+function isValidCronField(spec: string, min: number, max: number): boolean {
   if (spec === "*") return true;
   const isNum = (s: string) => /^\d+$/.test(s);
   return spec.split(",").every((part) => {
@@ -85,9 +85,11 @@ function isValidCronField(spec: string): boolean {
     if (range === "*") return true;
     if (range.includes("-")) {
       const segs = range.split("-");
-      return segs.length === 2 && isNum(segs[0]) && isNum(segs[1]);
+      if (segs.length !== 2 || !isNum(segs[0]) || !isNum(segs[1])) return false;
+      const [lo, hi] = segs.map(Number);
+      return lo >= min && hi <= max && lo <= hi;
     }
-    return isNum(range);
+    return isNum(range) && Number(range) >= min && Number(range) <= max;
   });
 }
 
@@ -98,7 +100,8 @@ function isValidCronField(spec: string): boolean {
 export function isValidCron(expr: string): boolean {
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5) return false;
-  return parts.every(isValidCronField);
+  const limits: [number, number][] = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+  return parts.every((part, i) => isValidCronField(part, ...limits[i]));
 }
 
 export function cronMatches(
@@ -151,8 +154,8 @@ export function createSchedule(workflowId: string, cron: string, params: Record<
   const db = getDb();
   const id = randomUUID();
   db.prepare(
-    `INSERT INTO schedules (id, workflow_id, enabled, cron, params_json, created_at) VALUES (?, ?, 1, ?, ?, datetime('now'))`,
-  ).run(id, workflowId, cron, JSON.stringify(params));
+    `INSERT INTO schedules (id, workflow_id, enabled, cron, params_json, next_run_at, created_at) VALUES (?, ?, 1, ?, ?, ?, datetime('now'))`,
+  ).run(id, workflowId, cron, JSON.stringify(params), computeNextRun(cron, new Date()));
   return id;
 }
 

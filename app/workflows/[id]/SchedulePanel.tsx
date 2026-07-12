@@ -58,7 +58,13 @@ function ScheduleSection({ workflowId }: { workflowId: string }) {
     const d = await (await fetch(`/api/workflows/${workflowId}/schedules`)).json();
     setSchedules(d.schedules ?? []);
   }
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [workflowId]);
+  useEffect(() => {
+    // Reload when the selected workflow changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    load();
+    // load is intentionally scoped to this section and keyed by workflowId.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflowId]);
 
   const buildCronStr = (): string => (advanced ? custom : buildCron({ mode, time, day, weekday }));
   const timeOk = timeValid(time);

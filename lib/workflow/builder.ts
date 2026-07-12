@@ -27,8 +27,13 @@ export interface ChatMessage {
 
 export type BuildResult =
   | { phase: "clarify"; message: string }
-  | { phase: "ready"; message: string; nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[] }
+  | { phase: "ready"; message: string; nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[]; schedule?: SuggestedSchedule }
   | { phase: "edits"; message: string; edits: { nodeId: string; stepIndex?: number; config: Record<string, unknown> }[] };
+
+export interface SuggestedSchedule {
+  cron: string;
+  params?: Record<string, unknown>;
+}
 
 /** 上次執行的失敗現場——讓「對話修流程」也看得到「哪一步、為什麼壞、實際收到什麼資料」，跟「點節點修」同一個頻道 */
 export interface RuntimeContext {
@@ -67,7 +72,33 @@ const graphSchema = z.object({
       }),
     )
     .optional(),
+  schedule: z.object({
+    cron: z.string(),
+    params: z.record(z.string(), z.unknown()).optional(),
+  }).optional(),
 });
+
+/** Prevent malformed model-produced cron from reaching the confirmation UI.
+ * The scheduler validates it again when the user applies the graph. */
+export function validateSuggestedSchedule(schedule: SuggestedSchedule | undefined): string[] {
+  if (!schedule) return [];
+  const fields = schedule.cron.trim().split(/\s+/);
+  if (fields.length !== 5) return [`schedule.cron 必須是 5 欄 cron，目前是「${schedule.cron}」`];
+  const limits: [number, number][] = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+  const errors: string[] = [];
+  fields.forEach((field, i) => {
+    if (!/^[\d*/,-]+$/.test(field)) errors.push(`schedule.cron 第 ${i + 1} 欄含不合法字元：「${field}」`);
+    for (const token of field.match(/\d+/g) ?? []) {
+      const n = Number(token);
+      if (field.includes(`/${token}`)) {
+        if (n < 1) errors.push(`schedule.cron 的步進值必須大於 0：「${field}」`);
+      } else if (n < limits[i][0] || n > limits[i][1]) {
+        errors.push(`schedule.cron 第 ${i + 1} 欄超出 ${limits[i][0]}~${limits[i][1]}：「${field}」`);
+      }
+    }
+  });
+  return errors;
+}
 
 /**
  * if-condition 節點的下游連線一定要標 fromPort="true"/"false"，執行引擎才知道走哪條分支；
@@ -343,7 +374,7 @@ ${runtimeSection(rc)}
   - 不是週期性的需求(單次抓資料、一次性報表)就不需要 triggerParams，不要為了不需要的東西硬加。
 
 【觸發方式：排程/資料夾監聽/Webhook】
-- 使用者說「每天/每週幾點自動跑」：流程圖照建，並在 message 裡告訴使用者「圖建好後到工具列的 ⏰ 觸發面板設定排程時間」。排程不是節點，不要為它畫節點。
+- 使用者說「每天/每週/每月/每季幾點自動跑」：排程不是節點，不要為它畫節點；請在 phase:"ready" 根層加 schedule:{"cron":"五欄 cron","params":{}}。系統會在使用者按「套用」時一併建立並啟用排程，不要再叫使用者自己去觸發面板設定。時區固定 Asia/Taipei。例：每天 09:00 = "0 9 * * *"；每週一 09:00 = "0 9 * * 1"；每月 1 日 09:00 = "0 9 1 * *"；每季首月 1 日 09:00 = "0 9 1 1,4,7,10 *"。
 - 使用者說「把檔案丟進某個資料夾就自動處理」：在 trigger 節點的 config 填 watchPath(那個資料夾的絕對路徑；使用者沒講清楚路徑就先 clarify 問)，需要過濾檔名就填 watchPattern。下游節點用 {{filePath}} 拿到新檔案的完整路徑(例如 read-file 的 path 填 {{filePath}})、{{fileName}} 拿檔名。記得在 message 提醒「設為正式後才會開始監聽」。
 - 使用者說「讓別的程式/捷徑/工具能觸發這個流程」：這是 Webhook——流程圖照建，在 message 告訴使用者「到 ⚡ 觸發面板啟用 Webhook 會拿到專屬網址」。外部 POST 的 JSON 欄位會直接變成下游可用的 {{欄位}}；如果需求裡講明外部會送哪些欄位(如 title、amount)，下游節點就直接引用那些欄位名。
 【熱門服務的免 OAuth 接法——使用者提到這些服務時,用 http-request 節點+這些配方直接建,不要說做不到】
@@ -363,7 +394,7 @@ ${runtimeSection(rc)}
   - edits 可以一個或多個節點。config 是那個節點「改好後的完整設定」。
   - custom-code 節點可直接改 config.code(一段 async 函式主體，用 ...ctx.input 把上游資料往下傳；要用套件就 await import("exceljs"))。
   - **要改的是 repeat-steps(重複執行)節點「裡面的某一步」時，一定用定點修改**：edits 元素帶 "stepIndex"(第幾步，從 0 起，對照上面「步驟編號對照」裡的 stepIndex)，config 只放「那一步」改好後的設定——**絕對不要整包重寫外層的 steps JSON**(幾千字的 JSON 重新輸出幾乎必錯，複述時很容易弄壞其他步驟)。例如：{"nodeId":"repeat-steps節點id","stepIndex":1,"config":{ 那一步改好後的 config }}
-- 建全新流程/大改結構：{"phase":"ready","message":"一句話說明這個流程","nodes":[{"id","type","label","config"}],"edges":[{"from","to","fromPort"}],"triggerParams":[可省略，見上面週期性資料的規則]}
+- 建全新流程/大改結構：{"phase":"ready","message":"一句話說明這個流程","nodes":[{"id","type","label","config"}],"edges":[{"from","to","fromPort"}],"triggerParams":[可省略，見上面週期性資料的規則],"schedule":{"cron":"需求有指定自動時間時才填","params":{}}}
   - node.id 用簡短英數(如 n1,n2)；第一個節點通常是 type:"trigger"。
   - 節點的 config 依該型別的參數填；日期類參數可用相對日期變數，**只有這些名稱會被解析**(可加 -N 位移天數，如 {{today-7}})：
     ${DATE_TOKENS.map((t) => `{{${t}}}`).join("、")}
@@ -375,7 +406,7 @@ ${runtimeSection(rc)}
  * 走本機 Claude Code 時，不用 OpenAI 那種多模態 messages[] 陣列——Claude Code 是能讀檔案的 agent，
  * 把對話攤平成一段文字(標明「使用者:」/「AI:」)，圖片先存成暫存檔給它路徑用 Read 工具讀，比較符合它的操作方式。
  */
-async function callViaClaudeCode(system: string, history: ChatMessage[]): Promise<string> {
+async function callViaClaudeCode(system: string, history: ChatMessage[], signal?: AbortSignal): Promise<string> {
   const tmpDir = path.join(os.tmpdir(), `agenthub-cc-${randomUUID()}`);
   const imagePaths: string[] = [];
   try {
@@ -398,7 +429,7 @@ async function callViaClaudeCode(system: string, history: ChatMessage[]): Promis
       turns.push(`${label}：${pieces.join("\n")}`);
     }
     const prompt = `${system}\n\n---對話紀錄---\n${turns.join("\n\n")}`;
-    return await callClaudeCode({ prompt, imagePaths: imagePaths.length ? imagePaths : undefined });
+    return await callClaudeCode({ prompt, imagePaths: imagePaths.length ? imagePaths : undefined, signal });
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -410,6 +441,7 @@ export async function buildWorkflow(
   history: ChatMessage[],
   currentGraph: { nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[] },
   runtimeContext?: RuntimeContext,
+  signal?: AbortSignal,
 ): Promise<BuildResult> {
   // 使用者最新訊息裡引號點名的字串——出現在哪個節點的程式碼裡，那個節點的 code 就不截斷(讓模型
   // 做針對性修改時看得到內文；其餘節點照常截斷控制提示大小)
@@ -462,12 +494,12 @@ export async function buildWorkflow(
   // 才自動切換到本機 Claude Code 頂一次——不是預設就走 Claude Code，是它徹底不行時的最後一道備援。
   const callOnce = async (extra: OpenAI.Chat.ChatCompletionMessageParam[], extraCC: ChatMessage[]): Promise<string> => {
     const claudeCodeFallback = () =>
-      callViaClaudeCode(systemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph) + clarifyCapNote, [...history, ...extraCC]);
-    if (isClaudeCodeModel(model)) return callAIWithRetry(claudeCodeFallback, { label: "建立流程圖(Claude Code)" });
+      callViaClaudeCode(systemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph) + clarifyCapNote, [...history, ...extraCC], signal);
+    if (isClaudeCodeModel(model)) return callAIWithRetry(claudeCodeFallback, { label: "建立流程圖(Claude Code)", signal });
     const fallback = (await isClaudeCodeAvailable()) ? claudeCodeFallback : undefined;
     return callAIWithRetry(
-      () => client.chat.completions.create({ model, messages: [...messages, ...extra], max_tokens: 3000 }).then((res) => res.choices[0]?.message?.content ?? ""),
-      { label: "建立流程圖", fallback },
+      () => client.chat.completions.create({ model, messages: [...messages, ...extra], max_tokens: 3000 }, { signal }).then((res) => res.choices[0]?.message?.content ?? ""),
+      { label: "建立流程圖", fallback, signal },
     );
   };
 
@@ -558,7 +590,10 @@ export async function buildWorkflow(
           config: n.config as Record<string, unknown>,
           position: { x: 0, y: 0 },
         }));
-        const lintErrors = lintGraph(rawNodes, validated.data.edges);
+        const lintErrors = [
+          ...lintGraph(rawNodes, validated.data.edges),
+          ...validateSuggestedSchedule(validated.data.schedule as SuggestedSchedule | undefined),
+        ];
         if (lintErrors.length === 0) {
           // 由左到右分層對齊排列
           const pos = autoLayout(rawNodes, validated.data.edges);
@@ -571,7 +606,9 @@ export async function buildWorkflow(
           const periodNote = triggerParams?.some((p) => p.key === "periodUnit")
             ? "\n\n📅 這條流程可以在每次執行前選擇要抓哪一期的資料(執行時會跳出選擇表單)。"
             : "";
-          return { phase: "ready", message: String(obj.message ?? "流程已建好") + warnNote + periodNote, nodes, edges, triggerParams };
+          const schedule = validated.data.schedule as SuggestedSchedule | undefined;
+          const scheduleNote = schedule ? `\n\n⏰ 套用流程時會一併建立並啟用排程（${schedule.cron}，台北時間）。` : "";
+          return { phase: "ready", message: String(obj.message ?? "流程已建好") + warnNote + periodNote + scheduleNote, nodes, edges, triggerParams, schedule };
         }
         lastProblems = lintErrors;
       }
