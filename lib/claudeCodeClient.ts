@@ -10,7 +10,10 @@ export { CLAUDE_CODE_MODEL, isClaudeCodeModel } from "./claudeCodeShared";
  * 免費/共用服務常不穩定，前者是使用者自己的訂閱，穩定得多。
  *
  * 在「模型」下拉選單裡選到這個特殊選項、或主力模型徹底失敗要備援時，
- * 原本呼叫 OpenAI SDK 的地方改成呼叫這裡的 callClaudeCode()，走 `claude -p --output-format json` 無互動模式。
+ * 原本呼叫 OpenAI SDK 的地方改成呼叫這裡的 callClaudeCode()，走 `claude -p --output-format stream-json` 無互動模式。
+ * 用串流(--include-partial-messages)是為了拿到「生成中的逐字事件」當心跳——只要它還在吐東西就代表
+ * 還在做事，計時器就一直重置、讓它做完；只有「完全靜止很久」才判定卡死。這樣「慢但會完成」的呼叫
+ * (例如訂閱用量接近上限被降速時)不會被固定的逾時牆誤殺成失敗。
  * (CLAUDE_CODE_MODEL 常數實際定義在 claudeCodeShared.ts——那個檔不含 Node-only import，
  * 前端的模型選單 lib/models.ts 才能安全 import 到同一個字串)
  */
@@ -36,6 +39,12 @@ interface ClaudeCodeResult {
   error?: string;
 }
 
+// 「還在做事就一直等它做完」的心跳計時:只要 Claude Code 有任何輸出(串流逐字/工具往返)就重置。
+// 只有「完全靜止」這麼久(genuinely 卡死/沒回應)才收掉——不是用固定牆(時間到就砍,把還在跑的也一起殺了)。
+const IDLE_MS = 180_000; // 3 分鐘完全沒動靜 = 視為卡死(涵蓋「等第一個 token」的慢啟動,含訂閱接近上限被降速)
+// 絕對上限只是防「一直吐東西卻永遠不結束」的失控行程,正常路徑永遠碰不到——真正的守門是上面的閒置心跳。
+const ABSOLUTE_MAX_MS = 20 * 60_000;
+
 /**
  * 呼叫本機 Claude Code(無互動 print 模式)。
  * - prompt 走 stdin，不走命令列參數——SOP 檔案+多輪對話很容易超過 argv 上限(macOS 約 1MB)，
@@ -51,7 +60,8 @@ export function callClaudeCode(opts: { prompt: string; imagePaths?: string[]; si
 
   // 明確指定模型，不要讓它繼承使用者本機 CLI 當下的全域預設——那個預設會被使用者日常互動操作
   // (如跑 /model 切換)悄悄改變，備援呼叫的行為不該因此跟著漂移，要固定、可預期。
-  const args = ["-p", "--model", "sonnet", "--output-format", "json"];
+  // stream-json + --include-partial-messages:生成過程逐字吐事件當「還在做事」的心跳(見上方 IDLE_MS)。
+  const args = ["-p", "--model", "sonnet", "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
   if (opts.imagePaths?.length) {
     args.push("--allowedTools", "Read");
     const dirs = [...new Set(opts.imagePaths.map((p) => path.dirname(p)))];
@@ -60,57 +70,74 @@ export function callClaudeCode(opts: { prompt: string; imagePaths?: string[]; si
 
   return new Promise((resolve, reject) => {
     const child = spawn("claude", args, { cwd: os.tmpdir(), stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "";
+    let buffer = "";       // 累積 stdout,逐行(JSONL)解析
     let stderr = "";
+    let resultText: string | null = null;  // 收到 type:"result" 時填入
+    let resultError: string | null = null; // result 帶錯誤時填入
+    let rateLimitNote = "";  // 最近一次 rate_limit_event 的用量,失敗時附上讓使用者知道是不是額度問題
     let settled = false;
-    const fail = (msg: string) => { if (!settled) { settled = true; reject(new Error(msg)); } };
-    const ok = (v: string) => { if (!settled) { settled = true; resolve(v); } };
 
-    // 讀圖+回覆的完整回合常超過 45 秒(冷啟動+工具往返)；大型建圖 prompt(整份節點庫+需求規格)
-    // 更常超過 120 秒——備援的存在意義就是「主力全掛時頂上」,那一刻它是唯一的路,逾時掐太緊等於
-    // 讓整次建圖直接失敗(實測:gateway 回 DEGRADED、備援又 120 秒逾時→使用者只拿到錯誤)。放寬到 300 秒。
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      fail("Claude Code 呼叫逾時(300秒)");
-    }, 300_000);
-
-    // 使用者按「停止執行」要能真的殺掉這個子行程，不能只靠內部 120 秒逾時收尾——
-    // 以前這裡完全不接任何 AbortSignal，即使呼叫端把 ctx.cancelSignal 傳進 callAIWithRetry，
-    // 按停止對「正在跑的 claude CLI」本身沒有作用，最長要多等 120 秒(踩過的「按停止不會停」缺口)。
-    const onAbort = () => {
-      child.kill("SIGTERM");
-      fail("使用者已停止執行");
-    };
-    opts.signal?.addEventListener("abort", onAbort, { once: true });
+    // 單一 watchdog:每幾秒檢查「閒置多久」跟「總時長」。閒置(完全沒輸出)超過 IDLE_MS=視為卡死;
+    // 總時長超過 ABSOLUTE_MAX_MS=防失控。只要還在吐東西 lastActivity 就一直更新,永遠不會誤殺還在跑的。
+    const startedAt = Date.now();
+    let lastActivity = startedAt;
     const cleanupAbortListener = () => opts.signal?.removeEventListener("abort", onAbort);
+    const finish = (fn: () => void) => { if (settled) return; settled = true; clearInterval(watchdog); cleanupAbortListener(); fn(); };
+    const fail = (msg: string) => finish(() => { child.kill("SIGTERM"); reject(new Error(msg)); });
+    const ok = (v: string) => finish(() => { child.kill("SIGTERM"); resolve(v); });
+    const watchdog = setInterval(() => {
+      const now = Date.now();
+      if (now - lastActivity > IDLE_MS) {
+        fail(`Claude Code 沒有回應(超過 ${IDLE_MS / 60_000} 分鐘完全沒有輸出，可能卡住了)${rateLimitNote}`);
+      } else if (now - startedAt > ABSOLUTE_MAX_MS) {
+        fail(`Claude Code 呼叫超過 ${ABSOLUTE_MAX_MS / 60_000} 分鐘仍未結束${rateLimitNote}`);
+      }
+    }, 5000);
 
-    child.stdout.on("data", (d) => { stdout += d; });
-    child.stderr.on("data", (d) => { stderr += d; });
+    // 使用者按「停止執行」要能真的殺掉這個子行程(踩過的「按停止不會停」缺口)。
+    const onAbort = () => fail("使用者已停止執行");
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+
+    // 逐行處理 JSONL 事件:只在乎 result(最終答案)與 rate_limit(額度提示);其餘串流事件只當心跳。
+    const handleEvent = (ev: Record<string, unknown>) => {
+      const t = ev.type;
+      if (t === "rate_limit_event") {
+        const info = ev.rate_limit_info as { utilization?: number; status?: string } | undefined;
+        if (info && typeof info.utilization === "number" && info.utilization >= 0.75) {
+          const pct = Math.round(info.utilization * 100);
+          rateLimitNote = `（提醒:你的 Claude 訂閱用量已達 ${pct}%，接近上限時呼叫會變慢，額度重置後恢復）`;
+        }
+      } else if (t === "result") {
+        const r = ev as unknown as ClaudeCodeResult;
+        if (r.is_error || !r.result) resultError = String(r.error ?? r.subtype ?? "未知錯誤").slice(0, 300);
+        else resultText = r.result;
+      }
+    };
+
+    child.stdout.on("data", (d) => {
+      lastActivity = Date.now();  // 有任何輸出=還在做事,心跳更新
+      buffer += d;
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line) continue;
+        try { handleEvent(JSON.parse(line)); } catch { /* 不完整/非 JSON 行,忽略 */ }
+        if (resultText !== null) { ok(resultText); return; }
+        if (resultError !== null) { fail(`Claude Code 回應錯誤：${resultError}${rateLimitNote}`); return; }
+      }
+    });
+    child.stderr.on("data", (d) => { lastActivity = Date.now(); stderr += d; });
     child.on("error", (err) => {
-      clearTimeout(timer);
-      cleanupAbortListener();
       fail(`Claude Code 無法啟動：${String(err.message).slice(0, 200)}(可能沒安裝，先在終端機跑一次 claude 確認)`);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      cleanupAbortListener();
       if (settled) return;
-      if (code !== 0) {
-        fail(`Claude Code 執行失敗(exit ${code})${stderr ? `：${stderr.slice(0, 300)}` : ""}`);
-        return;
-      }
-      let parsed: ClaudeCodeResult;
-      try {
-        parsed = JSON.parse(stdout);
-      } catch {
-        fail(`Claude Code 回應格式無法解析：${stdout.slice(0, 300)}`);
-        return;
-      }
-      if (parsed.is_error || !parsed.result) {
-        fail(`Claude Code 回應錯誤：${String(parsed.error ?? parsed.subtype ?? "未知錯誤").slice(0, 300)}`);
-        return;
-      }
-      ok(parsed.result);
+      // 收到 result 事件會在上面就 ok/fail 了;走到這裡代表串流結束卻沒有 result——多半是 CLI 出錯。
+      if (resultText !== null) { ok(resultText); return; }
+      if (resultError !== null) { fail(`Claude Code 回應錯誤：${resultError}${rateLimitNote}`); return; }
+      if (code !== 0) { fail(`Claude Code 執行失敗(exit ${code})${stderr ? `：${stderr.slice(0, 300)}` : ""}${rateLimitNote}`); return; }
+      fail(`Claude Code 沒有回傳結果${stderr ? `：${stderr.slice(0, 200)}` : ""}${rateLimitNote}`);
     });
 
     // stdin 一定要接 error：spawn 失敗(claude 不在 PATH)時 stream 已被銷毀，
