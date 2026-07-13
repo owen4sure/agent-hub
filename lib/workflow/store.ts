@@ -137,6 +137,23 @@ function deriveRequiresSecrets(wf: Workflow): Workflow["requiresSecrets"] {
   return [...byKey.values()];
 }
 
+/**
+ * 純函式：套用流程圖失敗要回滾時，判斷「這幾毫秒內有沒有人動過剛套用的內容」。
+ * 只有 true(沒人動過)才可以安全地把 nodes/edges/triggerParams 蓋回套用前的快照——
+ * 如果磁碟上最新版已經跟剛套用的不一樣了，代表這段極短視窗內有別的請求(拖位置/PATCH edits)
+ * 真的改了東西，那才是使用者剛做的事，回滾不能悄悄蓋掉它(app/api/workflows/[id]/build/route.ts 用)。
+ */
+export function graphUntouchedSinceApply(
+  latest: Pick<Workflow, "nodes" | "edges" | "triggerParams">,
+  applied: Pick<Workflow, "nodes" | "edges" | "triggerParams">,
+): boolean {
+  return (
+    JSON.stringify(latest.nodes) === JSON.stringify(applied.nodes) &&
+    JSON.stringify(latest.edges) === JSON.stringify(applied.edges) &&
+    JSON.stringify(latest.triggerParams ?? null) === JSON.stringify(applied.triggerParams ?? null)
+  );
+}
+
 export function saveWorkflow(wf: Workflow): void {
   assertValidId(wf.id);
   ensureUserDir();

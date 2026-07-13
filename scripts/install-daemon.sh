@@ -14,8 +14,21 @@ if [ ! -x "$NEXT_BIN" ]; then
   exit 1
 fi
 
-echo "▶ 建置正式版 (npm run build)…"
 cd "$WORKDIR"
+
+# 先停掉可能已經在跑的舊常駐服務，再 build——build 會覆寫 .next，舊進程還在跑的話
+# 會出現「頁面用的 chunk 被砍掉」的 ChunkLoadError(npm run build 的 prebuild 檢查也會擋下來)。
+# 這步讓「重跑這支腳本升級已安裝的常駐服務」可以直接動，不用使用者自己手動停。
+if [ -f "$PLIST_DEST" ]; then
+  echo "▶ 偵測到已安裝的常駐服務，先停掉再重新建置…"
+  launchctl unload "$PLIST_DEST" 2>/dev/null || true
+  for _ in $(seq 1 10); do
+    lsof -i :3000 -sTCP:LISTEN >/dev/null 2>&1 || break
+    sleep 0.5
+  done
+fi
+
+echo "▶ 建置正式版 (npm run build)…"
 npm run build
 
 echo "▶ 確認 Playwright 瀏覽器已安裝(第一次跑會下載，之後很快)…"

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { ParamField, WorkflowNode } from "./types";
 
 /**
@@ -50,11 +51,25 @@ export function fileSampleKind(nodes: WorkflowNode[]): "csv" | "txt" | "no" {
   return "csv";
 }
 
-/** 產生一個安全的模擬檔(放在 data/outputs 下,跟其他產出走同一套清理),回傳路徑 */
+/** 純函式：模擬檔是不是超過 24 小時該被清掉了(給單元測試用，避免真的建臨時檔案測時間) */
+export function isStaleSampleFile(mtimeMs: number, now: number): boolean {
+  return mtimeMs < now - 24 * 60 * 60 * 1000;
+}
+
+/** 產生一個安全的模擬檔。獨立放在 data/tmp，避免開機清理孤兒產出時把正在跑的樣本刪掉。 */
 export function writeSampleFile(kind: "csv" | "txt"): { filePath: string; fileName: string } {
-  const dir = path.join(process.cwd(), "data", "outputs", "autorun-samples");
+  const dir = path.join(process.cwd(), "data", "tmp", "autorun-samples");
   fs.mkdirSync(dir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  // 模擬檔不隸屬某個 run，不會走 pruneRuns；每次產生前順手清掉一天前的檔案，避免無限累積。
+  const now = Date.now();
+  for (const name of fs.readdirSync(dir)) {
+    const oldPath = path.join(dir, name);
+    try {
+      if (isStaleSampleFile(fs.statSync(oldPath).mtimeMs, now)) fs.rmSync(oldPath, { force: true });
+    } catch { /* 可能剛好被另一個進程清掉，無需當成測試失敗 */ }
+  }
+  // 同一毫秒可能有兩條 autorun 並行，檔名必須跨進程唯一，否則會互相覆寫測試輸入。
+  const stamp = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
   const fileName = kind === "csv" ? `模擬資料-${stamp}.csv` : `模擬資料-${stamp}.txt`;
   const filePath = path.join(dir, fileName);
   const content =

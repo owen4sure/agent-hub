@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getClient } from "@/lib/modelClient";
-import { getWorkflow, saveWorkflow, backupWorkflow, findWorkflowByRef } from "@/lib/workflow/store";
+import { getWorkflow, saveWorkflow, backupWorkflow, findWorkflowByRef, graphUntouchedSinceApply } from "@/lib/workflow/store";
 import { getWorkflowModel } from "@/lib/settingsStore";
 import { buildWorkflow, type ChatMessage } from "@/lib/workflow/builder";
 import { getLastFailureContext } from "@/lib/workflow/repairContext";
@@ -238,13 +238,46 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
       onFailureMissing: onFailureRef && !onFailureTarget ? onFailureRef : null,
     });
   } catch (err) {
-    // ⑤ 回滾:圖存回套用前快照、剛建的排程刪掉——寧可整包失敗,不留半套用
+    // ⑤ 回滾:以磁碟最新版為底，只還原這次套用負責的內容。
+    // 不能整包 saveWorkflow(cur)：這幾毫秒內別的請求仍可能改名/改狀態/拖位置，舊快照會把它洗掉。
+    // 圖只在「從套用到現在都沒有人再動過 nodes/edges/triggerParams」時才回滾——
+    // 這段極短視窗內若有別的請求(拖位置/PATCH edits)真的改了東西，那才是使用者剛做的事，
+    // 回滾不能悄悄蓋掉它(踩過的真實 bug：回滾把使用者在失敗這幾毫秒內做的修改吃掉)。
+    // 圖回滾、排程刪除各自獨立 try，一個失敗不能連坐擋住另一個。
+    let graphRolledBack = false;
+    let graphSkippedDueToConcurrentEdit = false;
     try {
-      saveWorkflow(cur);
-      if (createdScheduleId) deleteSchedule(createdScheduleId);
+      const latest = getWorkflow(id);
+      if (latest) {
+        const untouchedSinceApply = graphUntouchedSinceApply(latest, { nodes: body.nodes, edges: body.edges, triggerParams });
+        if (untouchedSinceApply) {
+          saveWorkflow({
+            ...latest,
+            nodes: cur.nodes,
+            edges: cur.edges,
+            triggerParams: cur.triggerParams,
+            onFailureWorkflow: cur.onFailureWorkflow,
+          });
+          graphRolledBack = true;
+        } else {
+          graphSkippedDueToConcurrentEdit = true;
+        }
+      }
     } catch { /* 回滾也失敗:備份還在,versions 面板可手動還原 */ }
+    let scheduleRolledBack = !createdScheduleId;
+    if (createdScheduleId) {
+      try {
+        deleteSchedule(createdScheduleId);
+        scheduleRolledBack = true;
+      } catch { /* 排程刪不掉,使用者需自行到「排程」頁清理 */ }
+    }
+    const note = graphRolledBack && scheduleRolledBack
+      ? "已回復成套用前的狀態(可在「版本」面板確認)"
+      : graphSkippedDueToConcurrentEdit
+      ? "流程圖沒有回滾(套用後這段時間流程被其他操作改過,為了不蓋掉那個改動所以保留現況,請自行到「版本」面板確認)"
+      : `回滾不完整,請到「版本」面板確認/手動還原${createdScheduleId && !scheduleRolledBack ? "，並到「排程」頁刪除可能多建立的排程" : ""}`;
     return NextResponse.json(
-      { error: `套用過程出錯,已回復成套用前的狀態(可在「版本」面板確認):${err instanceof Error ? err.message : String(err)}` },
+      { error: `套用過程出錯,${note}:${err instanceof Error ? err.message : String(err)}` },
       { status: 500 },
     );
   }

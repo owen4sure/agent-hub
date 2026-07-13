@@ -71,15 +71,32 @@ function notifyOnce(key: string, title: string, message: string) {
   notifyDesktop(title, message);
 }
 
+/** 純函式：同一封信裡兩個附件同名時，算出不會互相覆蓋的檔名(第二個開始加 -2/-3…) */
+export function uniqueAttachmentName(used: Set<string>, name: string): string {
+  const ext = path.extname(name);
+  const stem = path.basename(name, ext) || "attachment";
+  let candidate = name;
+  let suffix = 2;
+  while (used.has(candidate.toLowerCase())) {
+    candidate = `${stem}-${suffix++}${ext}`;
+  }
+  return candidate;
+}
+
 function saveAttachments(wfId: string, uid: number, attachments: { name: string; content: Buffer }[]): { filePath: string; fileName: string; count: number } {
   if (attachments.length === 0) return { filePath: "", fileName: "", count: 0 };
   const dir = path.join(MAIL_ATTACH_DIR, wfId, `${Date.now()}-${uid}`);
   fs.mkdirSync(dir, { recursive: true });
   let first: { filePath: string; fileName: string } | null = null;
+  const used = new Set<string>();
   for (const a of attachments) {
-    const abs = path.join(dir, a.name);
+    // dir 是這封信專屬的新目錄(uid+timestamp)，不會有別的寫入者搶先放檔案進來，
+    // 用 used 這個記憶體集合去重就夠了，不用再查一次磁碟(fs.existsSync)。
+    const name = uniqueAttachmentName(used, a.name);
+    used.add(name.toLowerCase());
+    const abs = path.join(dir, name);
     fs.writeFileSync(abs, a.content);
-    if (!first) first = { filePath: abs, fileName: a.name };
+    if (!first) first = { filePath: abs, fileName: name };
   }
   return { filePath: first!.filePath, fileName: first!.fileName, count: attachments.length };
 }

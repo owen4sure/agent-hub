@@ -71,7 +71,10 @@ export default function WorkflowPage() {
   // 建圖進度階段(理解需求→畫圖→驗證→修正):thinking 期間每秒輪詢,讓使用者知道慢在哪一步
   const [buildStage, setBuildStage] = useState<{ stage: string; seconds: number } | null>(null);
   useEffect(() => {
-    if (!thinking) { setBuildStage(null); return; }
+    if (!thinking) {
+      const clear = window.setTimeout(() => setBuildStage(null), 0);
+      return () => window.clearTimeout(clear);
+    }
     let alive = true;
     const poll = async () => {
       try {
