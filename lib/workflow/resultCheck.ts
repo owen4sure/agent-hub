@@ -263,3 +263,58 @@ ${nodeLines.join("\n")}${fileHint}
   const reason = typeof parsed.reason === "string" ? parsed.reason.slice(0, 300) : "驗收員沒有說明原因";
   return { suspicious: true, nodeId, reason };
 }
+
+/**
+ * 對答案:使用者給了「這次跑完他已知的正確答案」(例如「應該有 5 筆、金額 1200」),就把「實際各步驟輸出」
+ * 拿去跟它比對。這是整套「誠實收斂」缺的最後一塊——語意驗收員只看「合不合理」(1200 跟 5 都是合理數字),
+ * 抓不到「數字錯了」;只有拿真實答案對,才抓得出「抽錯欄/算錯法但數量級剛好也合理」這種錯。
+ * 這正是使用者一直手動在做的事(對上週的已知值),現在讓系統照做。
+ * 對不上就當失敗餵回修復迴圈(修復迴圈本來就會附上真檔案內容,AI 能照著找出抓錯哪一欄)。
+ */
+export async function verifyAgainstExpected(
+  client: OpenAI,
+  model: string,
+  workflowId: string,
+  runId: string,
+  expected: string,
+): Promise<{ matches: boolean; nodeId: string | null; reason: string }> {
+  const wf = getWorkflow(workflowId);
+  if (!wf || !expected.trim()) return { matches: true, nodeId: null, reason: "" };
+  const db = getDb();
+  const rows = db.prepare(`SELECT node_id, output_json FROM node_runs WHERE run_id = ? ORDER BY id`).all(runId) as
+    { node_id: string; output_json: string | null }[];
+  const lastByNode = new Map<string, string | null>();
+  for (const r of rows) lastByNode.set(r.node_id, r.output_json);
+  const nodeLines = wf.nodes
+    .filter((n) => n.type !== "trigger")
+    .map((n) => `- [${n.id}] ${n.label}：${compactOutput(lastByNode.get(n.id) ?? null)}`);
+
+  const prompt = `你是自動化流程的「對答案」驗收員。使用者提供了這次執行「已知正確的答案」,請判斷實際輸出是否對得上。
+
+【流程要做的事】${wf.name}
+【使用者說正確答案應該是】${expected.slice(0, 400)}
+【實際各步驟的輸出】
+${nodeLines.join("\n")}
+
+判斷:實際輸出裡對應的數值/結果,跟使用者給的正確答案「對得上」嗎?
+- 對得上(數字/結果一致,或在合理誤差內)→ verdict:"對"。
+- 對不上(數字明顯不同)→ verdict:"不對",並指出最可能算錯的節點 id 與你判斷哪裡不一致。
+只回一個 JSON:{"verdict":"對"或"不對","nodeId":"最可能算錯的節點id(對就填null)","reason":"哪個數字對不上、可能為什麼(對就填空)"}`;
+
+  let raw: string;
+  try {
+    raw = await callAIWithRetry(
+      () => client.chat.completions.create({ model, messages: [{ role: "user", content: prompt }], max_tokens: 500 }).then((r) => r.choices[0]?.message?.content ?? ""),
+      { label: "對答案驗收" },
+    );
+  } catch {
+    // 驗收員連不上不能擋——當作對得上放行(它是加分網),但這種情況少見
+    return { matches: true, nodeId: null, reason: "" };
+  }
+  const parsed = extractJsonObject(raw, (o) => typeof (o as { verdict?: unknown }).verdict === "string") as
+    | { verdict?: string; nodeId?: unknown; reason?: unknown } | null;
+  if (!parsed || parsed.verdict !== "不對") return { matches: true, nodeId: null, reason: "" };
+  const nodeId = typeof parsed.nodeId === "string" && wf.nodes.some((n) => n.id === parsed.nodeId) ? parsed.nodeId : null;
+  const reason = typeof parsed.reason === "string" ? parsed.reason.slice(0, 300) : "跟已知答案對不上";
+  return { matches: false, nodeId, reason };
+}

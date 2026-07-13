@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { callAIWithRetry } from "../aiRetry";
 import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../claudeCodeClient";
 import { getWorkflow, saveWorkflow } from "./store";
+import { dumpFileExcerpt, findFilePathInInput } from "./repairContext";
 import type { NodeContext } from "./types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -73,6 +74,18 @@ export const PARSE_RULES = `【從網頁/文字中「解析出某個值」時的
  */
 export async function generateCustomCode(ctx: NodeContext, intent: string): Promise<string> {
   const inputKeys = Object.keys(ctx.input);
+  // 【關鍵】如果這一步要處理的是一個真實檔案(下載的 Excel/CSV…),就把那個檔案的「真實欄位+樣本」讀進來
+  // 放進 prompt——不然 codegen 只看得到 intent(白話)跟一個路徑字串,只能憑空猜欄位/標題列/累積或當日,
+  // 那正是「抽錯欄、算錯法」的根源。看得到真檔案,才能像人一樣照著實際欄位寫。
+  let fileFacts = "";
+  const filePath = findFilePathInInput(ctx.input);
+  if (filePath) {
+    const dump = await dumpFileExcerpt(filePath, 7000, JSON.stringify(ctx.config ?? {})).catch(() => null);
+    if (dump) {
+      fileFacts = `\n【這一步實際要處理的檔案內容(節錄)——照這份真實欄位/欄位代號/標題列寫,不要憑空猜】\n${dump}\n` +
+        `(注意:同一個欄名可能出現多次,有「累積」欄也有「當日新增」欄,看「欄位對照」的分類選對那一欄;標題不一定在第 1 列。)\n`;
+    }
+  }
   const prompt = `你是自動化流程的程式碼產生器。請為下面這個步驟寫出 JavaScript 程式碼。
 
 【這一步要做什麼(使用者的白話描述)】
@@ -80,7 +93,7 @@ ${intent}
 
 【上游傳進來的資料欄位】${inputKeys.length ? inputKeys.join(", ") : "(無)"}
 【上游資料範例(截斷)】${JSON.stringify(ctx.input).slice(0, 1500)}
-
+${fileFacts}
 【程式碼契約】
 ${CODE_CONTRACT}
 ${PARSE_RULES}

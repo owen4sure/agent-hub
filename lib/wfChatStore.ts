@@ -192,13 +192,15 @@ export function clearChat(id: string) {
   set(id, { chat: [], pendingGraph: null, thinking: false });
 }
 
-/** 草稿「幫我測到會跑」的全自動迴圈。同樣在模組層跑，切走畫面也不中斷，回來還看得到進度/結果。 */
-export async function startAutoTest(id: string) {
+/** 草稿「幫我測到會跑」的全自動迴圈。同樣在模組層跑，切走畫面也不中斷，回來還看得到進度/結果。
+ * expected(選填)= 使用者已知的正確答案；有給的話跑綠後會拿去對，對不上就繼續修到對(見 autorun 的 answerVerified)。 */
+export async function startAutoTest(id: string, expected?: string) {
   if (get(id).autoTest?.running) return;
   set(id, { autoTest: { running: true, steps: [] } });
   try {
     const res = await fetch(`/api/workflows/${id}/autorun`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ params: {} }),
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ params: {}, expected: (expected ?? "").trim() || undefined }),
     });
     const data = await res.json();
     set(id, { autoTest: { running: false, steps: data.steps ?? [], ok: !!data.ok, needsHuman: !!data.needsHuman } });
