@@ -8,7 +8,7 @@ import { aiRepairGraph, applyNodeConfigEdits, type RepairAttempt, type NodeEdit 
 import { runWorkflowAndWait, classifyFailure, isUserCancelled, getVarWarnings } from "@/lib/workflow/engine";
 import { autorunActive, loopCancelRequested, loopAbortControllers } from "@/lib/workflow/busyLocks";
 import { recordFix } from "@/lib/workflow/learnedFixes";
-import { checkRunSemantics } from "@/lib/workflow/resultCheck";
+import { checkRunSemantics, verifyAgainstExpected } from "@/lib/workflow/resultCheck";
 import { resolveParams } from "@/lib/relativeDate";
 import { CancelledError } from "@/lib/aiRetry";
 import { getDb } from "@/lib/db";
@@ -84,10 +84,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 }
 
 async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnType<typeof getWorkflow>>, loopSignal: AbortSignal) {
-  const body = (await req.json().catch(() => ({}))) as { params?: unknown };
+  const body = (await req.json().catch(() => ({}))) as { params?: unknown; expected?: unknown };
   const rawParams = body.params && typeof body.params === "object" && !Array.isArray(body.params)
     ? (body.params as Record<string, unknown>)
     : {};
+  // 使用者(選填)給的「這次已知正確答案」——跑綠後拿去對,對不上就當失敗餵回修復迴圈(見下面 answerVerified)
+  const expected = typeof body.expected === "string" ? body.expected.trim() : "";
 
   const db = getDb();
   const model = getWorkflowModel(id, wf.defaultModel);
@@ -228,6 +230,11 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
   let semanticOk = false;
   let semanticRounds = 0;
   let lastSuspicion: string | null = null;
+  // 對答案:沒給就當「已驗證」(不擋);給了就要跑綠後對得上才算真的成功
+  let answerVerified = !expected;
+  let answerRounds = 0;
+  // 修到上限還是對不上時,記住最後一次「哪裡對不上」——收工時要老實講明,不能默默當全對(誠實收斂)
+  let lastAnswerMismatch: string | null = null;
   // learned_fixes 延後到「語意驗收也通過」才寫入——全綠但輸出是語意垃圾的修復記進學習庫會污染往後每次修復
   const pendingRecordFixes: Parameters<typeof recordFix>[0][] = [];
 
@@ -253,7 +260,7 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
     });
   if (result.status === "waiting") return waitingResponse();
 
-  while (!(cleanSuccess() && semanticOk) && totalFixes < MAX_FIXES) {
+  while (!(cleanSuccess() && semanticOk && answerVerified) && totalFixes < MAX_FIXES) {
     if (remainingMs() <= 0) {
       steps.push({ kind: "giveup", title: "自動測試花的時間太久，先停下來", detail: "已經跑了十幾分鐘還沒全部通過。可以補充線索後再測，或點紅色節點看截圖。" });
       return failResponse();
@@ -270,8 +277,32 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
     let failedNode: string | null;
     let errBeforeFix: string;
     let category: ReturnType<typeof classifyFailure>["category"];
-    if (result.status === "success" && result.varWarnings === 0) {
-      // ── 全綠且無變數警告 → 最後一道網：語意驗收 ──
+    if (result.status === "success" && result.varWarnings === 0 && !answerVerified) {
+      // ── 全綠但使用者給了「已知正確答案」→ 先對答案(比語意驗收更硬:語意只看合不合理，對答案看數字對不對) ──
+      // 這正是使用者手動在做的事(對上週已知值)。對不上就當失敗，附上真檔案內容餵回修復迴圈。
+      if (answerRounds >= MAX_SEMANTIC_FIXES) {
+        // 修幾輪都對不上——別無限期扣住，放行讓後續語意檢查/收工(最後回報會帶著對不上的疑點)
+        answerVerified = true;
+        continue;
+      }
+      const av = await verifyAgainstExpected(client, model, id, result.runId, expected);
+      if (av.matches) {
+        answerVerified = true;
+        lastAnswerMismatch = null; // 對上了就清掉疑點
+        continue; // 對上了 → 回圈換去跑語意驗收
+      }
+      answerRounds++;
+      lastAnswerMismatch = av.reason;
+      failedNode = av.nodeId ?? [...wf.nodes].reverse().find((n) => n.type !== "trigger")?.id ?? null;
+      if (!failedNode) { answerVerified = true; continue; }
+      if ((fixCountByNode[failedNode] ?? 0) >= MAX_PER_NODE) { answerVerified = true; continue; }
+      errBeforeFix =
+        `流程跑起來了，但算出來的結果跟使用者提供的正確答案對不上：${av.reason}\n` +
+        `請對照這一步實際要處理的檔案內容(附在下面)，找出是抓錯欄位還是算法錯了，改成能算出正確答案。`;
+      category = "ai-fixable";
+      steps.push({ kind: "run", title: "跑起來了，但跟你給的正確答案對不上，繼續修", detail: av.reason.slice(0, 120), runId: result.runId });
+    } else if (result.status === "success" && result.varWarnings === 0) {
+      // ── 全綠且無變數警告(且已對過答案/沒給答案) → 最後一道網：語意驗收 ──
       // 結構性檢查全過不代表「做對了事」：解析節點抓到錯的數字、找信節點回空清單，整條照樣綠。
       // 用一次獨立的 AI 呼叫對照「圖上的意圖 vs 各節點實際輸出」；可疑就當失敗餵回修復迴圈。
       if (semanticRounds >= MAX_SEMANTIC_FIXES) {
@@ -471,6 +502,16 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
     if (!semanticOk && !lastSuspicion) {
       const finalVerdict = await checkRunSemantics(client, model, id, result.runId);
       if (finalVerdict.suspicious) lastSuspicion = finalVerdict.reason;
+    }
+    if (lastAnswerMismatch) {
+      // 使用者給了已知答案、也修了幾輪，但算出來還是跟它對不上——流程能跑但結果很可能是錯的，
+      // 絕不能默默蓋章成功(這正是使用者最痛的「表面成功實際做錯」)。講明對不上，讓他接手。
+      steps.push({
+        kind: "done",
+        title: "流程能跑，但算出來的結果跟你給的正確答案還是對不上",
+        detail: `對答案檢查：${lastAnswerMismatch.slice(0, 200)}。修了幾輪仍對不上，建議點那個節點用白話補充「應該怎麼抓/怎麼算」再讓 AI 修，或親自核對一下資料。`,
+      });
+      return NextResponse.json({ ok: true, steps, runId: result.runId, answerMismatch: lastAnswerMismatch });
     }
     if (lastSuspicion) {
       // 全綠、但語意驗收修了幾輪還是覺得可疑——流程能跑就交還給使用者，但把疑點講明白，

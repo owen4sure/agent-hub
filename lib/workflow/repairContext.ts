@@ -60,8 +60,29 @@ export async function getFileDumpForNode(runId: string, nodeId: string, maxChars
   return null;
 }
 
-/** 對「指定的一個表格檔」產生內容節錄。sheetHint(通常是節點 config 的 JSON 字串)裡點名的分頁優先。 */
-export async function dumpFileExcerpt(p: string, maxChars = 3500, sheetHint = ""): Promise<string | null> {
+/** Excel 欄位代號:1→A、26→Z、27→AA、55→BC(讓 AI 能用固定欄位代號精準指到某一欄,不靠數位置) */
+function colLetter(n: number): string {
+  let s = "";
+  while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+/** 儲存格值 → 純文字(處理富文字/公式結果/超連結物件) */
+function cellText(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "object") {
+    const o = v as { richText?: { text: string }[]; result?: unknown; text?: unknown };
+    return o.richText ? o.richText.map((t) => t.text).join("") : o.result !== undefined ? String(o.result) : o.text !== undefined ? String(o.text) : String(v);
+  }
+  return String(v);
+}
+
+/**
+ * 對「指定的一個表格檔」產生內容節錄,給「寫/修抽取程式碼的 AI」照著真實欄位寫,不要憑空猜。
+ * 關鍵:①欄位放寬到 150 欄(真報表關鍵欄常在很後面,只讀前 14 欄等於沒看到——踩過的根因);
+ *       ②加「欄位對照」(欄位代號→標題/分類),同一個欄名重複出現時能靠分類分出「累積」還是「當日新增」。
+ * sheetHint(通常是節點 config 的 JSON 字串)裡點名的分頁優先。
+ */
+export async function dumpFileExcerpt(p: string, maxChars = 7000, sheetHint = ""): Promise<string | null> {
   if (!fs.existsSync(p)) return null;
   try {
     if (p.toLowerCase().endsWith(".csv")) {
@@ -79,22 +100,26 @@ export async function dumpFileExcerpt(p: string, maxChars = 3500, sheetHint = ""
       return aHit - bHit;
     });
     for (const ws of sheets) {
-      lines.push(`【分頁「${ws.name}」，共 ${ws.rowCount} 列】`);
-      const maxRow = Math.min(ws.rowCount, 30);
-      for (let r = 1; r <= maxRow; r++) {
-        const cells: string[] = [];
-        const rowObj = ws.getRow(r);
-        for (let c = 1; c <= Math.min(ws.columnCount || 12, 14); c++) {
-          const v = rowObj.getCell(c).value;
-          let s = "";
-          if (v !== null && v !== undefined) {
-            if (typeof v === "object") {
-              const o = v as { richText?: { text: string }[]; result?: unknown; text?: unknown };
-              s = o.richText ? o.richText.map((t) => t.text).join("") : o.result !== undefined ? String(o.result) : o.text !== undefined ? String(o.text) : String(v);
-            } else s = String(v);
-          }
-          cells.push(s.trim().slice(0, 16));
+      const cols = Math.min(ws.columnCount || 12, 150);
+      lines.push(`【分頁「${ws.name}」，共 ${ws.rowCount} 列 x ${ws.columnCount} 欄】`);
+      // 欄位對照:每欄取前幾列的文字型標題/分類(純數字/日期是資料不算標題)。同名欄靠分類區分累積 vs 當日。
+      const depth = Math.min(4, ws.rowCount);
+      const mapEntries: string[] = [];
+      for (let c = 1; c <= cols; c++) {
+        const labels: string[] = [];
+        for (let r = 1; r <= depth; r++) {
+          const t = cellText(ws.getRow(r).getCell(c).value).trim();
+          if (t && !/^[\d.,\-/:\s]+$/.test(t) && !labels.includes(t)) labels.push(t);
         }
+        if (labels.length) mapEntries.push(`${colLetter(c)}=${labels.join("/")}`);
+      }
+      if (mapEntries.length) lines.push(`欄位對照(欄位代號→標題;同名欄看分類分「累積」還是「當日新增」):${mapEntries.join(" | ")}`);
+      // 幾列資料樣本(放寬到 cols 欄,才看得出當日的小數字 vs 累積的大數字)
+      const maxRow = Math.min(ws.rowCount, 12);
+      for (let r = 1; r <= maxRow; r++) {
+        const rowObj = ws.getRow(r);
+        const cells: string[] = [];
+        for (let c = 1; c <= cols; c++) cells.push(cellText(rowObj.getCell(c).value).trim().slice(0, 16));
         const line = cells.join("|").replace(/\|+$/, "");
         if (line) lines.push(`第${r}列|${line}`);
         if (lines.join("\n").length > maxChars) break;
@@ -102,8 +127,18 @@ export async function dumpFileExcerpt(p: string, maxChars = 3500, sheetHint = ""
       if (lines.join("\n").length > maxChars) break;
     }
     const dump = lines.join("\n").slice(0, maxChars);
-    if (dump) return `檔案「${path.basename(p)}」的內容節錄(每列=第N列|各欄依序)：\n${dump}`;
+    if (dump) return `檔案「${path.basename(p)}」的內容節錄(每欄都標了欄位代號 A、B、C…;每列=第N列|各欄依序)：\n${dump}`;
   } catch { /* 檔案壞了/不是真的表格檔 */ }
+  return null;
+}
+
+/** 從 ctx.input 找出「像檔案路徑」的值(下載附件/監聽檔案),回第一個真的存在的表格/文件檔路徑 */
+export function findFilePathInInput(input: Record<string, unknown>): string | null {
+  const prefer = ["attachmentPath", "filePath", "savedPath", "path"];
+  const vals = [...prefer.map((k) => input[k]), ...Object.values(input)];
+  for (const v of vals) {
+    if (typeof v === "string" && /\.(xlsx|xlsm|xls|csv)$/i.test(v) && fs.existsSync(v)) return v;
+  }
   return null;
 }
 

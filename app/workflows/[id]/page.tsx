@@ -57,6 +57,8 @@ export default function WorkflowPage() {
   const [cancelling, setCancelling] = useState(false);
   const [stoppingAutoTest, setStoppingAutoTest] = useState(false);
   const [autoTestMinimized, setAutoTestMinimized] = useState(false);
+  // 使用者(選填)貼上「這次已知的正確答案」——測到會跑後拿去對，對不上就繼續修到對
+  const [expectedAnswer, setExpectedAnswer] = useState("");
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   // 「＋ 加步驟」抽屜(手動加節點)與「連線上插一步」共用(要宣告在畫布 edges 映射之前,onInsert 會用到)
   const [drawer, setDrawer] = useState<null | { mode: "add" } | { mode: "insert"; from: string; to: string; fromPort?: string }>(null);
@@ -824,7 +826,8 @@ export default function WorkflowPage() {
   function runAutoTest() {
     if (autoTest?.running) { setAutoTestMinimized(false); return; } // 已在跑就是把縮小的視窗叫回來
     setAutoTestMinimized(false);
-    startAutoTest(id).then(() => { load(); loadRuns(); });
+    // expectedAnswer 有填才會啟動「對答案」——沒填就是原本的一鍵測到會跑
+    startAutoTest(id, expectedAnswer).then(() => { load(); loadRuns(); });
   }
 
   // 自動測試/修復進行中按「⏹ 停止」：迴圈整包在一個 request 裡跑到底，沒有 runId 可個別 cancel，
@@ -1243,7 +1246,7 @@ export default function WorkflowPage() {
               )}
             </div>
             {!autoTest.running && (
-              <div className="border-t p-4 shrink-0">
+              <div className="border-t p-4 shrink-0 space-y-3">
                 {autoTest.ok ? (
                   <div className="flex items-center gap-2">
                     <span className="text-sm" style={{ color: "var(--green)" }}>這條流程已經測到會跑了！</span>
@@ -1257,6 +1260,22 @@ export default function WorkflowPage() {
                     <button onClick={() => closeAutoTest(id)} className="btn btn-ghost">關閉</button>
                   </div>
                 )}
+                {/* 選填:結果跟你手上已知的正確答案對不上?貼進來,它會拿去對、對不上就繼續修到一樣(這就是「你自己會做的對答案」) */}
+                <div className="rounded-lg border p-2.5" style={{ borderColor: "var(--border)", background: "var(--surface-2, transparent)" }}>
+                  <label className="text-xs muted block mb-1.5">結果不對？告訴它這次「正確答案」應該是什麼，它會實際去對、對不上就繼續修（選填）</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      value={expectedAnswer}
+                      onChange={(e) => setExpectedAnswer(e.target.value)}
+                      placeholder="例如：這次應該算出 5 筆、金額 1200 這種你已知的數字/結果"
+                      className="input flex-1 text-sm"
+                      onKeyDown={(e) => { if (e.key === "Enter" && expectedAnswer.trim()) runAutoTest(); }}
+                    />
+                    <button onClick={runAutoTest} disabled={!expectedAnswer.trim()} className="btn shrink-0" style={{ background: "var(--accent)", color: "#fff" }} title="拿這個答案去對，對不上就繼續修到一樣">
+                      對答案再修
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </div>
