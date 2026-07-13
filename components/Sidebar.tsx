@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import HelpGuide from "./HelpGuide";
 
 const NAV = [
@@ -16,11 +16,16 @@ const NAV = [
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    if (typeof window === "undefined") return "dark";
-    return (localStorage.getItem("theme") as "light" | "dark" | null)
-      ?? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  });
+  // SSR 一律渲染 "dark"，首次 client render 也是 "dark"，兩邊一致 → 不會有 hydration mismatch(React #418)。
+  // 真實主題由 layout 的 pre-hydration inline script 先寫進 data-theme(顏色第一幀就正確)，
+  // 這裡只在掛載後把「按鈕的圖示/文字」校正成真實主題,不再從 localStorage 初始化 state。
+  const [theme, setTheme] = useState<"light" | "dark">("dark");
+  useEffect(() => {
+    const current = document.documentElement.getAttribute("data-theme");
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (current === "light" || current === "dark") setTheme(current);
+    else setTheme(window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  }, []);
 
   function toggleTheme() {
     const next = theme === "dark" ? "light" : "dark";

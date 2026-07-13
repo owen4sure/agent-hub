@@ -29,11 +29,36 @@ const STATUS_FILTERS: { key: string; label: string }[] = [
   { key: "active", label: "進行中" },
 ];
 
+/** 狀態 → 左側細條顏色(一眼掃出成功/失敗/等待) */
+function railColor(status: string): string {
+  return status === "failed" ? "var(--red)"
+    : status === "success" ? "var(--green)"
+    : status === "waiting" ? "var(--amber)"
+    : status === "running" || status === "queued" ? "var(--accent)"
+    : "var(--text-faint)";
+}
+
+/** 相對時間(剛剛 / N 分鐘前 / N 小時前),超過一天就交給 formatDate 顯示日期 */
+function timeAgo(iso: string, now: number): string {
+  const t = Date.parse(iso.includes("Z") || iso.includes("+") ? iso : iso.replace(" ", "T") + "Z");
+  if (Number.isNaN(t)) return "";
+  const diff = now - t;
+  if (diff < 0) return "剛剛";
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "剛剛";
+  if (min < 60) return `${min} 分鐘前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小時前`;
+  return "";
+}
+
 export default function RunsPage() {
   const [runs, setRuns] = useState<GlobalRun[] | null>(null);
   const [error, setError] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
   const [search, setSearch] = useState("");
+  // 相對時間的基準時間戳,只在 effect(fetch tick)裡更新——不在 render 中呼叫 Date.now()(react 純度規則)
+  const [now, setNow] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -42,7 +67,7 @@ export default function RunsPage() {
         const res = await fetch("/api/runs");
         if (!res.ok) throw new Error();
         const data = await res.json();
-        if (alive) { setRuns(data.runs ?? []); setError(false); }
+        if (alive) { setRuns(data.runs ?? []); setNow(Date.now()); setError(false); }
       } catch {
         if (alive) setError(true);
       }
@@ -82,24 +107,38 @@ export default function RunsPage() {
         <EmptyState icon="☰" title="沒有符合條件的執行紀錄" hint="流程執行過後,每一筆都會出現在這裡(每條流程保留最近 20 筆)。" />
       )}
 
-      <div className="space-y-2">
-        {visible.map((r) => (
-          <Link key={r.id} href={`/workflows/${r.workflow_id}`} className="card card-hover p-3.5 flex items-center gap-3 block">
-            <StatusDot status={r.status} />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2 text-sm">
-                <span className="font-medium truncate">{r.workflow_name}</span>
-                <span className="badge badge-neutral shrink-0">{TRIGGER_LABEL[r.trigger_type] ?? r.trigger_type}</span>
-                <span className="shrink-0 text-xs" style={{ color: r.status === "failed" ? "var(--red)" : r.status === "success" ? "var(--green)" : "var(--amber)" }}>
-                  {statusLabel(r.status)}
+      {/* 連成一張表的活動流:細分隔線 + 左側狀態色條,比一格一格浮卡更好掃、更耐看 */}
+      {visible.length > 0 && (
+        <div className="card overflow-hidden rise-in">
+          {visible.map((r, i) => {
+            const rel = timeAgo(r.started_at, now);
+            return (
+              <Link
+                key={r.id}
+                href={`/workflows/${r.workflow_id}`}
+                className="flex items-center gap-3 pl-4 pr-4 py-3 relative transition-colors hover:bg-[var(--surface-2)]"
+                style={{ borderTop: i === 0 ? "none" : "1px solid var(--border)" }}
+              >
+                <span className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-full" style={{ background: railColor(r.status) }} />
+                <StatusDot status={r.status} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="font-medium truncate">{r.workflow_name}</span>
+                    <span className="badge badge-neutral shrink-0">{TRIGGER_LABEL[r.trigger_type] ?? r.trigger_type}</span>
+                    <span className="shrink-0 text-xs font-medium" style={{ color: railColor(r.status) }}>
+                      {statusLabel(r.status)}
+                    </span>
+                  </div>
+                  {r.reason && <p className="text-xs muted mt-0.5 truncate">{r.reason}</p>}
+                </div>
+                <span className="text-xs faint shrink-0 text-right tabular-nums" title={formatDate(r.started_at)}>
+                  {rel || formatDate(r.started_at)}
                 </span>
-              </div>
-              {r.reason && <p className="text-xs muted mt-0.5 truncate">{r.reason}</p>}
-            </div>
-            <span className="text-xs faint shrink-0">{formatDate(r.started_at)}</span>
-          </Link>
-        ))}
-      </div>
+              </Link>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

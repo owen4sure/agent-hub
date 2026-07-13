@@ -42,8 +42,8 @@
   --cat-ai: #9333ea;
   --cat-custom: #64748b;
 
-  --canvas-dot: rgba(70, 76, 160, 0.18);
-  --edge: rgba(70, 76, 180, 0.4);
+  --canvas-dot: rgba(70, 76, 160, 0.2);
+  --edge: rgba(70, 76, 180, 0.55);
   --edge-label: #4a4f70;
   --edge-label-bg: rgba(255, 255, 255, 0.92);
 
@@ -60,10 +60,11 @@
   --canvas-vignette: rgba(60, 64, 120, 0.06);
   --bar-bg: rgba(252, 252, 255, 0.66);
   --menu-bg: rgba(255, 255, 255, 0.94);
-  --node-bg: linear-gradient(160deg, rgba(255, 255, 255, 0.92), rgba(248, 249, 255, 0.86));
-  --node-border-grad: linear-gradient(135deg, rgba(94, 99, 232, 0.5), rgba(45, 170, 255, 0.28) 45%, rgba(94, 99, 232, 0.1));
-  --node-shadow: 0 14px 36px rgba(40, 44, 100, 0.12), 0 2px 8px rgba(40, 44, 100, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.9);
-  --node-shadow-hover: 0 22px 48px rgba(40, 44, 100, 0.18), 0 4px 12px rgba(40, 44, 100, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --node-bg: linear-gradient(160deg, rgba(255, 255, 255, 0.97), rgba(246, 247, 255, 0.93));
+  /* 淺色畫布上節點原本太淡糊在底色裡——描邊更實、投影更沉,節點才「立」得起來 */
+  --node-border-grad: linear-gradient(135deg, rgba(94, 99, 232, 0.62), rgba(45, 170, 255, 0.4) 45%, rgba(94, 99, 232, 0.22));
+  --node-shadow: 0 16px 40px rgba(40, 44, 100, 0.16), 0 3px 10px rgba(40, 44, 100, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+  --node-shadow-hover: 0 24px 52px rgba(40, 44, 100, 0.22), 0 5px 14px rgba(40, 44, 100, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.95);
   --glow-accent: 0 4px 20px rgba(94, 99, 232, 0.35);
   --glow-accent-lg: 0 6px 28px rgba(94, 99, 232, 0.45), 0 0 42px -10px rgba(94, 99, 232, 0.4);
   --handle-bg: radial-gradient(circle at 35% 35%, #b9beff, #6a70ee);
@@ -232,6 +233,12 @@ h1, h2, h3 { letter-spacing: -0.018em; }
 }
 .card-hover { transition: background-color 0.18s var(--ease), border-color 0.18s var(--ease), box-shadow 0.18s var(--ease), transform 0.18s var(--ease); }
 .card-hover:hover { border-color: var(--border-strong); box-shadow: var(--shadow-md); background: var(--surface-hover); transform: translateY(-1px); }
+/* 流程卡片:hover 時多一圈柔和的 accent 光暈,像被輕輕托起來——比單純變邊框色更有質感 */
+.card-glow:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border-strong));
+  box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent), 0 10px 32px -12px color-mix(in srgb, var(--accent) 55%, transparent);
+  transform: translateY(-2px);
+}
 
 .btn {
   display: inline-flex;
@@ -258,6 +265,9 @@ h1, h2, h3 { letter-spacing: -0.018em; }
 .btn-ghost:hover { background: var(--surface-2); }
 .btn:focus-visible { outline: none; box-shadow: var(--focus); }
 .btn:disabled { opacity: 0.45; cursor: default; transform: none; }
+/* 按壓觸感:按下去微微縮一下,滑鼠放開回彈——高級 app 每次點擊都有這個實體回饋 */
+.btn:active:not(:disabled) { transform: scale(0.97); transition-duration: 0.06s; }
+.btn-primary:active:not(:disabled) { transform: scale(0.97); box-shadow: var(--glow-accent), inset 0 1px 0 rgba(255, 255, 255, 0.32); }
 
 .input {
   width: 100%;
@@ -488,8 +498,16 @@ aside {
 }
 .wf-statusbar { animation: wf-statusbar-in 0.22s ease-out; }
 
-/* 動效尊重系統設定 */
+/* ── 內容進場:載入後輕輕浮現(不是硬邦邦地跳出來)。列表/卡片用 inline animation-delay 做 stagger ── */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(9px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.rise-in { animation: rise-in 0.42s var(--ease) both; }
+
+/* 動效尊重系統設定:關掉動畫時,rise-in 一定要停在「可見」狀態,不能卡在 opacity:0(both 的初始幀) */
 @media (prefers-reduced-motion: reduce) {
   .wf-running-dash { animation: none; }
-  .card-hover, .btn, .wf-node { transition: none; }
+  .card-hover, .card-glow, .btn, .wf-node { transition: none; }
+  .rise-in { animation: none; opacity: 1; transform: none; }
 }

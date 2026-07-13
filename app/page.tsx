@@ -226,7 +226,7 @@ export default function HomePage() {
       {createError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>建立失敗，請確認伺服器是否正常後再試一次。</div>}
 
       {overview && (
-        <div className="flex flex-wrap gap-3 mb-6">
+        <div className="flex flex-wrap gap-3 mb-6 rise-in">
           <StatCard label="正式流程" value={overview.officialCount} icon="◈" tone="accent" />
           <StatCard label="草稿" value={overview.draftCount} icon="✎" />
           <StatCard label="今日成功" value={overview.todayCounts.success ?? 0} tone="green" icon="✓" />
@@ -362,8 +362,8 @@ export default function HomePage() {
           )}
           {!collapsed && (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {items.map((w) => (
-          <article key={w.id} className="card card-hover p-5 relative">
+            {items.map((w, i) => (
+          <article key={w.id} className="card card-hover card-glow p-5 relative rise-in" style={{ animationDelay: `${Math.min(i, 8) * 45}ms` }}>
             <Link href={`/workflows/${w.id}`} className="absolute inset-0 rounded-[var(--radius-md)] z-0" aria-label={`開啟流程：${w.name}`} />
             <div className="flex items-start gap-3 mb-2 relative z-[1] pointer-events-none">
               <span
@@ -429,7 +429,7 @@ export default function HomePage() {
                 </div>
               </div>
             )}
-            <p className="text-sm muted line-clamp-2 min-h-[2.5rem] relative z-[1] pointer-events-none">{w.description || <span className="faint">（還沒有說明——點進去跟 AI 對話時會自動補上）</span>}</p>
+            <p className="text-sm muted line-clamp-2 min-h-[2.5rem] relative z-[1] pointer-events-none">{w.description || <span className="faint italic">點進去跟 AI 對話，說明會自動補上 ✨</span>}</p>
             <div className="flex items-center gap-2 mt-4 pt-3 border-t text-xs relative z-[1] pointer-events-none">
               {w.lastRun ? (
                 <span className="flex items-center gap-1.5" style={{ color: w.lastRun.status === "failed" ? "var(--red)" : w.lastRun.status === "success" ? "var(--green)" : "var(--text-faint)" }}>
