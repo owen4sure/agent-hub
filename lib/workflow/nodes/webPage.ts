@@ -2,6 +2,7 @@ import type { NodeDefinition } from "../types";
 import { PermanentError, RetryableError } from "../types";
 import { cfgStr } from "../nodeHelpers";
 import { isPrivateHost, privateUrlsAllowed } from "../../urlGuard";
+import { renderPageText } from "../../renderPage";
 
 const MAX_BYTES = 3 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
@@ -29,7 +30,7 @@ export const webPageNode: NodeDefinition = {
   type: "web-page",
   category: "integration",
   label: "抓網頁",
-  description: "抓取一個公開網頁，輸出網頁的可讀文字(自動去除 HTML 標籤)與標題，給下游 AI 判斷/解析用。抓 JSON API 請改用 http-request；要登入才看得到的頁面請用瀏覽器類節點。",
+  description: "抓取一個公開網頁，輸出網頁的可讀文字(自動去除 HTML 標籤)與標題，給下游 AI 判斷/解析用。純 JS 渲染的頁面會自動改用內建瀏覽器補抓,不用你煩惱。抓 JSON API 請改用 http-request。",
   icon: "🕸️",
   configSchema: [
     { key: "url", label: "網址(可用 {{欄位}})", type: "text" },
@@ -95,7 +96,21 @@ export const webPageNode: NodeDefinition = {
       const html = Buffer.concat(chunks).toString("utf-8");
       const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1]?.trim() ?? "";
       const text = htmlToText(html).slice(0, maxChars);
-      if (!text) throw new PermanentError("抓到的網頁沒有可讀文字(可能是純 JS 渲染的頁面)——這種頁面請改用瀏覽器類節點或 custom-code");
+      if (!text) {
+        // 純 JS 渲染的頁面用輕量 fetch 抓不到文字——自動退到內建 headless 瀏覽器真的渲染一次再抽(SSRF 防護沿用同一套)。
+        // 使用者完全不用知道「這頁要換節點」,系統自己搞定;真的連瀏覽器渲染都抽不到才誠實報錯。
+        ctx.log(`「${title || current.hostname}」看起來是 JS 渲染頁,改用內建瀏覽器補抓…`);
+        try {
+          const rendered = await renderPageText(current.href, { maxChars, signal: ctx.cancelSignal });
+          if (rendered.text) {
+            ctx.log(`瀏覽器補抓到「${rendered.title || title || current.hostname}」：${rendered.text.length} 字`);
+            return { output: { pageText: rendered.text, pageTitle: rendered.title || title, pageHtml: rendered.html || html.slice(0, 60_000), finalUrl: rendered.finalUrl || current.href } };
+          }
+        } catch (err) {
+          throw new RetryableError(`用瀏覽器補抓這個網頁失敗：${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
+        }
+        throw new PermanentError("這個網頁連用瀏覽器渲染都抓不到任何文字(可能整頁是圖片/影片,或內容要登入才看得到)——若是要登入的頁面,請改用瀏覽器登入類節點");
+      }
       ctx.log(`抓到「${title || current.hostname}」：${text.length} 字`);
       return { output: { pageText: text, pageTitle: title, pageHtml: html.slice(0, 60_000), finalUrl: current.href } };
     }

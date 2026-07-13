@@ -159,7 +159,35 @@ export function docxToText(buffer: Buffer): string {
 }
 
 const MAX_ROWS_PER_SHEET = 60;
-const MAX_COLS_PER_SHEET = 40;
+// 真實報表常有上百欄,而「關鍵欄位」(例如當日新增、某分類段的指標)往往落在很後面的欄——
+// 砍在 40 欄的話,AI 拿到的檔案內容根本看不到那些欄,只會抓到前面的欄(常常是錯的累積欄)。
+// 放寬到 200 欄;為了不讓「又寬又長的表」抽出的文字爆掉 token,再用「總格數上限」動態壓低顯示列數
+// (欄一定要夠寬讓 AI 看到全部欄位名+判斷每欄是當日還是累積;列夠幾筆看出型態就好,不用全部)。
+const MAX_COLS_PER_SHEET = 200;
+// AI 真正需要的是「欄位對照(結構)」——資料列只要幾筆看得出型態(當日的小數字 vs 累積的大數字)就夠。
+// 塞太多原始資料列會讓建圖 prompt 爆大(141 欄 x 幾百列 x 7 分頁 = 幾百 KB),免費 gateway 直接 504、
+// 備援又慢,建一次圖拖好幾分鐘。所以:欄位對照完整留,資料列壓少,總量控制在能快速送進模型的範圍。
+const MAX_CELLS_PER_SHEET = 1200;
+const MAX_TOTAL_CHARS = 45_000;
+/** 依實際欄數動態算「要顯示幾列」:欄愈多、列愈少(結構靠欄位對照,資料列只要幾筆看出型態),至少留 6 列 */
+function rowLimitForWidth(rowCount: number, colLimit: number): number {
+  const byCells = Math.max(6, Math.floor(MAX_CELLS_PER_SHEET / Math.max(1, colLimit)));
+  return Math.min(rowCount, MAX_ROWS_PER_SHEET, byCells);
+}
+/** 把各分頁的文字段落組起來,超過總上限就截斷並註明——避免抽出的文字爆 token */
+function joinSectionsWithinBudget(sections: string[]): string {
+  const out: string[] = [];
+  let used = 0;
+  for (let i = 0; i < sections.length; i++) {
+    if (used + sections[i].length > MAX_TOTAL_CHARS) {
+      out.push(`…(檔案內容較大,其餘 ${sections.length - i} 個分頁略過。若需要看某個特定分頁,請告訴我分頁名)`);
+      break;
+    }
+    out.push(sections[i]);
+    used += sections[i].length + 2;
+  }
+  return out.join("\n\n").trim();
+}
 
 /** 把一個儲存格的值轉成純文字(處理日期/公式結果/超連結/錯誤/富文字等 ExcelJS 的各種物件形態) */
 function cellToText(v: unknown): string {
@@ -252,7 +280,24 @@ function sheetStyleSummary(sheet: ExcelJS.Worksheet): string {
   return parts.length ? `【分頁「${sheet.name}」的版型格式(要做出一樣的版型時照這個重現)】\n${parts.join("\n")}` : "";
 }
 
-/** 把 Excel(.xlsx) 每個分頁轉成「分頁名 + 表格文字 + 版型格式」，讓 AI 看得懂結構、內容、也看得到顏色/框線/欄寬。 */
+/** 欄位對照:給 AI 一份「欄位代號 → 這欄的標題/分類」清單,讓它能精準指名某一欄(例如 BZ=每日新增/行銷專案),
+ *  而不是去數一整列裡第幾個 tab——當同一個欄名重複出現(累積版 vs 當日新增版)時,靠上方的分類區分是能不能讀對的關鍵。
+ *  標題不一定在第 1 列,所以取前幾列的「文字型」值合併當這一欄的說明(純數字/日期是資料,不算標題)。 */
+function columnMap(sheet: ExcelJS.Worksheet, colLimit: number): string {
+  const depth = Math.min(4, sheet.rowCount);
+  const entries: string[] = [];
+  for (let c = 1; c <= colLimit; c++) {
+    const labels: string[] = [];
+    for (let r = 1; r <= depth; r++) {
+      const t = cellToText(sheet.getRow(r).getCell(c).value).trim();
+      if (t && !/^[\d.,\-/:\s]+$/.test(t) && !labels.includes(t)) labels.push(t);
+    }
+    if (labels.length) entries.push(`${colLetter(c)}=${labels.join("/")}`);
+  }
+  return entries.length ? `【欄位對照(欄位代號→標題;同名欄看分類區分「累積」還是「當日新增」)】\n${entries.join(" | ")}` : "";
+}
+
+/** 把 Excel(.xlsx) 每個分頁轉成「分頁名 + 欄位對照 + 表格文字 + 版型格式」，讓 AI 看得懂結構、內容、也看得到顏色/框線/欄寬。 */
 export async function xlsxToText(buffer: Buffer): Promise<string> {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer as unknown as ArrayBuffer);
@@ -262,20 +307,22 @@ export async function xlsxToText(buffer: Buffer): Promise<string> {
     // columnCount 遇到「曾經在很遠的欄打過字/整欄套過格式」會暴增到上萬——一定要設上限，
     // 不然一列會塞上萬個 tab、抽出的文字爆到幾百 KB，之後送 AI 又會撞到參數/token 上限。
     const colLimit = Math.min(sheet.columnCount, MAX_COLS_PER_SHEET);
-    const lines: string[] = [`【分頁「${sheet.name}」，共 ${sheet.rowCount} 列】`];
-    const rowLimit = Math.min(sheet.rowCount, MAX_ROWS_PER_SHEET);
+    const lines: string[] = [`【分頁「${sheet.name}」，共 ${sheet.rowCount} 列 x ${sheet.columnCount} 欄】`];
+    const map = columnMap(sheet, colLimit);
+    if (map) lines.push(map);
+    const rowLimit = rowLimitForWidth(sheet.rowCount, colLimit);
     for (let r = 1; r <= rowLimit; r++) {
       const row = sheet.getRow(r);
       const cells: string[] = [];
       for (let c = 1; c <= colLimit; c++) cells.push(cellToText(row.getCell(c).value));
       if (cells.some((c) => c.trim() !== "")) lines.push(cells.join("\t"));
     }
-    if (sheet.columnCount > MAX_COLS_PER_SHEET) lines.push(`(欄數較多，只顯示前 ${MAX_COLS_PER_SHEET} 欄)`);
-    if (sheet.rowCount > MAX_ROWS_PER_SHEET) lines.push(`…(其餘 ${sheet.rowCount - MAX_ROWS_PER_SHEET} 列略，只顯示前 ${MAX_ROWS_PER_SHEET} 列)`);
+    if (sheet.columnCount > colLimit) lines.push(`(欄數較多，只顯示前 ${colLimit} 欄)`);
+    if (sheet.rowCount > rowLimit) lines.push(`…(其餘 ${sheet.rowCount - rowLimit} 列略，只顯示前 ${rowLimit} 列)`);
     const style = sheetStyleSummary(sheet);
     sections.push(lines.join("\n") + (style ? "\n\n" + style : ""));
   }
-  return sections.join("\n\n");
+  return joinSectionsWithinBudget(sections);
 }
 
 /** 把 PowerPoint(.pptx，其實是 zip，每張投影片是 ppt/slides/slideN.xml)每張的文字抽出來。 */
@@ -301,7 +348,7 @@ export function pptxToText(buffer: Buffer): string {
     const body = texts.join("\n").trim();
     if (body) sections.push(`【第 ${idx + 1} 張投影片】\n${body}`);
   });
-  return sections.join("\n\n").trim();
+  return joinSectionsWithinBudget(sections);
 }
 
 /** 舊版 Excel(.xls，二進位 BIFF 格式)用 SheetJS 讀出來，每個分頁轉成表格文字(沿用 xlsx 的列/欄上限)。 */
@@ -313,16 +360,19 @@ export function xlsToText(buffer: Buffer): string {
     const ws = wb.Sheets[name];
     // sheet_to_json 出來是每列一個陣列；統一走跟 .xlsx 一樣的「前 N 列、前 N 欄、tab 分隔」呈現
     const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, blankrows: false, defval: "" });
-    const lines: string[] = [`【分頁「${name}」，共 ${rows.length} 列】`];
-    const rowLimit = Math.min(rows.length, MAX_ROWS_PER_SHEET);
+    const widest = rows.reduce((m, r) => Math.max(m, Array.isArray(r) ? r.length : 0), 0);
+    const colLimit = Math.min(widest, MAX_COLS_PER_SHEET);
+    const lines: string[] = [`【分頁「${name}」，共 ${rows.length} 列 x ${widest} 欄】`];
+    const rowLimit = rowLimitForWidth(rows.length, colLimit);
     for (let r = 0; r < rowLimit; r++) {
-      const cells = (rows[r] ?? []).slice(0, MAX_COLS_PER_SHEET).map((c) => cellToText(c));
+      const cells = (rows[r] ?? []).slice(0, colLimit).map((c) => cellToText(c));
       if (cells.some((c) => c.trim() !== "")) lines.push(cells.join("\t"));
     }
-    if (rows.length > MAX_ROWS_PER_SHEET) lines.push(`…(其餘 ${rows.length - MAX_ROWS_PER_SHEET} 列略，只顯示前 ${MAX_ROWS_PER_SHEET} 列)`);
+    if (widest > colLimit) lines.push(`(欄數較多，只顯示前 ${colLimit} 欄)`);
+    if (rows.length > rowLimit) lines.push(`…(其餘 ${rows.length - rowLimit} 列略，只顯示前 ${rowLimit} 列)`);
     sections.push(lines.join("\n"));
   }
-  return sections.join("\n\n").trim();
+  return joinSectionsWithinBudget(sections);
 }
 
 /** 舊版 Word(.doc，二進位格式)用 word-extractor 抽出正文。 */
