@@ -13,6 +13,7 @@ import { createProposal } from "./fixProposals";
 import { withSchemaDefaults } from "./graphLint";
 import { getWorkflow, findWorkflowByRef } from "./store";
 import { getNodeDef } from "./registry";
+import { dryRunSkipKind } from "./dryRun";
 import { PermanentError, RetryableError, WaitingForHuman } from "./types";
 import type { Workflow, WorkflowNode, RunSession, NodeContext } from "./types";
 
@@ -46,6 +47,9 @@ interface QueueItem {
   headed: boolean;
   trigger: TriggerSource;
   resume?: ResumeSpec;
+  /** 只讀驗證模式:照常跑「讀檔/抽取/計算」,但「寫回試算表/發通知」那幾步一律略過(不改使用者的資料)。
+   * 使用者「叫他去看檔案、證明有沒有看懂」用的——見 dryRunSkipKind、/api/workflows/[id]/verify。 */
+  dryRun?: boolean;
 }
 
 const queue: QueueItem[] = [];
@@ -148,7 +152,7 @@ function topoOrder(wf: Workflow): WorkflowNode[] {
 export function startWorkflowRun(
   workflowId: string,
   triggerParams: Record<string, unknown> = {},
-  options: { headed?: boolean; trigger?: TriggerSource } = {},
+  options: { headed?: boolean; trigger?: TriggerSource; dryRun?: boolean } = {},
 ): string {
   const db = getDb();
   const wf = getWorkflow(workflowId);
@@ -173,7 +177,7 @@ export function startWorkflowRun(
 
   pruneRuns(workflowId);
 
-  queue.push({ runId, workflowId, triggerParams, headed, trigger });
+  queue.push({ runId, workflowId, triggerParams, headed, trigger, dryRun: options.dryRun });
   processQueue();
   return runId;
 }
@@ -405,9 +409,9 @@ const RUN_WAIT_TIMEOUT_MS = 25 * 60 * 1000;
 export function runWorkflowAndWait(
   workflowId: string,
   triggerParams: Record<string, unknown>,
-  options: { headed?: boolean; timeoutMs?: number } = {},
+  options: { headed?: boolean; timeoutMs?: number; dryRun?: boolean } = {},
 ): Promise<RunFinal> {
-  const runId = startWorkflowRun(workflowId, triggerParams, { headed: options.headed, trigger: "manual" });
+  const runId = startWorkflowRun(workflowId, triggerParams, { headed: options.headed, trigger: "manual", dryRun: options.dryRun });
   // 呼叫端(autofix 的總時間預算)可以給更短的上限，但不能超過引擎預設的天花板
   const timeoutMs = Math.min(Math.max(options.timeoutMs ?? RUN_WAIT_TIMEOUT_MS, 10_000), RUN_WAIT_TIMEOUT_MS);
   return new Promise((resolve) => {
@@ -611,6 +615,11 @@ async function executeWorkflow(item: QueueItem) {
   // trigger 參數(相對日期已在觸發時解析)當作 trigger 節點的 input 種子
   nodeOutputs.set("__trigger__", triggerParams);
 
+  // 只讀驗證:是不是有「使用者直接給的檔案」——有的話，去信箱/瀏覽器抓輸入的那幾步可以略過改用這份檔案
+  const dryRun = !!item.dryRun;
+  const hasProvidedFile = dryRun && ["filePath", "attachmentPath", "savedPath", "inputFile"]
+    .some((k) => typeof triggerParams[k] === "string" && (triggerParams[k] as string).length > 0);
+
   const order = topoOrder(wf);
   const skipped = new Set<string>();
   // 記錄每個「有分支」的節點實際選中的 activePorts，用來判斷某條 edge 是不是「死掉」的分支——
@@ -737,6 +746,24 @@ async function executeWorkflow(item: QueueItem) {
     // 也把 trigger 參數一路帶著方便引用(只補 input 還沒有的 key，上游算出的值優先)
     for (const [k, v] of Object.entries(triggerParams)) if (!(k in input)) input[k] = v;
 
+    // ── 只讀驗證:略過會寫出/發送的步驟(不改使用者資料),使用者已給檔案時也略過去抓輸入的步驟 ──
+    // 透傳 input 當這步的 output,下游還能引用上游算出的欄位(含使用者給的檔案路徑);當成功處理讓下游正常流。
+    if (dryRun) {
+      const skipKind = dryRunSkipKind(node, hasProvidedFile);
+      if (skipKind) {
+        nodeOutputs.set(node.id, { ...input });
+        db.prepare(`UPDATE node_runs SET status='skipped', input_json=?, finished_at=datetime('now') WHERE run_id=? AND node_id=?`)
+          .run(JSON.stringify(input), runId, node.id);
+        log(runId, node.id, skipKind === "write"
+          ? `[${node.label}] 🔒 只讀驗證:略過這步——不會真的寫回/發送`
+          : `[${node.label}] 🔒 只讀驗證:你已直接給檔案，略過去抓取這步、改用你給的檔案`);
+        succeededNodes.add(node.id);
+        successCount++;
+        skipDeadDownstream(node.id);
+        continue;
+      }
+    }
+
     db.prepare(`UPDATE node_runs SET status='running', input_json=?, started_at=datetime('now') WHERE run_id=? AND node_id=?`)
       .run(JSON.stringify(input), runId, node.id);
     log(runId, node.id, `[${node.label}] 開始`);
@@ -756,6 +783,7 @@ async function executeWorkflow(item: QueueItem) {
       outputDir,
       debugDir,
       session,
+      dryRun,
       cancelSignal: abortController.signal,
       log: (msg: string) => log(runId, node.id, msg),
       registerFile: (filename, filePath, mime) => {

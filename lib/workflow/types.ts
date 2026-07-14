@@ -76,6 +76,9 @@ export interface NodeContext {
   outputDir: string;
   debugDir: string;
   session: RunSession;
+  /** 只讀驗證模式:節點若會寫出/發送，看到這個是 true 就別真的做(引擎已在外層略過已知的寫出型節點，
+   * 這個旗標是給 custom-code 產碼等「自己可能會寫」的路徑當第二層保險用)。 */
+  dryRun?: boolean;
   log: (msg: string) => void;
   /** 登記一個產出檔，讓它出現在 dashboard 的檔案清單/可下載 */
   registerFile: (filename: string, filePath: string, mime: string) => void;
