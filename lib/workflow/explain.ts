@@ -1,5 +1,6 @@
 import type { Workflow, WorkflowNode } from "./types";
 import { getNodeDef } from "./registry";
+import { parseSheetUrl } from "./nodes/googleSheet";
 
 export interface ExplainStep {
   order: number;
@@ -41,6 +42,27 @@ function makeHumanizer(paramLabels: Record<string, string>) {
 function str(config: Record<string, unknown>, key: string, fallback = ""): string {
   const v = config[key];
   return v === undefined || v === null || v === "" ? fallback : String(v);
+}
+
+/**
+ * 從 custom-code 產生的程式碼裡挖出「它在讀寫哪一份 Google 試算表、哪些分頁、用到哪些設定值」——
+ * 不然自訂步驟的說明只有一句模糊的用途,使用者有好幾條 workflow 時根本分不出誰改誰、要去哪改。
+ * 純唯讀字串比對,挖不到就回空(說明照常顯示,只是少了這幾行)。
+ */
+export function extractSheetHints(code: string): { sheets: string[]; tabs: string[]; secrets: string[] } {
+  const sheets = new Set<string>();
+  const tabs = new Set<string>();
+  const secrets = new Set<string>();
+  if (!code) return { sheets: [], tabs: [], secrets: [] };
+  // 試算表:網址或 spreadsheetId
+  for (const m of code.matchAll(/spreadsheets\/d\/([\w-]{20,})/g)) sheets.add(m[1]);
+  for (const m of code.matchAll(/spreadsheet_?[iI]d\s*[:=]\s*['"]([\w-]{20,})['"]/g)) sheets.add(m[1]);
+  // 分頁:getSheetByName("...")、sheet/sheetName/tab: "..." 這些字面
+  for (const m of code.matchAll(/getSheetByName\(\s*['"]([^'"]{1,60})['"]/g)) tabs.add(m[1]);
+  for (const m of code.matchAll(/\b(?:sheet|sheetName|tab|tabName|worksheet)\s*[:=]\s*['"]([^'"]{1,60})['"]/g)) tabs.add(m[1]);
+  // 用到哪些設定值(帳密/寫入網址):ctx.secrets.X 或 secrets["X"]
+  for (const m of code.matchAll(/secrets(?:\.([A-Za-z_]\w*)|\[\s*['"]([A-Za-z_]\w*)['"]\s*\])/g)) secrets.add(m[1] || m[2]);
+  return { sheets: [...sheets], tabs: [...tabs], secrets: [...secrets] };
 }
 
 /**
@@ -240,9 +262,19 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
 
     case "custom-code": {
       const intent = str(c, "intent");
+      // 從背後的處理挖出它實際在動哪份 Google 試算表/哪些分頁,讓不同 workflow 分得出來、知道去哪改。
+      // 一律講白話:試算表用「可點的網址」呈現、分頁用「分頁名稱」,不出現任何程式術語。
+      const hints = extractSheetHints(str(c, "code"));
+      const settings: [string, string][] = intent ? [["這一步做什麼", intent]] : [];
+      if (hints.sheets.length) settings.push(["用到的 Google 試算表", hints.sheets.map((id) => `https://docs.google.com/spreadsheets/d/${id}`).join("、")]);
+      if (hints.tabs.length) settings.push(["會動到的分頁", hints.tabs.join("、")]);
+      if (!hints.sheets.length && hints.secrets.length) settings.push(["寫到哪份試算表", "看「設定」頁填的網址/資料"]);
+      const tabPhrase = hints.tabs.length ? `會更新「${hints.tabs.join("」「")}」分頁` : "";
       return {
-        text: intent ? `自訂步驟：${intent}（由 AI 產生程式碼執行，你不用看程式碼）。` : "AI 依你的需求寫的自訂步驟。",
-        settings: intent ? [["用途", intent]] : [],
+        text: intent
+          ? `這一步：${intent}${tabPhrase ? `（${tabPhrase}）` : ""}。背後由 AI 自動幫你完成，你只要看這段白話；要調整直接跟 AI 說就好。`
+          : "這一步由 AI 依你的需求自動完成，要調整直接跟 AI 說。",
+        settings,
       };
     }
 
@@ -317,17 +349,23 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
 
     case "google-sheet-read": {
       const url = hstr("sheetUrl", "（未貼網址）");
+      // 網址「不截斷」——之前截到 60 字剛好把試算表尾巴切掉,等於把「是哪一份」藏起來。
+      // 分頁在網址裡指定;用白話講「網址已指定哪一頁」,不出現 gid 這種術語。
+      const parsed = parseSheetUrl(str(c, "sheetUrl"));
+      const tabPhrase = parsed && parsed.gid !== "0" ? "(網址裡已指定要讀哪一個分頁)" : "";
       return {
-        text: `讀取這份 Google 試算表(要開「知道連結的任何人可檢視」)，第一列當欄位名，資料變成清單給後面的步驟用。`,
-        settings: [["試算表網址", url.length > 60 ? url.slice(0, 60) + "…" : url]],
+        text: `讀取這份 Google 試算表${tabPhrase}(要開「知道連結的任何人可檢視」)，第一列當欄位名，資料變成清單給後面的步驟用。`,
+        settings: [["Google 試算表網址", url]],
       };
     }
 
     case "google-sheet-append": {
       const sheet = str(c, "sheetName").trim();
+      // 寫到哪份試算表是由設定頁填的「試算表寫入網址」決定的——用白話明講,使用者才知道
+      // 「要改成寫到別份表」是去設定頁改那個網址,不是在這個步驟裡找。不出現任何技術名詞。
       return {
-        text: `在你的 Google 試算表${sheet ? `「${sheet}」分頁` : ""}最下面加一列(各欄內容照設定依序填入)。寫入網址要先在設定頁照教學部署好。`,
-        settings: sheet ? [["分頁", sheet]] : [],
+        text: `在你的 Google 試算表的${sheet ? `「${sheet}」分頁` : "第一個分頁"}最下面新增一列(各欄內容照設定依序填入)。要寫到哪一份試算表，看你在「設定」頁填的「試算表寫入網址」。`,
+        settings: [["寫到哪個分頁", sheet || "第一個分頁"], ["寫到哪一份試算表", "看「設定」頁填的「試算表寫入網址」"]],
       };
     }
 
