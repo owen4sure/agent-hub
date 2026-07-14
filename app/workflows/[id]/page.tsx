@@ -20,7 +20,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { autoLayout } from "@/lib/workflow/layout";
-import { useWFChat, sendChatToAI, stopChatToAI, startAutoTest, stopAutoTest, clearPendingGraph, closeAutoTest, clearChat, appendAssistantNote, type Part, type ChatMsg } from "@/lib/wfChatStore";
+import { useWFChat, sendChatToAI, stopChatToAI, startAutoTest, stopAutoTest, clearPendingGraph, closeAutoTest, clearChat, appendAssistantNote, verifyUnderstanding, type Part, type ChatMsg } from "@/lib/wfChatStore";
 import { MODELS, KNOWN_WORKING_MODELS, supportsVision } from "@/lib/models";
 import type { Workflow, NodeRun, RunRecord, ExplainData } from "./types";
 import { nodeTypes } from "./nodeVisuals";
@@ -65,7 +65,7 @@ export default function WorkflowPage() {
   // 每個節點的白話說明——一次抓整條流程的說明，點哪個節點就從裡面挑那一步，不用每點一個節點都重打一次 API
   const [explainData, setExplainData] = useState<ExplainData | null>(null);
   // 對話/思考中/待套用流程/自動測試 → 存在跨頁面存活的 store，切換畫面不遺失
-  const { chat, thinking, pendingGraph, autoTest, reloadToken, editToast } = useWFChat(id);
+  const { chat, thinking, pendingGraph, autoTest, reloadToken, editToast, verifying } = useWFChat(id);
   const [toast, setToast] = useState<{ text: string; token: number } | null>(null);
   const toastSeq = useRef(0);
   const flashToast = useCallback((text: string) => setToast({ text, token: ++toastSeq.current }), []);
@@ -941,6 +941,15 @@ export default function WorkflowPage() {
     if (fileRef.current) fileRef.current.value = "";
   }
 
+  // 「驗證看懂(只讀)」:選一份現在的資料檔 → 只讀模式實際讀+算給使用者看(不會寫回/發送)。
+  async function handleVerifyFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    e.target.value = ""; // 清掉，讓同一個檔案可以再選一次驗證
+    if (!f) return;
+    const b64 = await fileToBase64(f);
+    verifyUnderstanding(id, f.name, b64);
+  }
+
   // 改名的存/取消全部走這一條(onBlur)：Enter 靠 blur() 觸發它(只存一次)，Esc 先標記取消再 blur()
   async function commitOrCancelWfName() {
     setRenamingWf(false);
@@ -1452,16 +1461,24 @@ export default function WorkflowPage() {
                 rows={3}
                 className="input resize-none"
               />
-              {busyHint && (
+              {(busyHint || verifying) && (
                 <div className="flex items-center gap-2 text-xs muted">
                   <span className="inline-block w-3.5 h-3.5 rounded-full border-2 animate-spin" style={{ borderColor: "var(--border-strong)", borderTopColor: "var(--accent)" }} />
-                  {busyHint}
+                  {verifying ? "正在讀你的檔案、實際算給你看(只讀，不會寫回/發送)…" : busyHint}
                 </div>
               )}
               <div className="flex items-center gap-2">
                 <label className={`btn btn-ghost text-xs ${busyHint ? "opacity-50 pointer-events-none" : "cursor-pointer"}`}>
                   📎 加圖片/檔案
                   <input ref={fileRef} type="file" multiple onChange={handleImageUpload} className="hidden" disabled={!!busyHint} />
+                </label>
+                {/* 驗證看懂:給一份現在的資料檔,只讀模式實際算給你看,證明 AI 真的看懂了(不會改你的資料) */}
+                <label
+                  className={`btn btn-ghost text-xs ${busyHint || verifying ? "opacity-50 pointer-events-none" : "cursor-pointer"}`}
+                  title="給一份現在的資料檔,我實際讀+算給你看,證明有沒有看懂——只會讀跟算,不會寫回任何試算表、不發通知"
+                >
+                  🔍 驗證看懂
+                  <input type="file" onChange={handleVerifyFile} className="hidden" disabled={!!busyHint || verifying} />
                 </label>
                 <button onClick={sendChat} disabled={thinking || !!busyHint} className="btn btn-primary ml-auto">
                   {busyHint ? "處理中…" : "送出"}

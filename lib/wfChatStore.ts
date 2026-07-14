@@ -40,9 +40,11 @@ export interface WFChatState {
   reloadToken: number;
   // 畫布上要跳的「已更新」通知：labels=改了哪些節點，token 每次都不同(即使改同一個節點也會重新跳)
   editToast: { labels: string[]; token: number } | null;
+  // 「驗證看懂(只讀)」正在跑:讀使用者的檔案、實際算給他看(不會寫回/發送)。切走畫面也不中斷。
+  verifying: boolean;
 }
 
-const EMPTY: WFChatState = { chat: [], thinking: false, pendingGraph: null, autoTest: null, reloadToken: 0, editToast: null };
+const EMPTY: WFChatState = { chat: [], thinking: false, pendingGraph: null, autoTest: null, reloadToken: 0, editToast: null, verifying: false };
 
 const states = new Map<string, WFChatState>();
 const listeners = new Set<() => void>();
@@ -72,7 +74,7 @@ function loadPersisted(id: string): WFChatState | null {
     const raw = typeof localStorage !== "undefined" && localStorage.getItem(keyOf(id));
     if (!raw) return null;
     const p = JSON.parse(raw);
-    return { chat: p.chat ?? [], thinking: false, pendingGraph: p.pendingGraph ?? null, autoTest: null, reloadToken: 0, editToast: null };
+    return { chat: p.chat ?? [], thinking: false, pendingGraph: p.pendingGraph ?? null, autoTest: null, reloadToken: 0, editToast: null, verifying: false };
   } catch { return null; }
 }
 /**
@@ -181,6 +183,48 @@ export function stopChatToAI(id: string) {
 export function appendAssistantNote(id: string, text: string) {
   const s = get(id);
   set(id, { chat: [...s.chat, { role: "assistant", parts: [{ kind: "text", text }], isError: text.startsWith("⚠️") }] });
+}
+
+/** 「驗證看懂(只讀)」——使用者給一份現在的資料檔，叫 AI 實際讀+算給他看，證明有沒有看懂。
+ * 只讀模式跑這條流程(寫回試算表/發通知的步驟一律略過)，把各步驟算出來的值貼回對話讓使用者對。 */
+export async function verifyUnderstanding(id: string, filename: string, dataBase64: string) {
+  if (get(id).verifying) return;
+  set(id, { verifying: true });
+  appendAssistantNote(id, `🔍 好，我用你給的「${filename}」實際讀一遍、算給你看——只會讀檔跟計算，不會寫回任何試算表、也不發任何通知。稍等一下…`);
+  try {
+    const res = await fetch(`/api/workflows/${id}/verify`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename, dataBase64 }),
+    });
+    const d = await res.json();
+    set(id, { verifying: false });
+    if (!res.ok) { appendAssistantNote(id, `⚠️ 驗證時出錯了：${d.error ?? "未知錯誤"}`); return; }
+    appendAssistantNote(id, formatVerifyResult(d));
+  } catch {
+    set(id, { verifying: false });
+    appendAssistantNote(id, "⚠️ 驗證過程連線出錯了，請再試一次。");
+  }
+}
+
+function formatVerifyResult(d: {
+  ok?: boolean; status?: string; failedNode?: string | null; error?: string | null;
+  values?: { nodeLabel: string; computed: Record<string, unknown> }[]; skippedWrites?: string[];
+}): string {
+  const fmt = (v: unknown) => (Array.isArray(v) ? v.join("、") : String(v));
+  const skip = (d.skippedWrites ?? []).length
+    ? `\n\n🔒 只讀驗證：已略過「${(d.skippedWrites ?? []).join("、")}」——不會真的寫回試算表/發通知。`
+    : "";
+  if (!d.ok) {
+    return `我實際讀+算到一半卡在「${d.failedNode ?? "某一步"}」：${(d.error ?? "").slice(0, 200)}。\n` +
+      `可能是這步的設定要調、或這份檔案跟流程預期的結構不一樣。你可以點那個節點用白話補充，我再修。${skip}`;
+  }
+  const lines = (d.values ?? []).map((v) => {
+    const pairs = Object.entries(v.computed).map(([k, val]) => `${k}=${fmt(val)}`).join("、");
+    return `• ${v.nodeLabel}：${pairs || "(這步沒有可對照的數值)"}`;
+  });
+  const body = lines.length ? lines.join("\n") : "(這條流程沒有抽出可對照的數值，可能是它主要在做搬移/通知)";
+  return `我用你給的檔案實際跑到「寫回」之前，各步驟算出來是：\n${body}${skip}\n\n` +
+    `這些跟你手上已知的正確答案對得上嗎？對不上的話，直接告訴我正確答案，我就去把它修到對。`;
 }
 
 /** 清除這個 workflow 的整段對話(對話被錯誤訊息污染、或想換個講法重來時用)。
