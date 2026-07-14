@@ -1388,7 +1388,7 @@ export default function WorkflowPage() {
                 </div>
               )}
               {chat.map((m, i) => (
-                <div key={i} className={m.role === "user" ? "flex justify-end" : "flex"}>
+                <div key={i} className={`min-w-0 ${m.role === "user" ? "flex justify-end" : "flex"}`}>
                   <div
                     className="inline-block px-3 py-2 rounded-xl max-w-[85%] space-y-1.5"
                     style={
@@ -1445,9 +1445,12 @@ export default function WorkflowPage() {
               {draftParts.length > 0 && (
                 <div className="flex flex-wrap gap-1.5">
                   {draftParts.map((p, i) => (
-                    <span key={i} className="badge badge-neutral gap-1 pr-1">
-                      {p.kind === "text" ? `「${p.text.slice(0, 12)}${p.text.length > 12 ? "…" : ""}」` : p.kind === "image" ? "🖼 圖片" : `📄 ${p.name}`}
-                      <button onClick={() => setDraftParts((prev) => prev.filter((_, j) => j !== i))} className="faint hover:text-[var(--text)]">✕</button>
+                    // max-w-full + 內層 truncate:附件是長網址/長檔名時,不加會變成一個超寬的膠囊撐爆整欄(跑版)
+                    <span key={i} className="badge badge-neutral gap-1 pr-1 max-w-full" title={p.kind === "file" ? p.name : undefined}>
+                      <span className="truncate min-w-0">
+                        {p.kind === "text" ? `「${p.text.slice(0, 12)}${p.text.length > 12 ? "…" : ""}」` : p.kind === "image" ? "🖼 圖片" : `📄 ${p.name}`}
+                      </span>
+                      <button onClick={() => setDraftParts((prev) => prev.filter((_, j) => j !== i))} className="faint hover:text-[var(--text)] shrink-0">✕</button>
                     </span>
                   ))}
                   <span className="text-xs faint self-center">← AI 會照這個順序理解</span>
