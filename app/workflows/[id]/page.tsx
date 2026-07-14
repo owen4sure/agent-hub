@@ -1351,7 +1351,8 @@ export default function WorkflowPage() {
                 </button>
               )}
             </div>
-            <div className="flex-1 overflow-auto p-4 space-y-3 text-sm">
+            {/* overflow-x-hidden:最後一道防線——就算某個氣泡/膠囊還是偏寬,也絕不讓整欄橫向捲動/溢出 */}
+            <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-3 text-sm">
               {chat.length === 0 && (
                 <div className="pt-6 px-1 space-y-4">
                   <div className="text-center space-y-1.5">
@@ -1388,9 +1389,11 @@ export default function WorkflowPage() {
                 </div>
               )}
               {chat.map((m, i) => (
-                <div key={i} className={`min-w-0 ${m.role === "user" ? "flex justify-end" : "flex"}`}>
+                <div key={i} className={m.role === "user" ? "flex justify-end" : "flex"}>
                   <div
-                    className="inline-block px-3 py-2 rounded-xl max-w-[85%] space-y-1.5"
+                    // min-w-0:氣泡是 flex 子項,預設 min-width:auto 會撐到「最長那個字」(整條長網址)的寬度、
+                    // 不肯縮小 → max-w-[85%] 壓不住、往右溢出(這是「還是超出匡格」的真因,break-words 治不了)。
+                    className="inline-block min-w-0 px-3 py-2 rounded-xl max-w-[85%] space-y-1.5"
                     style={
                       m.isError
                         ? { background: "color-mix(in srgb, var(--red) 8%, var(--surface))", color: "var(--red)", border: "1px solid color-mix(in srgb, var(--red) 30%, transparent)" }
@@ -1399,8 +1402,9 @@ export default function WorkflowPage() {
                   >
                     {m.parts.map((p, j) =>
                       p.kind === "text" ? (
-                        // break-words:長網址/長字串沒有空白可斷，不加會撐爆氣泡往右溢出(跑版)
-                        <p key={j} className="whitespace-pre-wrap break-words text-sm">{p.text}</p>
+                        // overflow-wrap:anywhere(不是 break-word)——只有 anywhere 會同時「縮小 min-content
+                        // 尺寸」,長網址才真的斷得掉、氣泡才縮得下去。break-word 不影響 min-content 所以治不了。
+                        <p key={j} className="whitespace-pre-wrap [overflow-wrap:anywhere] text-sm">{p.text}</p>
                       ) : p.kind === "image" ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img key={j} src={`data:image/png;base64,${p.b64}`} alt="" className="rounded-lg max-h-32 border" />
