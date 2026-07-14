@@ -864,7 +864,10 @@ export default function WorkflowPage() {
             const res = await fetch(`/api/fetch-url`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
             const d = await res.json();
             if (res.ok) {
-              parts.push({ kind: "file", name: url, content: (d.text ?? "").slice(0, 6000) });
+              // Google 試算表/文件是直接讀到的真實內容(可能好幾個分頁、很密)——給多一點額度，
+              // 不然只留 6000 字會把後面的分頁/日期區間切掉，AI 又變成「看不到」。一般網頁維持 6000。
+              const cap = d.googleExport ? 16000 : 6000;
+              parts.push({ kind: "file", name: url, content: (d.text ?? "").slice(0, cap) });
               if (d.image) parts.push({ kind: "image", b64: d.image, name: `網頁截圖:${d.title || url}` });
             }
           } catch { /* 打不開就算了，訊息照送 */ }
@@ -1387,12 +1390,14 @@ export default function WorkflowPage() {
                   >
                     {m.parts.map((p, j) =>
                       p.kind === "text" ? (
-                        <p key={j} className="whitespace-pre-wrap text-sm">{p.text}</p>
+                        // break-words:長網址/長字串沒有空白可斷，不加會撐爆氣泡往右溢出(跑版)
+                        <p key={j} className="whitespace-pre-wrap break-words text-sm">{p.text}</p>
                       ) : p.kind === "image" ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img key={j} src={`data:image/png;base64,${p.b64}`} alt="" className="rounded-lg max-h-32 border" />
                       ) : (
-                        <p key={j} className="text-xs faint">📄 {p.name}</p>
+                        // 附上的常是長網址：break-all 讓它一定斷得掉，不跟著撐爆氣泡
+                        <p key={j} className="text-xs faint break-all">📄 {p.name}</p>
                       ),
                     )}
                   </div>

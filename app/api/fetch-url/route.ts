@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { isPrivateHost, privateUrlsAllowed } from "@/lib/urlGuard";
+import { readGoogleDoc, parseGoogleDocUrl } from "@/lib/googleExport";
 
 /**
  * 讓 dashboard 的 AI「看得到網址/網站」：用內建 chromium 打開網址 → 截整頁圖 + 抽出可見文字，
@@ -20,6 +21,14 @@ export async function POST(req: Request) {
   const guardOn = !privateUrlsAllowed();
   if (guardOn && (await isPrivateHost(new URL(url).hostname))) {
     return NextResponse.json({ error: "這個網址指向內部網路位址，基於安全考量不開放讀取(自家內網有需要可設定環境變數 AGENT_HUB_ALLOW_PRIVATE_URLS=1)" }, { status: 400 });
+  }
+
+  // Google 試算表/文件是 canvas 畫的，DOM 抓不到真正的儲存格值——一定要用官方匯出拿到真實內容，
+  // 不能只靠截圖用猜的。讀得到就直接回真值(這是「連結他還是只會截圖」的根治)；讀不到(私有/需登入)
+  // 再往下退回 chromium 截圖，並在下面的 text 裡講明「只看得到畫面」。
+  const gDoc = await readGoogleDoc(url).catch(() => null);
+  if (gDoc) {
+    return NextResponse.json({ title: gDoc.title, text: gDoc.text, googleExport: true });
   }
 
   try {
@@ -51,9 +60,14 @@ export async function POST(req: Request) {
       }).catch(() => "");
       // 整頁截圖(有上限，太長的頁面只截前面一大段)
       const shot = await page.screenshot({ type: "png", fullPage: true }).catch(() => page.screenshot({ type: "png" }));
+      // 是 Google 文件卻走到這裡 = 匯出讀不到(多半是沒開「知道連結的人可檢視」)——老實講明只看得到畫面，
+      // 讓 AI 不會假裝讀到了真值，也提示使用者把共用權限打開就能真正讀取。
+      const gNote = parseGoogleDocUrl(url)
+        ? `⚠️ 這是 Google 文件，但它沒有開放「知道連結的人可檢視」，我沒辦法讀到真正的儲存格內容，只能從下面這張截圖看到畫面(可能看不清楚)。請把共用權限改成「知道連結的人可檢視」，我就能直接讀到每一格的真實數值。\n\n`
+        : "";
       return NextResponse.json({
         title,
-        text: `【網頁「${title || url}」的內容】\n${text}`,
+        text: `${gNote}【網頁「${title || url}」的內容】\n${text}`,
         image: Buffer.from(shot).toString("base64"),
       });
     } finally {
