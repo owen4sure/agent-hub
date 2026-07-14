@@ -309,8 +309,10 @@ export function NodePanel({
                 </div>
               )}
               <div>
-                <p className="text-xs faint mb-1.5">原始設定(config)</p>
-                <pre className="text-xs rounded-lg p-3 overflow-auto max-h-44 font-mono" style={{ background: "var(--surface-2)" }}>{JSON.stringify(node.config, null, 2)}</pre>
+                <p className="text-xs faint mb-1.5">原始設定</p>
+                {/* 連除錯區也不把 AI 產生的程式碼(code)/內嵌步驟(steps)攤出來給使用者看——那是給 AI 讀的,
+                    使用者永遠只看白話。程式碼留在節點裡讓 AI 用,只是不顯示在畫面上。 */}
+                <pre className="text-xs rounded-lg p-3 overflow-auto max-h-44 font-mono" style={{ background: "var(--surface-2)" }}>{JSON.stringify(Object.fromEntries(Object.entries(node.config).filter(([k]) => k !== "code" && k !== "steps")), null, 2)}</pre>
               </div>
             </div>
           )}
