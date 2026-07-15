@@ -23,7 +23,7 @@ function isNonRetryable(err: unknown): boolean {
   const status = (err as { status?: unknown })?.status;
   if (status === 401 || status === 403) return true;
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return /invalid api key|incorrect api key|unauthorized|\b401\b|invalid_api_key|model_not_found|does not exist|insufficient_quota|exceeded your current quota|billing/i.test(msg);
+  return /invalid api key|incorrect api key|unauthorized|\b401\b|invalid_api_key|model_not_found|does not exist|insufficient_quota|exceeded your current quota|session limit|rate.?limit|usage limit|\b429\b|billing/i.test(msg);
 }
 
 /**
@@ -96,25 +96,42 @@ export function __resetGatewayHealthForTest(): void {
 
 /** 使用者按了「⏹ 停止」——跟一般失敗不同，不重試、不切備援，直接讓整條呼叫鏈中止。 */
 export class CancelledError extends Error {
-  constructor() { super("使用者已停止執行"); }
+  constructor(message = "使用者已停止執行") {
+    super(message);
+    this.name = "CancelledError";
+  }
 }
 
 /** 重試之間的等待也要能被喊停打斷，不然按了停止還要等完剩下的退避秒數才真的停。 */
 function sleepCancellable(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new CancelledError());
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => { clearTimeout(t); reject(new CancelledError()); }, { once: true });
+    const onAbort = () => { clearTimeout(t); reject(new CancelledError()); };
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function cancellationFrom(signal?: AbortSignal): CancelledError | null {
+  if (!signal?.aborted) return null;
+  const reason = signal.reason;
+  const message = reason instanceof Error ? reason.message : typeof reason === "string" ? reason : "使用者已停止執行";
+  return new CancelledError(message || "使用者已停止執行");
 }
 
 export async function callAIWithRetry<T>(
   fn: () => Promise<T>,
-  opts: { label: string; onRetry?: (attempt: number, err: unknown) => void; fallback?: () => Promise<T>; signal?: AbortSignal } = { label: "AI" },
+  opts: { label: string; onRetry?: (attempt: number, err: unknown) => void; onFallback?: (err: unknown) => void; fallback?: () => Promise<T>; fallbackLabel?: string; signal?: AbortSignal; maxAttempts?: number } = { label: "AI" },
 ): Promise<T> {
   const call = async (f: () => Promise<T>): Promise<T> => {
-    if (opts.signal?.aborted) throw new CancelledError();
+    const cancelled = cancellationFrom(opts.signal);
+    if (cancelled) throw cancelled;
     const result = await f();
+    const cancelledAfter = cancellationFrom(opts.signal);
+    if (cancelledAfter) throw cancelledAfter;
     if (typeof result === "string" && result.trim() === "") throw new EmptyResponseError();
     return result;
   };
@@ -123,8 +140,11 @@ export async function callAIWithRetry<T>(
   // 劣化的 gateway 每個呼叫都白等 2×90 秒才輪到備援，一條迴圈十幾個呼叫等於整條不能用。
   if (opts.fallback && isGatewayDegraded()) {
     try {
+      opts.onFallback?.(new Error("主力模型服務目前處於暫時劣化狀態"));
       return await call(opts.fallback);
     } catch (fbErr) {
+      const cancelled = cancellationFrom(opts.signal);
+      if (cancelled) throw cancelled;
       if (fbErr instanceof CancelledError) throw fbErr;
       // 備援也失敗就照舊走主力重試鏈(下面)，不能因為開了斷路器反而少了一條路
     }
@@ -132,17 +152,22 @@ export async function callAIWithRetry<T>(
 
   let lastErr: unknown;
   let degradedInThisCall = 0;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  const maxAttempts = Math.max(1, Math.min(MAX_ATTEMPTS, opts.maxAttempts ?? MAX_ATTEMPTS));
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const result = await call(fn);
       noteAttempt(true);
       return result;
     } catch (err) {
+      // 有些底層函式(尤其 child_process)中止時會丟一般 Error，而不是 CancelledError。
+      // signal 才是唯一可信來源：只要已中止，就不准把這次停止誤當暫時性失敗再生一個新子程序。
+      const cancelled = cancellationFrom(opts.signal);
+      if (cancelled) throw cancelled;
       if (err instanceof CancelledError) throw err; // 使用者主動停止——不重試、不切備援，直接往外拋
       lastErr = err;
       noteAttempt(false, err);
       if (isDegradedSignature(err)) degradedInThisCall++;
-      if (attempt === MAX_ATTEMPTS || isNonRetryable(err)) break; // 該放棄主力了，往下看有沒有備援可以頂上
+      if (attempt === maxAttempts || isNonRetryable(err)) break; // 該放棄主力了，往下看有沒有備援可以頂上
       // 504/請求太大這類「重打也一樣」的錯：有備援就直接切過去，別把使用者晾著重試同一包注定失敗的請求
       if (opts.fallback && shouldSkipToFallback(err)) break;
       // 連續 2 次 timeout/空回應=網關劣化特徵：有備援就別再耗完整條重試鏈(每次都是白等一個 timeout)
@@ -155,12 +180,15 @@ export async function callAIWithRetry<T>(
   // 備援只在它徹底失敗時才出手，不是預設就走備援。
   if (opts.fallback) {
     try {
+      opts.onFallback?.(lastErr);
       return await call(opts.fallback);
     } catch (fallbackErr) {
+      const cancelled = cancellationFrom(opts.signal);
+      if (cancelled) throw cancelled;
       if (fallbackErr instanceof CancelledError) throw fallbackErr;
       const primaryMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
       const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-      throw new Error(`主力模型失敗(${primaryMsg.slice(0, 300)})，備援 Claude Code 也失敗(${fallbackMsg.slice(0, 300)})`);
+      throw new Error(`主力模型失敗(${primaryMsg.slice(0, 300)})，備援${opts.fallbackLabel ? `「${opts.fallbackLabel}」` : " Claude Code"}也失敗(${fallbackMsg.slice(0, 300)})`);
     }
   }
   throw lastErr;

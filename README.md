@@ -4,7 +4,7 @@
 
 [繁體中文](./README.zh-TW.md) | **English**
 
-A local-first visual workflow automation platform — **like n8n**, your task becomes a graph of nodes on a canvas, but **you build and modify everything by chatting with AI in plain language. You never write or read code.**
+A single-user, local-first visual workflow automation platform built toward enterprise workflow reliability — **like n8n**, your task becomes a graph of nodes on a canvas, but **you build and modify everything by chatting with AI in plain language. You never write or read code.** It is not currently a multi-tenant cloud product and does not provide RBAC, SSO, or team administration; its goal is to bring validation, retries, auditability, and rollback to workflows running on one person's machine.
 
 ![Live demo: a node graph executing step by step — each node lights up as it runs, with the plain-language AI chat on the right](docs/screenshots/demo.gif)
 
@@ -113,7 +113,7 @@ lib/workflow/
   types.ts registry.ts        node contract + node library registry
   engine.ts                    execution engine (topological run / shared browser / retry / crash recovery)
   builder.ts nodeEditor.ts     AI graph building (clarify-first) / AI node editing
-  repair.ts                    shared repair logic for autofix (one node) and autorun (test drafts until they pass)
+  graphRepair.ts               graph-aware repair shared by chat, autofix, and autorun; locates the actual upstream cause
   fixProposals.ts              background fix proposals for failed scheduled runs (one-click apply & re-run)
   learnedFixes.ts              remembered fixes, applied directly when similar errors recur
   explain.ts                   translates the whole graph into plain-language steps
@@ -145,11 +145,12 @@ node scripts/regression.mjs [from to]  # complex-request regression suite: repre
 ## Security
 
 - **No keys in code**: read from `.env` (`AGENT_HUB_API_KEY`, gitignored) or the Settings page; never committed.
-- `data/` is fully gitignored; credentials are stored in plaintext in local SQLite (same trust model as a browser's saved passwords) — don't sync it to the cloud.
-- The AI always shows a preview for you to confirm before building or editing the graph, and auto-backups make everything restorable.
+- `data/` is fully gitignored; credentials are stored in plaintext in local SQLite. Doctor/startup restrict the data directory to the current OS user, but you still must not cloud-sync it or expose it to other system accounts.
+- A newly generated graph is previewed before it is applied. Conversational fixes to an existing graph are applied directly and precisely. Both paths create restorable versions automatically.
+- **Daily disaster backups**: while Agent Hub is running, SQLite, workflow JSON/history, and `.env` are packaged into `data/backups/`; only the current OS user can read them, and the latest 14 days are retained. These archives contain credentials — never upload or share them. Each archive includes `RESTORE.txt`.
 - **This is a single-user local tool, bound to `127.0.0.1` by default** (`npm run dev` / `npm run start` both pass `-H 127.0.0.1`). **Do not change it to `-H 0.0.0.0` or host it publicly** — the `custom-code` node (AI-written custom steps) and the `http-request` node execute code / reach arbitrary URLs on your machine, so exposing them is equivalent to RCE/SSRF.
 - **Built-in cross-site protection** (`proxy.ts`): binding to 127.0.0.1 alone can't stop a malicious web page from making your own browser send requests to localhost. All `/api` requests verify the Host header (against DNS rebinding), and non-GET requests additionally require a local Origin — cross-site requests from external sites get 403.
-- **The `custom-code` node runs AI-generated code on your machine with your user permissions** — that's the nature of the "AI writes a custom step for you" feature. The code is visible before you apply it; if a workflow doesn't feel trustworthy, don't use custom-code nodes in it.
+- **The `custom-code` node runs AI-generated code on your machine with your user permissions.** The normal UI shows only the step's plain-language purpose; code is generated on first execution and stored locally. Test the workflow visibly in draft mode before promoting it. Code embedded in imported workflow files is discarded and regenerated from the stated intent.
 - **Webhook URLs are credentials**: the random token in the path is compared in constant time, and a wrong token returns the same 404 as a nonexistent workflow (no probing). Since the server only listens on 127.0.0.1, only programs on this machine can reach a webhook at all.
 - **Model fallback**: your configured (often free) API is primary; only when the whole retry chain fails does the local Claude Code CLI step in once (see `lib/aiRetry.ts`) — it's not called on every request and incurs no surprise costs.
 - License: MIT (see `LICENSE`).

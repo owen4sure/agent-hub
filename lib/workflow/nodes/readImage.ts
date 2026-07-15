@@ -9,7 +9,7 @@ import { VISION_MODELS, supportsVision } from "../../models";
 import { isClaudeCodeModel } from "../../claudeCodeShared";
 import { callAIWithRetry } from "../../aiRetry";
 import { callClaudeCode, isClaudeCodeAvailable } from "../../claudeCodeClient";
-import { isPrivateHost } from "../../urlGuard";
+import { fetchWithUrlGuard } from "../../urlGuard";
 
 /**
  * AI 看圖片:把一張圖(本機檔案或公開網址)交給視覺模型,依指示回答——
@@ -53,14 +53,13 @@ export const readImageNode: NodeDefinition = {
     let localPathForClaude: string | null = null;
     if (/^https?:\/\//i.test(source)) {
       const u = new URL(source);
-      if (await isPrivateHost(u.hostname)) throw new PermanentError(`不允許讀取內部網路位址的圖片(${u.hostname})`);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 30_000);
       if (ctx.cancelSignal?.aborted) controller.abort();
       const onAbort = () => controller.abort();
       ctx.cancelSignal?.addEventListener("abort", onAbort, { once: true });
       try {
-        const res = await fetch(source, { signal: controller.signal, redirect: "follow" });
+        const res = await fetchWithUrlGuard(source, { signal: controller.signal });
         if (res.status !== 200) throw new RetryableError(`下載圖片失敗(HTTP ${res.status})`);
         const ab = await res.arrayBuffer();
         if (ab.byteLength > MAX_IMAGE_BYTES) throw new PermanentError(`圖片超過 8MB(${Math.round(ab.byteLength / 1024 / 1024)}MB),請縮小後再試`);
@@ -112,7 +111,7 @@ export const readImageNode: NodeDefinition = {
     // 跟驗證碼不同,一般看圖 Claude 不會拒絕,是合格的最後一棒。
     let answer = "";
     if (isClaudeCodeModel(ctx.model)) {
-      answer = await callAIWithRetry(askClaude, { label: "AI 看圖片(Claude Code)", signal: ctx.cancelSignal });
+      answer = await callAIWithRetry(askClaude, { label: "AI 看圖片(Claude Code)", signal: ctx.cancelSignal, maxAttempts: 2 });
     } else {
       const first = supportsVision(ctx.model) ? ctx.model : VISION_MODELS[0];
       answer = await callAIWithRetry(() => askVision(first), { label: "AI 看圖片", signal: ctx.cancelSignal });
@@ -124,7 +123,7 @@ export const readImageNode: NodeDefinition = {
         }
         if (looksLikeNoVision(answer) && (await isClaudeCodeAvailable())) {
           ctx.log("免費視覺模型都讀不了,改用本機 Claude Code 讀圖");
-          answer = await callAIWithRetry(askClaude, { label: "AI 看圖片(Claude Code)", signal: ctx.cancelSignal });
+          answer = await callAIWithRetry(askClaude, { label: "AI 看圖片(Claude Code)", signal: ctx.cancelSignal, maxAttempts: 2 });
         }
       }
     }

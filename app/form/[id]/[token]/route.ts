@@ -33,12 +33,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const { id, token } = await params;
   if (!isValidWorkflowId(id) || !webhookTokenMatches(id, token)) return denied();
   const wf = getWorkflow(id);
-  if (!wf) return denied();
+  if (!wf || wf.status !== "official") return denied();
 
   const fields = (wf.triggerParams ?? []).filter((f) => !f.derived);
   const inputs = fields
-    .map((f) => {
-      const label = `<label>${esc(f.label || f.key)}${f.help ? `<span style="opacity:.7">（${esc(f.help)}）</span>` : ""}</label>`;
+    .map((f, index) => {
+      const inputId = `field-${index}`;
+      const label = `<label for="${inputId}">${esc(f.label || f.key)}${f.help ? `<span style="opacity:.7">（${esc(f.help)}）</span>` : ""}</label>`;
       if (f.type === "select" && f.options?.length) {
         const opts = f.options
           .map((o) => {
@@ -47,13 +48,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
             return `<option value="${esc(v)}"${v === f.default ? " selected" : ""}>${esc(l)}</option>`;
           })
           .join("");
-        return `${label}<select name="${esc(f.key)}">${opts}</select>`;
+        return `${label}<select id="${inputId}" name="${esc(f.key)}">${opts}</select>`;
       }
-      return `${label}<input name="${esc(f.key)}" value="${esc(f.default ?? "")}" />`;
+      return `${label}<input id="${inputId}" name="${esc(f.key)}" value="${esc(f.default ?? "")}" />`;
     })
     .join("");
   // 沒宣告任何參數的流程也能用表單觸發:給一個通用「備註」欄(變成 {{note}})
-  const body = inputs || `<label>備註（會變成流程裡的 {{note}}）</label><input name="note" />`;
+  const body = inputs || `<label for="field-note">備註（會變成流程裡的 {{note}}）</label><input id="field-note" name="note" />`;
   return page(
     wf.name,
     `<h1>${esc(wf.name)}</h1><p class="sub">填好按送出,流程就會開始跑。</p><form method="POST">${body}<button type="submit">送出</button></form>`,
@@ -64,7 +65,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const { id, token } = await params;
   if (!isValidWorkflowId(id) || !webhookTokenMatches(id, token)) return denied();
   const wf = getWorkflow(id);
-  if (!wf) return denied();
+  if (!wf || wf.status !== "official") return denied();
 
   const form = await req.formData().catch(() => null);
   if (!form) return page("送出失敗", `<h1>送出失敗</h1><p class="sub">表單內容讀不到,請回上一頁再試一次。</p>`);

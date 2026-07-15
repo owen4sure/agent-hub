@@ -1,6 +1,8 @@
 import type { Workflow, WorkflowNode } from "./types";
 import { getNodeDef } from "./registry";
 import { parseSheetUrl } from "./nodes/googleSheet";
+import { humanizeTemplates, plainLanguage } from "./plainLanguage";
+export { plainLanguage } from "./plainLanguage";
 
 export interface ExplainStep {
   order: number;
@@ -19,24 +21,6 @@ export interface WorkflowExplanation {
   params: { label: string; value: string }[];
   secrets: string[];
   steps: ExplainStep[];
-}
-
-// 常見相對變數 → 白話。讓說明不出現 {{...}} 這種技術味的東西。
-const TOKEN_GLOSS: Record<string, string> = {
-  "period.start": "這個期間的第一天", "period.end": "這個期間的最後一天",
-  "period.reportDate": "報表信件的日期", "period.label": "這個期間的名稱",
-  reportDate: "報表信件的日期", targetDate: "目標日期",
-  yesterday: "昨天", today: "今天",
-  "last-quarter-start": "上一季第一天", "last-quarter-end": "上一季最後一天",
-  webmailUrl: "webmail 網址", attachmentPath: "剛下載的附件",
-};
-
-/** 把字串裡的 {{token}} 換成白話：先查參數標籤，再查通用字典，都沒有就保留原樣 */
-function makeHumanizer(paramLabels: Record<string, string>) {
-  return (value: string): string =>
-    value.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, tok: string) =>
-      paramLabels[tok] ?? TOKEN_GLOSS[tok] ?? `{{${tok}}}`,
-    );
 }
 
 function str(config: Record<string, unknown>, key: string, fallback = ""): string {
@@ -110,10 +94,9 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
 
     case "browser-login": {
       const url = hstr("url", "登入頁");
-      const acc = str(c, "accountSecret", "webmailAccount");
       return {
         text: `打開瀏覽器連到「${url}」，用你在「設定」頁填的帳號密碼登入。若有圖形驗證碼，AI 會自動辨識，最多重試 3 次。`,
-        settings: [["登入網址", url], ["帳密來源", `設定頁的「${acc}」`]],
+        settings: [["登入網址", url], ["帳密來源", "設定頁的「登入帳號」與「登入密碼」"]],
       };
     }
 
@@ -140,14 +123,15 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
       const end = hstr("filterEnd", "區間結束");
       const col = str(c, "highlightColumn", "指定欄");
       const color = str(c, "highlight", "FFC000");
+      const colorName = color.toUpperCase().replace(/^#/, "") === "FFC000" ? "橘黃色" : "指定顏色";
       const out = str(c, "outputName", "output");
       return {
-        text: `打開下載的 Excel，切到「${sheet}」分頁，只留下日期在「${start}」到「${end}」之間的資料，把「${col}」這一欄標成顏色(#${color})，另存成「${out}.xlsx」放到產出檔案。`,
+        text: `打開下載的 Excel，切到「${sheet}」分頁，只留下日期在「${start}」到「${end}」之間的資料，把「${col}」這一欄標成${colorName}，另存成「${out}.xlsx」放到產出檔案。`,
         settings: [
           ["分頁", sheet],
           ["篩選區間", `${start} ～ ${end}`],
           ["標色的欄", col],
-          ["顏色", `#${color}`],
+          ["顏色", colorName],
           ["輸出檔名", `${out}.xlsx`],
         ],
       };
@@ -156,9 +140,10 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
     case "http-request": {
       const method = str(c, "method", "GET");
       const url = hstr("url", "（未填網址）");
+      const action = method === "GET" ? "讀取" : method === "POST" ? "送出資料到" : `以「${method}」方式連線`;
       return {
-        text: `對「${url}」發一個 ${method} 網路請求，把回應交給下一步。`,
-        settings: [["方法", method], ["網址", url]],
+        text: `${action}「${url}」，把對方回傳的內容交給下一步。`,
+        settings: [["要做的事", action], ["網址", url]],
       };
     }
 
@@ -180,29 +165,28 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
     }
 
     case "template-text": {
-      const key = str(c, "outputKey", "text");
       return {
-        text: `把一段文字範本裡的 {{欄位}} 換成前面步驟的實際資料，結果放進「${key}」給後面用。`,
-        settings: [["輸出欄位", key]],
+        text: "把文字範本中的預留位置換成前面步驟的實際資料，再把完成的文字交給後面使用。",
+        settings: [],
       };
     }
 
     case "set-variable": {
-      const name = str(c, "name", "變數");
       const value = hstr("value");
       return {
-        text: `設一個變數「${name}」＝「${value || "（空）"}」，後面步驟可以用 {{${name}}} 引用。`,
-        settings: [["變數名", name], ["值", value || "（空）"]],
+        text: `先記住一項資料「${value || "（空）"}」，讓後面的步驟可以直接使用。`,
+        settings: [["要記住的內容", value || "（空）"]],
       };
     }
 
     case "if-condition": {
       const left = hstr("left");
       const op = str(c, "op", "==");
+      const opText: Record<string, string> = { "==": "等於", "!=": "不等於", ">": "大於", ">=": "大於或等於", "<": "小於", "<=": "小於或等於", contains: "包含", "not-contains": "不包含" };
       const right = hstr("right");
       return {
-        text: `判斷「${left} ${op} ${right}」是否成立：成立走「是」那條線，不成立走「否」那條線。`,
-        settings: [["條件", `${left} ${op} ${right}`]],
+        text: `判斷「${left}」是否${opText[op] ?? "符合"}「${right}」：成立走「是」那條線，不成立走「否」那條線。`,
+        settings: [["條件", `${left} ${opText[op] ?? "符合"} ${right}`]],
       };
     }
 
@@ -252,11 +236,10 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
     }
 
     case "llm-decide": {
-      const key = str(c, "outputKey", "answer");
       const prompt = str(c, "prompt");
       return {
-        text: `把資料交給 AI 判斷/處理${prompt ? `（問它：「${prompt.slice(0, 40)}${prompt.length > 40 ? "…" : ""}」）` : ""}，答案放進「${key}」。`,
-        settings: [["輸出欄位", key]],
+        text: `把資料交給 AI 判斷或整理${prompt ? `（請它：「${prompt.slice(0, 40)}${prompt.length > 40 ? "…" : ""}」）` : ""}，再把答案交給下一步。`,
+        settings: [],
       };
     }
 
@@ -349,23 +332,43 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
 
     case "google-sheet-read": {
       const url = hstr("sheetUrl", "（未貼網址）");
+      const sheet = hstr("sheetName").trim();
       // 網址「不截斷」——之前截到 60 字剛好把試算表尾巴切掉,等於把「是哪一份」藏起來。
       // 分頁在網址裡指定;用白話講「網址已指定哪一頁」,不出現 gid 這種術語。
       const parsed = parseSheetUrl(str(c, "sheetUrl"));
-      const tabPhrase = parsed && parsed.gid !== "0" ? "(網址裡已指定要讀哪一個分頁)" : "";
+      const tabPhrase = sheet
+        ? `(只讀「${sheet}」分頁)`
+        : parsed && parsed.gid !== "0"
+          ? "(網址裡已指定要讀哪一個分頁)"
+          : "";
       return {
         text: `讀取這份 Google 試算表${tabPhrase}(要開「知道連結的任何人可檢視」)，第一列當欄位名，資料變成清單給後面的步驟用。`,
-        settings: [["Google 試算表網址", url]],
+        settings: [["Google 試算表網址", url], ...(sheet ? ([["讀哪個分頁", sheet]] as [string, string][]) : [])],
       };
     }
 
     case "google-sheet-append": {
       const sheet = str(c, "sheetName").trim();
-      // 寫到哪份試算表是由設定頁填的「試算表寫入網址」決定的——用白話明講,使用者才知道
-      // 「要改成寫到別份表」是去設定頁改那個網址,不是在這個步驟裡找。不出現任何技術名詞。
+      const configured = Boolean(str(c, "scriptUrl").trim());
       return {
-        text: `在你的 Google 試算表的${sheet ? `「${sheet}」分頁` : "第一個分頁"}最下面新增一列(各欄內容照設定依序填入)。要寫到哪一份試算表，看你在「設定」頁填的「試算表寫入網址」。`,
-        settings: [["寫到哪個分頁", sheet || "第一個分頁"], ["寫到哪一份試算表", "看「設定」頁填的「試算表寫入網址」"]],
+        text: `在 Google 試算表的${sheet ? `「${sheet}」分頁` : "第一個分頁"}最下面新增一列(各欄內容照設定依序填入)。寫入網址就在這個步驟裡，可直接修改或先做不寫資料的連線檢查。`,
+        settings: [["寫到哪個分頁", sheet || "第一個分頁"], ["寫入網址", configured ? "已保存在這個步驟" : "尚未填寫（請在這個步驟第一欄貼上）"]],
+      };
+    }
+
+    case "google-sheet-update": {
+      const sheet = hstr("sheetName", "（未指定）").trim();
+      const target = hstr("targetColumn", "（未指定）").trim();
+      const rows = hstr("rows", "（尚未設定）").trim();
+      const configured = Boolean(str(c, "scriptUrl").trim());
+      return {
+        text: `在 Google 試算表的「${sheet}」分頁，找到「${target}」這一欄，再依左側列名更新對應儲存格。它只改指定位置，不會在底下新增重複資料；寫入網址就在這個步驟裡。`,
+        settings: [
+          ["更新哪個分頁", sheet],
+          ["更新哪一欄", target],
+          ["依哪些列名填值", rows],
+          ["寫入網址", configured ? "已保存在這個步驟" : "尚未填寫（請在這個步驟第一欄貼上）"],
+        ],
       };
     }
 
@@ -420,21 +423,29 @@ export function orderNodes(wf: Workflow): WorkflowNode[] {
 /** 產生整個 workflow 的完整白話說明，讓使用者判斷要不要修改 */
 export function explainWorkflow(wf: Workflow): WorkflowExplanation {
   const paramLabels = Object.fromEntries((wf.triggerParams ?? []).map((f) => [f.key, f.label]));
-  const h = makeHumanizer(paramLabels);
+  const h = humanizeTemplates(paramLabels);
   const steps: ExplainStep[] = orderNodes(wf).map((node, i) => {
     const def = getNodeDef(node.type);
     const { text, settings } = explainNode(node, h);
-    return { order: i + 1, id: node.id, type: node.type, icon: def?.icon ?? "•", label: node.label, text, settings };
+    return {
+      order: i + 1,
+      id: node.id,
+      type: node.type,
+      icon: def?.icon ?? "•",
+      label: plainLanguage(node.label, paramLabels),
+      text: plainLanguage(text, paramLabels),
+      settings: settings.map(([key, value]) => [plainLanguage(key, paramLabels), plainLanguage(value, paramLabels)]),
+    };
   });
 
   const params = (wf.triggerParams ?? [])
     .filter((f) => !f.derived)
     .map((f) => ({ label: f.label, value: f.default ? String(f.default) : "（執行時填）" }));
 
-  const secrets = (wf.requiresSecrets ?? []).map((s) => s.label);
+  const secrets = (wf.requiresSecrets ?? []).map((s) => plainLanguage(s.label, paramLabels));
 
   return {
-    overview: wf.longDescription || wf.description || "這個流程還沒有整體說明。",
+    overview: plainLanguage(wf.longDescription || wf.description || "這個流程還沒有整體說明。", paramLabels),
     params,
     secrets,
     steps,

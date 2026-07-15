@@ -40,8 +40,13 @@ export default function FilesPage() {
 
   async function handleDelete(id: number) {
     if (!confirm("確定刪除這個檔案嗎？")) return;
-    await fetch(`/api/files/${id}`, { method: "DELETE" });
-    load();
+    try {
+      const response = await fetch(`/api/files/${id}`, { method: "DELETE" });
+      if (!response.ok) throw new Error();
+      await load();
+    } catch {
+      setLoadError(true);
+    }
   }
 
   function handleDragStart(e: React.DragEvent, file: RunFile) {
@@ -50,7 +55,7 @@ export default function FilesPage() {
   }
 
   return (
-    <div className="max-w-5xl mx-auto px-8 py-8">
+    <div className="max-w-5xl mx-auto px-4 sm:px-8 py-6 sm:py-8">
       <PageHeader title="產出檔案" subtitle="可直接把檔案拖到 Mac 桌面或資料夾下載" />
       {loadError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>載入失敗，請確認伺服器是否正常，<button onClick={load} className="underline">重試</button>。</div>}
       {files === null && !loadError && <p className="text-sm muted">載入中…</p>}
@@ -61,7 +66,7 @@ export default function FilesPage() {
             key={f.id}
             draggable
             onDragStart={(e) => handleDragStart(e, f)}
-            className="card card-hover flex items-center gap-3 px-4 py-3 cursor-grab active:cursor-grabbing"
+            className="card card-hover flex items-center gap-3 px-4 py-3 cursor-grab active:cursor-grabbing flex-wrap sm:flex-nowrap"
             title="可拖到桌面下載"
           >
             <span className="grid place-items-center w-9 h-9 rounded-lg text-lg" style={{ background: "var(--surface-2)" }}>📄</span>

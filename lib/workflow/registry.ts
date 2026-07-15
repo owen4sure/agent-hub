@@ -22,7 +22,7 @@ import { switchNode } from "./nodes/switchCase";
 import { waitApprovalNode } from "./nodes/waitApproval";
 import { customCodeNode } from "./nodes/customCode";
 import { telegramNotifyNode, lineNotifyNode, slackNotifyNode } from "./nodes/notify";
-import { googleSheetReadNode, googleSheetAppendNode } from "./nodes/googleSheet";
+import { googleSheetReadNode, googleSheetAppendNode, googleSheetUpdateNode } from "./nodes/googleSheet";
 import { repeatStepsNode } from "./nodes/repeatSteps";
 import { writeFileNode, readFileNode } from "./nodes/fileOps";
 import { webPageNode } from "./nodes/webPage";
@@ -44,6 +44,7 @@ const ALL: NodeDefinition[] = [
   emailReadNode,
   googleSheetReadNode,
   googleSheetAppendNode,
+  googleSheetUpdateNode,
   httpRequestNode,
   templateTextNode,
   setVariableNode,

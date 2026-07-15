@@ -5,17 +5,26 @@ import AdmZip from "adm-zip";
  * (截圖、logo、插圖、貼在儲存格上的圖…)。圖片放在 zip 的 xl/media/、word/media/、ppt/media/。
  * 回傳 base64 PNG/JPG 清單，失敗回空陣列(不擋上傳)。
  */
-export function extractEmbeddedImages(buffer: Buffer, max = 6): { b64: string; name: string }[] {
-  const out: { b64: string; name: string }[] = [];
+export function extractEmbeddedImages(buffer: Buffer, max = 6): { b64: string; name: string; mime: string }[] {
+  const out: { b64: string; name: string; mime: string }[] = [];
+  const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+  const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+  let totalBytes = 0;
   try {
     const zip = new AdmZip(buffer);
     for (const entry of zip.getEntries()) {
       if (out.length >= max) break;
       if (/\/(media|embeddings)\/.*\.(png|jpe?g|gif|bmp)$/i.test(entry.entryName)) {
+        const declaredSize = Number(entry.header.size) || 0;
+        if (declaredSize > MAX_IMAGE_BYTES || totalBytes + declaredSize > MAX_TOTAL_BYTES) continue;
         const data = entry.getData();
-        if (data && data.length > 1024) {
+        if (data && data.length > 1024 && data.length <= MAX_IMAGE_BYTES && totalBytes + data.length <= MAX_TOTAL_BYTES) {
           // 太小的多半是項目符號/裝飾圖，跳過
-          out.push({ b64: data.toString("base64"), name: entry.entryName.split("/").pop() || "image" });
+          const name = entry.entryName.split("/").pop() || "image";
+          const ext = name.split(".").pop()?.toLowerCase();
+          const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : ext === "gif" ? "image/gif" : ext === "bmp" ? "image/bmp" : "image/png";
+          out.push({ b64: data.toString("base64"), name, mime });
+          totalBytes += data.length;
         }
       }
     }

@@ -2,8 +2,16 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
 
-export const DATA_DIR = path.join(process.cwd(), "data");
+export const DATA_DIR = path.join(/* turbopackIgnore: true */ process.cwd(), "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+// data/ 內有明碼帳密、執行輸入輸出與除錯截圖。預設 mkdir/SQLite 會受 umask 影響，
+// 常見結果是 0755/0644，讓同一台電腦的其他 OS 帳號也能讀。這是本機工具仍必須守住的隔離邊界。
+// Windows 沒有相同的 POSIX mode 語意；chmod 失敗也不能讓整個產品無法開機，所以 best-effort。
+function chmodPrivate(file: string, mode: number) {
+  if (process.platform === "win32" || !fs.existsSync(file)) return;
+  try { fs.chmodSync(file, mode); } catch { /* doctor 會把仍不安全的權限明確報出來 */ }
+}
+chmodPrivate(DATA_DIR, 0o700);
 
 const DB_PATH = path.join(DATA_DIR, "agent-hub.db");
 
@@ -24,6 +32,10 @@ function init(): Database.Database {
   // 引擎密集寫 run_logs 的同時 scheduler 要搶 last_fired_minute，沒有等待就會互相炸 BUSY——
   // 排程那筆被 catch 吞掉的結果是「那一分鐘的排程靜默漏跑」。給 5 秒等待足以化解幾乎所有競爭。
   db.pragma("busy_timeout = 5000");
+  // journal_mode=WAL 可能建立 -wal/-shm；三個檔案都含使用者資料，全部收緊。
+  chmodPrivate(DB_PATH, 0o600);
+  chmodPrivate(`${DB_PATH}-wal`, 0o600);
+  chmodPrivate(`${DB_PATH}-shm`, 0o600);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS settings (
@@ -59,6 +71,9 @@ function init(): Database.Database {
       trigger_type TEXT NOT NULL DEFAULT 'manual',
       headed INTEGER NOT NULL DEFAULT 0,
       trigger_params_json TEXT,
+      secret_overrides_json TEXT,
+      node_config_overrides_json TEXT,
+      dry_run INTEGER NOT NULL DEFAULT 0,
       error TEXT,
       reason TEXT,
       resolution TEXT,
@@ -183,6 +198,10 @@ function init(): Database.Database {
   addColumnIfMissing(db, "runs", "trigger_type", "trigger_type TEXT NOT NULL DEFAULT 'manual'");
   addColumnIfMissing(db, "runs", "headed", "headed INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "runs", "trigger_params_json", "trigger_params_json TEXT");
+  addColumnIfMissing(db, "runs", "secret_overrides_json", "secret_overrides_json TEXT");
+  addColumnIfMissing(db, "runs", "node_config_overrides_json", "node_config_overrides_json TEXT");
+  // 安全試跑失敗後若從原處續跑，必須沿用「只讀」身分。沒存這欄會讓續跑的下游寫入步驟變正式執行。
+  addColumnIfMissing(db, "runs", "dry_run", "dry_run INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "runs", "owner_pid", "owner_pid INTEGER");
   addColumnIfMissing(db, "node_runs", "attempt", "attempt INTEGER NOT NULL DEFAULT 1");
   // 分支節點(if/switch)這次選了哪個出口——「從失敗那步續跑」要重放上次的分支選擇，下游跳過邏輯才會一致

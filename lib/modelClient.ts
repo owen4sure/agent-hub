@@ -14,7 +14,9 @@ export function getClient(): OpenAI {
   // 逾時 90 秒：這個 client 用在「建圖/改圖/修復」這種大回應的呼叫，免費 gateway 實測要 30-60 秒才回得完。
   // 之前設 25 秒的教訓：每次都「快好了卻被切斷」→ 重試 4 次全逾時 → 白等 100 多秒才輪到備援，
   // 使用者感覺「隨便問一句都跑超久」。快速小呼叫(驗證碼辨識等)另有 nodeHelpers.makeClient(25秒)，不受影響。
-  return new OpenAI({ baseURL: baseUrl, apiKey, timeout: 90_000, maxRetries: 0 });
+  // OpenAI SDK 會在 constructor 就因空 key 拋錯，讓「已選 Claude Code／準備走本機備援」也無法開始。
+  // 真正需要遠端模型的入口仍會先檢查設定；這個佔位值只讓本機備援能建立相同 client 介面。
+  return new OpenAI({ baseURL: baseUrl, apiKey: apiKey || "agent-hub-api-key-not-configured", timeout: 90_000, maxRetries: 0 });
 }
 
 export async function testModel(model: string): Promise<{ ok: boolean; message: string }> {

@@ -104,7 +104,20 @@ export async function decideApproval(
   });
   const approval = getApprovalById(existing.id)!;
   if (!r.ok) {
-    // 決定已記錄但流程恢復不了(執行紀錄被清/流程被刪)——老實告訴簽核人，不要假裝一切正常
+    // 決定已記錄但流程恢復不了(圖被改壞、執行紀錄不一致等)時，不能讓 run 永遠卡在 waiting。
+    // 決定本身不可回滾(真人確實按過)，因此把仍在等待的執行明確收斂成失敗並留下可追查原因。
+    const reason = `簽核決定已記錄，但流程無法續跑：${r.error}`;
+    db.transaction(() => {
+      db.prepare(
+        `UPDATE runs SET status='failed', error=?, reason=?, resolution='needs-human', failed_node=?, finished_at=datetime('now') WHERE id=? AND status='waiting'`,
+      ).run(reason, reason, existing.node_id, existing.run_id);
+      db.prepare(`UPDATE node_runs SET status='failed', error=?, finished_at=datetime('now') WHERE run_id=? AND node_id=? AND status='waiting'`)
+        .run(reason, existing.run_id, existing.node_id);
+      db.prepare(`UPDATE node_runs SET status='skipped' WHERE run_id=? AND status='pending'`).run(existing.run_id);
+      db.prepare(`INSERT INTO run_logs (run_id, node_id, ts, line) VALUES (?, ?, datetime('now'), ?)`)
+        .run(existing.run_id, existing.node_id, `❌ ${reason}`);
+    })();
+    notifyDesktop("簽核後流程無法續跑", reason.slice(0, 180));
     return { ok: false, error: `已記錄你的決定(${newStatus === "approved" ? "核准" : "拒絕"})，但流程恢復失敗：${r.error}`, approval };
   }
   return { ok: true, approval };

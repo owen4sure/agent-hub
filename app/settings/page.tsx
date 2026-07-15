@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { MODELS, KNOWN_WORKING_MODELS, DEFAULT_MODEL, supportsVision } from "@/lib/models";
+import { MODELS, KNOWN_WORKING_MODELS, DEFAULT_MODEL, supportsVision, supportsCaptchaVision } from "@/lib/models";
 import { isClaudeCodeModel } from "@/lib/claudeCodeShared";
 import { PageHeader } from "@/components/ui";
 
@@ -9,11 +9,20 @@ interface SecretField { key: string; label: string; type: string; }
 /** 跨所有 workflow 去重後的一個共用帳密欄位 + 有哪些 workflow 用到它 */
 interface SharedField { key: string; label: string; type: string; usedBy: string[] }
 
+const SECRET_LABELS: Record<string, string> = {
+  telegramBotToken: "Telegram Bot Token", telegramChatId: "Telegram Chat ID",
+  lineChannelAccessToken: "LINE Channel Access Token", lineUserId: "LINE User ID", lineChannelSecret: "LINE Channel Secret",
+  slackWebhookUrl: "Slack Webhook 網址", smtpHost: "SMTP 主機", smtpPort: "SMTP 連接埠",
+  smtpAccount: "SMTP 帳號", smtpPassword: "SMTP 密碼", imapHost: "IMAP 主機", imapPort: "IMAP 連接埠",
+  imapAccount: "IMAP 帳號", imapPassword: "IMAP 密碼",
+};
+
 export default function SettingsPage() {
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [hasApiKey, setHasApiKey] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [savedError, setSavedError] = useState(false);
   const [fields, setFields] = useState<SharedField[]>([]);
   const [secretsSet, setSecretsSet] = useState<Record<string, boolean>>({});
   const [secretInputs, setSecretInputs] = useState<Record<string, string>>({});
@@ -71,9 +80,17 @@ export default function SettingsPage() {
     // apiKey 空字串代表「沒改」，不送出去(送空字串會被 POST 端當成「清空」處理)
     const body: { baseUrl: string; apiKey?: string } = { baseUrl };
     if (apiKey) body.apiKey = apiKey;
-    await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    if (apiKey) { setHasApiKey(true); setApiKey(""); }
-    setSavedMsg("已儲存");
+    try {
+      const response = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error((data as { error?: string }).error ?? "儲存失敗");
+      if (apiKey) { setHasApiKey(true); setApiKey(""); }
+      setSavedError(false);
+      setSavedMsg("已儲存");
+    } catch (error) {
+      setSavedError(true);
+      setSavedMsg(error instanceof Error ? error.message : "儲存失敗，請重試");
+    }
     setTimeout(() => setSavedMsg(null), 2000);
   }
   async function runTest() {
@@ -82,18 +99,63 @@ export default function SettingsPage() {
     try {
       const res = await fetch("/api/test-model", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: testModel }) });
       setTestResult(await res.json());
+    } catch (error) {
+      setTestResult({ ok: false, message: error instanceof Error ? error.message : "連線失敗，請重試" });
     } finally {
       setTesting(false);
+    }
+  }
+  async function savePrefs() {
+    try {
+      const response = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ builderPrefs: prefs }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error((data as { error?: string }).error ?? "偏好儲存失敗");
+      setSavedError(false);
+      setPrefsSaved(prefs);
+      setPrefsMsg(true);
+      setTimeout(() => setPrefsMsg(false), 2000);
+    } catch (error) {
+      setSavedError(true);
+      setSavedMsg(error instanceof Error ? error.message : "偏好儲存失敗");
+      setTimeout(() => setSavedMsg(null), 3000);
     }
   }
   async function saveSecrets() {
     const nonEmpty = Object.fromEntries(Object.entries(secretInputs).filter(([, v]) => v.length > 0));
     if (Object.keys(nonEmpty).length === 0) return;
-    const res = await (await fetch("/api/secrets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ secrets: nonEmpty }) })).json();
-    setSecretsSet(res.set ?? {});
-    setSecretInputs({});
-    setSecretsSavedMsg(true);
-    setTimeout(() => setSecretsSavedMsg(false), 2000);
+    try {
+      const response = await fetch("/api/secrets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ secrets: nonEmpty }) });
+      const res = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error((res as { error?: string }).error ?? "帳密儲存失敗");
+      setSavedError(false);
+      setSecretsSet((res as { set?: Record<string, boolean> }).set ?? {});
+      setSecretInputs({});
+      setSecretsSavedMsg(true);
+      setTimeout(() => setSecretsSavedMsg(false), 2000);
+    } catch (error) {
+      setSavedError(true);
+      setSavedMsg(error instanceof Error ? error.message : "帳密儲存失敗");
+      setTimeout(() => setSavedMsg(null), 3000);
+    }
+  }
+
+  async function clearSecret(key: string) {
+    const label = fields.find((f) => f.key === key)?.label ?? SECRET_LABELS[key] ?? key;
+    if (!confirm(`確定清除「${label}」？使用它的流程在重新設定前會停止並請你補值。`)) return;
+    try {
+      const res = await fetch("/api/secrets", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keys: [key] }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data as { error?: string }).error ?? "清除失敗，請重試");
+      setSecretsSet((data as { set?: Record<string, boolean> }).set ?? {});
+    } catch (error) {
+      setSavedError(true);
+      setSavedMsg(error instanceof Error ? error.message : "清除失敗，請重試");
+      setTimeout(() => setSavedMsg(null), 3000);
+    }
   }
 
   // ── 通知串接(Telegram / LINE)──對一般人來說串 bot 很複雜，這裡把「拿到 token → 填入 → 驗證」
@@ -105,28 +167,32 @@ export default function SettingsPage() {
   async function saveNotifyFields(keys: string[]) {
     const nonEmpty = Object.fromEntries(keys.map((k) => [k, notifyInputs[k] ?? ""]).filter(([, v]) => (v as string).length > 0));
     if (Object.keys(nonEmpty).length === 0) return false;
-    const res = await (await fetch("/api/secrets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ secrets: nonEmpty }) })).json();
-    setSecretsSet(res.set ?? {});
+    const response = await fetch("/api/secrets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ secrets: nonEmpty }) });
+    const res = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error((res as { error?: string }).error ?? "帳密儲存失敗");
+    setSecretsSet((res as { set?: Record<string, boolean> }).set ?? {});
     setNotifyInputs((prev) => { const next = { ...prev }; for (const k of keys) delete next[k]; return next; });
     return true;
   }
-  async function notifyAction(platform: "telegram" | "line" | "email" | "slack" | "sheet" | "imap", action: string, saveKeys: string[]) {
+  async function notifyAction(platform: "telegram" | "line" | "email" | "slack" | "imap", action: string, saveKeys: string[]) {
     setNotifyBusy(action);
     setNotifyMsg((p) => ({ ...p, [platform]: { ok: true, text: "處理中…" } }));
     try {
       await saveNotifyFields(saveKeys); // 先把還沒儲存的輸入存起來，使用者不用記得先按儲存
-      const res = await (await fetch("/api/notify-test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }) })).json();
+      const response = await fetch("/api/notify-test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }) });
+      const res = await response.json().catch(() => ({})) as { ok?: boolean; message?: string; error?: string; chatId?: string };
+      if (!response.ok) throw new Error(res.error ?? res.message ?? "測試失敗");
       setNotifyMsg((p) => ({ ...p, [platform]: { ok: Boolean(res.ok), text: res.message ?? "" } }));
       if (res.chatId) setSecretsSet((p) => ({ ...p, telegramChatId: true }));
-    } catch {
-      setNotifyMsg((p) => ({ ...p, [platform]: { ok: false, text: "連不上伺服器，請重試" } }));
+    } catch (error) {
+      setNotifyMsg((p) => ({ ...p, [platform]: { ok: false, text: error instanceof Error ? error.message : "連不上伺服器，請重試" } }));
     } finally {
       setNotifyBusy(null);
     }
   }
 
   return (
-    <div className="max-w-2xl mx-auto px-8 py-8 space-y-8">
+    <div className="max-w-2xl mx-auto px-4 sm:px-8 py-6 sm:py-8 space-y-8">
       <PageHeader title="設定" subtitle="模型 API 與各 workflow 的帳密" />
       {loadError && <div className="card px-4 py-3 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>部分設定載入失敗，顯示的內容可能不完整，請重新整理頁面。</div>}
 
@@ -151,7 +217,7 @@ export default function SettingsPage() {
         </label>
         <div className="flex items-center gap-2">
           <button onClick={saveGlobal} className="btn btn-primary">儲存</button>
-          {savedMsg && <span className="text-sm" style={{ color: "var(--green)" }}>{savedMsg}</span>}
+          {savedMsg && <span className="text-sm" style={{ color: savedError ? "var(--red)" : "var(--green)" }}>{savedMsg}</span>}
         </div>
         <div className="pt-3 border-t space-y-1.5">
           <p className="text-xs muted">
@@ -159,17 +225,16 @@ export default function SettingsPage() {
             要換某個流程真正執行用的模型，請到該流程頁面上方的模型選單調整。
           </p>
           <p className="text-xs muted">
-            <b>🖼️ = 能看圖</b>：流程裡如果有「登入網站」步驟要辨識圖形驗證碼，一定要選有 🖼️ 標記的模型，
-            其餘模型有的完全看不懂圖片(會直接說看不到)，有的甚至會自信地看錯亂講——那樣反而會送出錯誤答案。
-            系統本身在驗證碼這步已經會自動繞過看不懂圖的模型改用能看圖的頂上，這裡的標記只是讓你自己選模型時心裡有數。
+            <b>🖼️ = 能看一般圖片；🔤 = 圖形驗證碼也實測可用</b>。Claude Code 能理解一般圖片，但會基於安全政策拒絕 CAPTCHA，
+            所以只有 🖼️、沒有 🔤。流程真的遇到驗證碼時，系統會自動改用一個有 🔤 的模型，不會拿拒絕或會亂看的模型硬試。
           </p>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {customTestModel ? (
               <input
                 value={testModel}
                 onChange={(e) => setTestModel(e.target.value)}
                 placeholder="輸入你接的 API 服務實際支援的模型代號"
-                className="input"
+                className="input max-w-full min-w-0"
                 style={{ width: 220 }}
               />
             ) : (
@@ -177,7 +242,8 @@ export default function SettingsPage() {
                 {MODELS.map((m) => {
                   const working = (KNOWN_WORKING_MODELS as readonly string[]).includes(m) || isClaudeCodeModel(m);
                   const vision = supportsVision(m);
-                  return <option key={m} value={m}>{working ? "✓ " : ""}{vision ? "🖼️ " : ""}{m}</option>;
+                  const captcha = supportsCaptchaVision(m);
+                  return <option key={m} value={m}>{working ? "✓ " : ""}{vision ? "🖼️ " : ""}{captcha ? "🔤 " : ""}{m}</option>;
                 })}
               </select>
             )}
@@ -189,7 +255,7 @@ export default function SettingsPage() {
               {customTestModel ? "清單" : "自訂"}
             </button>
             <button onClick={runTest} disabled={testing} className="btn btn-ghost">{testing ? "測試中…" : "測試連線"}</button>
-            {testResult && <span className="text-sm" style={{ color: testResult.ok ? "var(--green)" : "var(--red)" }}>{testResult.ok ? `✅ ${testResult.message}` : `❌ ${testResult.message}`}</span>}
+            {testResult && <span className="text-sm min-w-0 break-words" style={{ color: testResult.ok ? "var(--green)" : "var(--red)" }}>{testResult.ok ? `✅ ${testResult.message}` : `❌ ${testResult.message}`}</span>}
           </div>
         </div>
       </section>
@@ -212,12 +278,7 @@ export default function SettingsPage() {
           style={{ resize: "vertical", minHeight: 90 }}
         />
         <div className="flex items-center gap-2">
-          <button onClick={async () => {
-            await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ builderPrefs: prefs }) });
-            setPrefsSaved(prefs);
-            setPrefsMsg(true);
-            setTimeout(() => setPrefsMsg(false), 2000);
-          }} disabled={prefs === prefsSaved} className="btn btn-primary">儲存偏好</button>
+          <button onClick={savePrefs} disabled={prefs === prefsSaved} className="btn btn-primary">儲存偏好</button>
           {prefsMsg && <span className="text-sm" style={{ color: "var(--green)" }}>已儲存，下次跟 AI 對話就生效</span>}
         </div>
       </section>
@@ -371,7 +432,7 @@ export default function SettingsPage() {
               <li>按「測試發送」，會寄一封測試信給你自己，收到就完成了！其他信箱服務(Outlook/公司信箱)照它們的 SMTP 資訊填即可。</li>
             </ol>
           </details>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label className="block text-sm">
               <span className="muted">SMTP 主機 {secretsSet.smtpHost && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
               <input type="text" className="input mt-1" placeholder={secretsSet.smtpHost ? "（已設定，留空不變）" : "smtp.gmail.com"}
@@ -414,7 +475,7 @@ export default function SettingsPage() {
               <li>按「測試連線」，看到收件匣的信件數就完成了！</li>
             </ol>
           </details>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label className="block text-sm">
               <span className="muted">IMAP 主機 {secretsSet.imapHost && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
               <input type="text" className="input mt-1" placeholder={secretsSet.imapHost ? "（已設定，留空不變）" : "imap.gmail.com"}
@@ -445,46 +506,25 @@ export default function SettingsPage() {
           {notifyMsg.imap && <p className="text-sm" style={{ color: notifyMsg.imap.ok ? "var(--green)" : "var(--red)" }}>{notifyMsg.imap.text}</p>}
         </div>
 
-        <div className="card p-5 space-y-3">
-          <h3 className="text-sm font-medium">📘 Google 試算表寫入 {secretsSet.sheetAppendUrl && <span style={{ color: "var(--green)" }}>· 已串接</span>}</h3>
-          <p className="text-sm muted">串好之後，流程就能用「寫入 Google 試算表」步驟把結果一列一列記進你的試算表——不用 OAuth 授權。(「讀取」試算表不用串接：開連結檢視、貼網址就能讀。)</p>
-          <details className="text-sm">
-            <summary className="cursor-pointer muted">📖 怎麼拿到寫入網址？(點開看教學，約 3 分鐘)</summary>
-            <ol className="list-decimal ml-5 mt-2 space-y-1 muted">
-              <li>打開你的 Google 試算表 → 上方選單「擴充功能」→「Apps Script」。</li>
-              <li>把編輯器裡的內容全部換成下面這段(原封不動貼上)：</li>
-            </ol>
-            <pre className="mt-2 p-3 rounded-md text-xs font-mono overflow-x-auto" style={{ background: "var(--surface-2)" }}>{`function doPost(e) {
-  var body = JSON.parse(e.postData.contents);
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = body.sheet ? ss.getSheetByName(body.sheet) : ss.getSheets()[0];
-  if (!sheet) return out({ ok: false, error: "找不到分頁: " + body.sheet });
-  sheet.appendRow(body.cells);
-  return out({ ok: true, row: sheet.getLastRow() });
-}
-function out(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
-}`}</pre>
-            <ol className="list-decimal ml-5 mt-2 space-y-1 muted" start={3}>
-              <li>按右上「部署」→「新增部署作業」→ 類型選「網頁應用程式」→「誰可以存取」選 <b>任何人</b> → 部署(會要你授權一次，那是授權「你自己的腳本」動「你自己的試算表」)。</li>
-              <li>複製「網頁應用程式」網址(<code>https://script.google.com/macros/…</code>)貼到下面，按「測試寫入」，試算表最下面多一列就完成了！</li>
-            </ol>
-          </details>
-          <label className="block text-sm">
-            <span className="muted">寫入網址 {secretsSet.sheetAppendUrl && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
-            <input type="password" className="input mt-1" placeholder={secretsSet.sheetAppendUrl ? "••••••••（已設定，留空不變）" : "https://script.google.com/macros/…"}
-              value={notifyInputs.sheetAppendUrl ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, sheetAppendUrl: e.target.value }))} />
-          </label>
-          <div className="flex items-center gap-2">
-            <button className="btn btn-primary" disabled={notifyBusy !== null}
-              onClick={() => notifyAction("sheet", "sheet-append-test", ["sheetAppendUrl"])}>
-              {notifyBusy === "sheet-append-test" ? "寫入中…" : "測試寫入(加一列測試資料)"}
-            </button>
-          </div>
-          {notifyMsg.sheet && <p className="text-sm" style={{ color: notifyMsg.sheet.ok ? "var(--green)" : "var(--red)" }}>{notifyMsg.sheet.text}</p>}
-        </div>
       </section>
+
+      {Object.keys(secretsSet).length > 0 && (
+        <section className="card p-5 space-y-3">
+          <div>
+            <h2 className="font-medium">🔐 已儲存帳密管理</h2>
+            <p className="text-sm muted mt-0.5">只顯示欄位名稱，不會顯示內容。停用整合或交接電腦時，可在這裡真正撤銷，不只是把輸入框留空。</p>
+          </div>
+          <div className="divide-y">
+            {Object.keys(secretsSet).sort().map((key) => (
+              <div key={key} className="flex items-center gap-3 py-2.5">
+                <span className="text-sm flex-1 min-w-0 truncate">{fields.find((f) => f.key === key)?.label ?? SECRET_LABELS[key] ?? key}</span>
+                <span className="text-xs" style={{ color: "var(--green)" }}>已設定</span>
+                <button onClick={() => clearSecret(key)} className="btn btn-ghost text-xs" style={{ color: "var(--red)" }}>清除</button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

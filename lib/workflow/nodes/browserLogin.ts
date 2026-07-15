@@ -1,10 +1,40 @@
 import path from "node:path";
 import fs from "node:fs";
+import type { Page } from "playwright";
 import type { NodeDefinition, NodeContext } from "../types";
 import { PermanentError } from "../types";
 import { cfgStr, solveCaptchaFromLocator } from "../nodeHelpers";
 
-const MAX_CAPTCHA_ATTEMPTS = 5;
+const MAX_CAPTCHA_ATTEMPTS = 3;
+
+/**
+ * Mail2000 的重新登入頁會把上次帳號預填後設成 disabled，只要使用者重填密碼。
+ * Playwright.fill() 對 disabled 欄位會白等 30 秒才失敗。預填值正確就直接沿用；
+ * 若網站鎖了不同帳號，才解鎖後改成這條 workflow 設定的帳號。
+ */
+export async function fillAccountField(
+  page: Page,
+  selector: string,
+  account: string,
+  log?: (line: string) => void,
+): Promise<"filled" | "prefilled"> {
+  const field = page.locator(selector).first();
+  const current = await field.inputValue().catch(() => "");
+  const editable = await field.isEditable().catch(() => false);
+  if (!editable && current.trim().toLowerCase() === account.trim().toLowerCase()) {
+    log?.("登入頁已預填正確帳號，沿用該帳號並繼續填密碼");
+    return "prefilled";
+  }
+  if (!editable) {
+    await field.evaluate((element) => {
+      const input = element as HTMLInputElement;
+      input.disabled = false;
+      input.readOnly = false;
+    });
+  }
+  await field.fill(account, { timeout: 5_000 });
+  return "filled";
+}
 
 async function saveDebug(ctx: NodeContext, step: string) {
   const dir = path.join(ctx.debugDir, ctx.nodeId);
@@ -51,6 +81,9 @@ export const browserLoginNode: NodeDefinition = {
     return fields;
   },
   retryable: true,
+  // 這個節點內部已會針對 3 張新驗證碼重試。引擎若再重試 3 次會變成最多 9 次登入，
+  // 外部視覺服務故障時更會把逾時放大成數分鐘，所以整體只跑一次。
+  maxAttempts: 1,
   async execute(ctx) {
     const url = cfgStr(ctx, "url");
     const account = ctx.secrets[cfgStr(ctx, "accountSecret", "webmailAccount")];
@@ -76,16 +109,40 @@ export const browserLoginNode: NodeDefinition = {
       await page.goto(url);
       // 導頁後先存一份頁面(截圖+HTML)，這樣即使選擇器找不到，AI 修復時也有實際 DOM 可讀
       await saveDebug(ctx, `00-page-loaded-${attempt}`);
+      // 上次成功登入保存的 session 若仍有效，登入網址會直接進站且不再出現帳號欄位。
+      // 不能只看「欄位消失」就當成功：頁面壞掉也會消失；要再看到常見登入後內容或 session URL。
+      const accountCount = await page.locator(accountSel).count();
+      if (accountCount === 0) {
+        const body = await page.locator("body").innerText().catch(() => "");
+        const sessionUrl = /[?&](?:job_id|session|sid)=/i.test(page.url());
+        const authenticatedUi = /登出|logout|收件匣|inbox/i.test(body);
+        // 某些 SPA（Mail2000 就是）剛 load 完時 body.innerText 可能還是空的，但已登入頁的
+        // 登出鍵/搜尋框已經在 DOM 裡。不能只靠文字或 URL 參數，否則保存的 session
+        // 明明有效還會白等 15 秒後誤報「選擇器壞了」。這些都是只會出現在登入後的常見交互元素。
+        const authenticatedMarkers = await page.locator([
+          "#logout",
+          'a[href*="logout" i]',
+          'button:has-text("登出")',
+          'input#search_input',
+          'input[placeholder*="收信匣"]',
+          '[data-testid*="logout" i]',
+        ].join(", ")).count();
+        if (sessionUrl || authenticatedUi || authenticatedMarkers > 0) {
+          ctx.log("沿用上次已保存的登入狀態，這次不需要再辨識驗證碼");
+          await ctx.session.saveState();
+          return { output: { loggedIn: true, url: page.url() } };
+        }
+      }
       try {
         await page.waitForSelector(accountSel, { timeout: 15000 });
       } catch {
         throw new Error(`找不到帳號欄位元素(選擇器 ${accountSel})——選擇器可能不對，可按「讓 AI 修」讓 AI 依實際頁面調整`);
       }
-      await page.fill(accountSel, account);
+      await fillAccountField(page, accountSel, account, ctx.log);
       await page.fill(passwordSel, password);
       await saveDebug(ctx, `00-filled-${attempt}`);
 
-      ctx.log(`辨識驗證碼中(模型 ${ctx.model})`);
+      ctx.log("正在讀取這一張登入驗證碼");
       const captcha = await solveCaptchaFromLocator(page, captchaImgSel, ctx);
       ctx.log(`驗證碼判讀：${captcha}`);
       await page.fill(captchaInputSel, captcha);
@@ -98,6 +155,7 @@ export const browserLoginNode: NodeDefinition = {
 
       if ((await page.locator(goneSel).count()) === 0) {
         ctx.log("登入成功");
+        await ctx.session.saveState();
         await saveDebug(ctx, "01-success");
         return { output: { loggedIn: true, url: page.url() } };
       }

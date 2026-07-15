@@ -1,16 +1,15 @@
 import path from "node:path";
-import os from "node:os";
 import fs from "node:fs";
 import type { NodeDefinition, NodeContext } from "../types";
 import { PermanentError } from "../types";
 import { cfgStr } from "../nodeHelpers";
 
 async function saveDebug(ctx: NodeContext, step: string) {
-  const dir = path.join(ctx.debugDir, ctx.nodeId);
+  const dir = path.join(/* turbopackIgnore: true */ ctx.debugDir, ctx.nodeId);
   fs.mkdirSync(dir, { recursive: true });
   const page = await ctx.session.getPage();
-  await page.screenshot({ path: path.join(dir, `${step}.png`), fullPage: true }).catch(() => {});
-  await fs.promises.writeFile(path.join(dir, `${step}.html`), await page.content()).catch(() => {});
+  await page.screenshot({ path: path.join(/* turbopackIgnore: true */ dir, `${step}.png`), fullPage: true }).catch(() => {});
+  await fs.promises.writeFile(path.join(/* turbopackIgnore: true */ dir, `${step}.html`), await page.content()).catch(() => {});
 }
 
 function safeName(name: string): string {
@@ -53,7 +52,21 @@ export const downloadAttachmentNode: NodeDefinition = {
     const nameContains = cfgStr(ctx, "nameContains");
     const linkSel = cfgStr(ctx, "downloadLinkSelector");
     const blockSel = cfgStr(ctx, "attachmentBlockSelector");
-    const downloadDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-hub-"));
+    // 下載檔不能只放 OS 暫存目錄：流程跑完後使用者常會立刻在對話說「去剛下載的 Excel 看某個分頁」，
+    // builder 必須還能讀到同一份真實檔案。放進這次 run 的資料夾並登記 run_files，生命週期跟執行紀錄一致。
+    const downloadRoot = path.join(/* turbopackIgnore: true */ ctx.debugDir, ctx.nodeId, "downloads");
+    fs.mkdirSync(downloadRoot, { recursive: true });
+    const downloadDir = fs.mkdtempSync(path.join(/* turbopackIgnore: true */ downloadRoot, "attempt-"));
+    const completeDownload = (filePath: string, filename: string) => {
+      const ext = path.extname(filename).toLowerCase();
+      const mime = ext === ".xlsx" || ext === ".xlsm"
+        ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        : ext === ".xls" ? "application/vnd.ms-excel"
+          : ext === ".csv" ? "text/csv"
+            : ext === ".pdf" ? "application/pdf" : "application/octet-stream";
+      ctx.registerFile(filename, filePath, mime);
+      return { output: { attachmentPath: filePath, filename } };
+    };
 
     await saveDebug(ctx, "01-mail-opened");
 
@@ -97,10 +110,10 @@ export const downloadAttachmentNode: NodeDefinition = {
             const cd = resp.headers()["content-disposition"] || "";
             const cdName = decodeURIComponent(cd.match(/filename\*?=(?:UTF-8'')?"?([^;"]+)"?/i)?.[1] || "");
             const filename = safeName(cdName || wanted.name || "attachment.xlsx");
-            const filePath = path.join(downloadDir, filename);
+            const filePath = path.join(/* turbopackIgnore: true */ downloadDir, filename);
             fs.writeFileSync(filePath, buffer);
             ctx.log(`附件已下載(直接抓取)：${filename}（${buffer.length} bytes）`);
-            return { output: { attachmentPath: filePath, filename } };
+            return completeDownload(filePath, filename);
           }
         }
         ctx.log(`直接抓取回應非預期(status ${resp.status()})，改用點擊方式`);
@@ -130,10 +143,10 @@ export const downloadAttachmentNode: NodeDefinition = {
         clickTarget.click(),
       ]);
       const filename = safeName(download.suggestedFilename());
-      const filePath = path.join(downloadDir, filename);
+      const filePath = path.join(/* turbopackIgnore: true */ downloadDir, filename);
       await download.saveAs(filePath);
       ctx.log(`附件已下載(點擊)：${filename}`);
-      return { output: { attachmentPath: filePath, filename } };
+      return completeDownload(filePath, filename);
     } catch {
       ctx.log("直接點沒觸發下載，改點下拉選單的「下載」");
       await saveDebug(ctx, "06-dropdown");
@@ -145,10 +158,10 @@ export const downloadAttachmentNode: NodeDefinition = {
           page.getByText("下載", { exact: false }).first().click(),
         ]);
         const filename = safeName(download.suggestedFilename());
-        const filePath = path.join(downloadDir, filename);
+        const filePath = path.join(/* turbopackIgnore: true */ downloadDir, filename);
         await download.saveAs(filePath);
         ctx.log(`附件已下載(選單)：${filename}`);
-        return { output: { attachmentPath: filePath, filename } };
+        return completeDownload(filePath, filename);
       } catch (err) {
         await saveDebug(ctx, "99-download-failed");
         throw new Error(

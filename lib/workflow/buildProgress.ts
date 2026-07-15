@@ -5,13 +5,14 @@
  * 純進程內記憶體:跨進程(daemon+dev)各自看各自的,值是顯示用的軟資訊,不需要共享。
  */
 
-const stages = new Map<string, { stage: string; at: number }>();
+const stages = new Map<string, { stage: string; at: number; token?: string }>();
 
-export function setBuildStage(workflowId: string, stage: string): void {
-  stages.set(workflowId, { stage, at: Date.now() });
+export function setBuildStage(workflowId: string, stage: string, token?: string): void {
+  stages.set(workflowId, { stage, at: Date.now(), token });
 }
 
-export function clearBuildStage(workflowId: string): void {
+export function clearBuildStage(workflowId: string, token?: string): void {
+  if (token && stages.get(workflowId)?.token !== token) return;
   stages.delete(workflowId);
 }
 

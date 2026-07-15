@@ -107,3 +107,13 @@ export function setSharedSecrets(secrets: Record<string, string>) {
   });
   tx(Object.entries(secrets));
 }
+
+/** 明確撤銷已保存的帳密。空字串仍代表「不修改」，刪除必須走獨立操作，避免誤清。 */
+export function deleteSharedSecrets(keys: string[]) {
+  const clean = [...new Set(keys.filter((k) => /^[A-Za-z0-9_.-]{1,100}$/.test(k)))];
+  if (clean.length === 0) return;
+  const stmt = getDb().prepare(`DELETE FROM secrets WHERE workflow_id = ? AND key = ?`);
+  getDb().transaction((items: string[]) => {
+    for (const key of items) stmt.run(SHARED, key);
+  })(clean);
+}

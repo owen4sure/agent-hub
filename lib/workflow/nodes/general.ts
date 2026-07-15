@@ -3,6 +3,7 @@ import { PermanentError, RetryableError } from "../types";
 import { cfgStr, makeClient, resolveTemplate } from "../nodeHelpers";
 import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../../claudeCodeClient";
 import { callAIWithRetry } from "../../aiRetry";
+import { fetchWithUrlGuard } from "../../urlGuard";
 
 export const httpRequestNode: NodeDefinition = {
   type: "http-request",
@@ -42,11 +43,13 @@ export const httpRequestNode: NodeDefinition = {
     // (這是「按停止不會停」的其中一個根因：這是一個 fetch，跟瀏覽器頁面無關，resetPage() 救不到它)。
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30_000);
+    // 取消可能發生在上一輪重試的退避期間；這時 signal 已經 aborted，單純加 listener 不會補發事件。
+    if (ctx.cancelSignal.aborted) controller.abort();
     const onCancel = () => controller.abort();
-    ctx.cancelSignal.addEventListener("abort", onCancel);
+    ctx.cancelSignal.addEventListener("abort", onCancel, { once: true });
     let res: Response;
     try {
-      res = await fetch(url, {
+      res = await fetchWithUrlGuard(url, {
         method,
         headers,
         body: method === "GET" || method === "DELETE" || !bodyStr ? undefined : bodyStr,
@@ -56,10 +59,28 @@ export const httpRequestNode: NodeDefinition = {
       clearTimeout(timer);
       ctx.cancelSignal.removeEventListener("abort", onCancel);
     }
-    const raw = await res.text();
-    const MAX = 5 * 1024 * 1024; // 5MB
-    const text = raw.length > MAX ? raw.slice(0, MAX) : raw;
-    if (raw.length > MAX) ctx.log(`回應超過 5MB，已截斷`);
+    const MAX = 5 * 1024 * 1024;
+    const reader = res.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let truncated = false;
+    if (reader) {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const remaining = MAX - total;
+        if (value.byteLength > remaining) {
+          if (remaining > 0) chunks.push(value.subarray(0, remaining));
+          truncated = true;
+          await reader.cancel();
+          break;
+        }
+        chunks.push(value);
+        total += value.byteLength;
+      }
+    }
+    const text = Buffer.concat(chunks).toString("utf-8");
+    if (truncated) ctx.log(`回應超過 5MB，已在讀取時停止，避免撠爆記憶體`);
     let json: unknown = null;
     try {
       json = JSON.parse(text);
@@ -191,7 +212,7 @@ export const llmDecideNode: NodeDefinition = {
       // signal 接 ctx.cancelSignal：使用者按「停止執行」時中斷正在進行的模型呼叫本身(不接的話
       // 停止對這個節點沒有作用，要等模型呼叫自然結束/逾時才會停下來)。
       if (isClaudeCodeModel(ctx.model)) {
-        return (await callAIWithRetry(claudeCodeFallback, { label: "AI判斷(Claude Code)", signal: ctx.cancelSignal })).trim();
+        return (await callAIWithRetry(claudeCodeFallback, { label: "AI判斷(Claude Code)", signal: ctx.cancelSignal, maxAttempts: 2 })).trim();
       }
       const client = makeClient(ctx);
       const fallback = (await isClaudeCodeAvailable()) ? claudeCodeFallback : undefined;

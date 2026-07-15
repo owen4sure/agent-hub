@@ -35,6 +35,11 @@ export function disableLineToken(workflowId: string): void {
   getDb().prepare(`UPDATE workflows_meta SET line_token = NULL WHERE id = ?`).run(workflowId);
 }
 
+/** 啟用/停用流程旗標失敗時的補償回滾用；必須能精確恢復原本 token，不能再 rotate 一個新網址。 */
+export function restoreLineToken(workflowId: string, token: string | null): void {
+  getDb().prepare(`UPDATE workflows_meta SET line_token = ? WHERE id = ?`).run(token, workflowId);
+}
+
 /** 常數時間比對，避免 timing attack 逐字猜 token */
 export function lineTokenMatches(workflowId: string, given: string): boolean {
   const stored = getLineToken(workflowId);

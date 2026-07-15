@@ -25,10 +25,12 @@ export async function renderPageText(rawUrl: string, opts?: { maxChars?: number;
   if (guardOn && (await isPrivateHost(u.hostname))) {
     throw new Error(`這個網址指向內部網路(${u.hostname})`);
   }
+  if (opts?.signal?.aborted) throw new Error("已停止執行");
 
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true });
   const onAbort = () => { void browser.close().catch(() => {}); };
+  if (opts?.signal?.aborted) onAbort();
   opts?.signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });

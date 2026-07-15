@@ -47,6 +47,8 @@ export interface Workflow {
   onFailureWorkflow?: string;
   /** 群組(工作/私人…)——首頁按群組分區顯示。空/未設定=未分組。 */
   group?: string;
+  /** 外部檔案匯入後，第一次執行前必須由使用者明確確認其本機讀檔／外送能力。 */
+  importedUntrusted?: boolean;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
 }
@@ -58,6 +60,8 @@ export interface RunSession {
   close(): Promise<void>;
   /** 節點逾時後呼叫：強制關掉當下分頁(讓卡住的操作立刻拋錯中止)，下一步會拿到全新分頁，不會跟逾時的殭屍操作搶同一頁 */
   resetPage(): Promise<void>;
+  /** 登入成功後把 cookie/localStorage 原子保存到本機私有檔；下次同 workflow 可直接沿用，避免每次重解 CAPTCHA。 */
+  saveState(): Promise<void>;
 }
 
 /** 傳給每個節點 execute 的內容 */
@@ -113,6 +117,8 @@ export interface NodeDefinition {
    */
   secretFields?(config: Record<string, unknown>): { key: string; label: string; type: "text" | "password" }[];
   retryable: boolean;
+  /** 整個節點最多嘗試次數。不設時 retryable 節點預設 3 次；自己內建重試迴圈的節點要設 1，避免內外層重試相乘。 */
+  maxAttempts?: number;
   /** 單次執行的逾時上限(毫秒)。不設就用引擎預設(3分鐘)。repeat-steps 這種「一個節點做 N 輪工作」
    * 的容器型節點必須放寬——N 輪瀏覽器操作+第一次執行可能要產程式碼,3 分鐘必然不夠,逾時重試又整包重來。 */
   timeoutMs?: number;

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getDb } from "../db";
+import { fetchWithUrlGuard } from "../urlGuard";
 
 /** 找這個 run/node 的除錯截圖(最後一張)的實際路徑；本機 Claude Code 直接用路徑讀，不用轉 base64 */
 export function findLatestScreenshotPath(runId: string, nodeId: string): string | null {
@@ -100,6 +101,7 @@ export async function dumpFileExcerpt(p: string, maxChars = 7000, sheetHint = ""
       return aHit - bHit;
     });
     for (const ws of sheets) {
+      const explicitlyRequestedSheet = Boolean(ws.name && sheetHint.includes(ws.name));
       const cols = Math.min(ws.columnCount || 12, 150);
       lines.push(`【分頁「${ws.name}」，共 ${ws.rowCount} 列 x ${ws.columnCount} 欄】`);
       // 欄位對照:每欄取前幾列的文字型標題/分類(純數字/日期是資料不算標題)。同名欄靠分類區分累積 vs 當日。
@@ -114,22 +116,188 @@ export async function dumpFileExcerpt(p: string, maxChars = 7000, sheetHint = ""
         if (labels.length) mapEntries.push(`${colLetter(c)}=${labels.join("/")}`);
       }
       if (mapEntries.length) lines.push(`欄位對照(欄位代號→標題;同名欄看分類分「累積」還是「當日新增」):${mapEntries.join(" | ")}`);
-      // 幾列資料樣本(放寬到 cols 欄,才看得出當日的小數字 vs 累積的大數字)
-      const maxRow = Math.min(ws.rowCount, 12);
-      for (let r = 1; r <= maxRow; r++) {
+      // 不能只讀前 12 列：真實報表常把 KPI、Total 等關鍵列放在第 14～30 列。先列標題列，
+      // 再把「使用者需求／目的分頁資料」實際點名的列拉到前面，最後才補一般樣本。
+      // 每格都帶 A1 位址，AI 才能回答「F14 要填到 H8」這種精確對照，不用叫使用者人工數欄位。
+      const hintLower = sheetHint.toLowerCase();
+      const priorityRows: number[] = [];
+      const addRow = (rowNumber: number) => {
+        if (rowNumber >= 1 && rowNumber <= ws.rowCount && !priorityRows.includes(rowNumber)) priorityRows.push(rowNumber);
+      };
+      for (let r = 1; r <= Math.min(4, ws.rowCount); r++) addRow(r);
+      for (let r = 1; r <= ws.rowCount; r++) {
+        const row = ws.getRow(r);
+        let mentioned = false;
+        for (let c = 1; c <= cols; c++) {
+          const value = cellText(row.getCell(c).value).trim();
+          if (value.length >= 2 && !/^[\d.,%()\-/:\s]+$/.test(value) && hintLower.includes(value.toLowerCase())) {
+            mentioned = true;
+            break;
+          }
+        }
+        if (mentioned) addRow(r);
+      }
+      for (let r = 5; r <= Math.min(ws.rowCount, 20); r++) addRow(r);
+
+      for (const r of priorityRows) {
         const rowObj = ws.getRow(r);
         const cells: string[] = [];
-        for (let c = 1; c <= cols; c++) cells.push(cellText(rowObj.getCell(c).value).trim().slice(0, 16));
-        const line = cells.join("|").replace(/\|+$/, "");
-        if (line) lines.push(`第${r}列|${line}`);
+        for (let c = 1; c <= cols; c++) {
+          const value = cellText(rowObj.getCell(c).value).trim();
+          if (value) cells.push(`${colLetter(c)}${r}=${value.slice(0, 40)}`);
+        }
+        if (cells.length) lines.push(`第${r}列：${cells.join(" | ")}`);
         if (lines.join("\n").length > maxChars) break;
       }
       if (lines.join("\n").length > maxChars) break;
+      // 使用者已點名分頁時，只交那一頁；把同一份 100+ 欄的其他分頁全塞進 prompt 只會拖慢模型，
+      // 還會讓它把來源欄位跟別頁同名欄位混在一起。
+      if (explicitlyRequestedSheet) break;
     }
     const dump = lines.join("\n").slice(0, maxChars);
     if (dump) return `檔案「${path.basename(p)}」的內容節錄(每欄都標了欄位代號 A、B、C…;每列=第N列|各欄依序)：\n${dump}`;
   } catch { /* 檔案壞了/不是真的表格檔 */ }
   return null;
+}
+
+export interface LatestSuccessContext {
+  runId: string;
+  startedAt: string;
+  evidence: string;
+  hasFileEvidence: boolean;
+}
+
+/**
+ * Google 的 CSV/gviz 會把多層表頭壓成一列，並丟掉前面的空列，所以「第 4 筆資料」
+ * 不一定是畫面的第 4 列。使用者點名 H6 這種 A1 格位時，改讀公開活頁簿的 xlsx，
+ * 才能保留真正座標。只讀 Google 固定主機、限時與限 20MB，不接受任意網址。
+ */
+async function getGoogleSheetA1Evidence(
+  rawUrl: string,
+  sheetName: string,
+  requestText: string,
+  maxChars = 7_000,
+): Promise<string | null> {
+  const id = rawUrl.match(/^https:\/\/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/)?.[1];
+  if (!id || !sheetName || !/\b[A-Z]{1,3}\d+\b/i.test(requestText)) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const res = await fetchWithUrlGuard(`https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx`, {
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const declared = Number(res.headers.get("content-length") ?? 0);
+    if (declared > 20 * 1024 * 1024) return null;
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.length > 20 * 1024 * 1024) return null;
+    const ExcelJS = (await import("exceljs")).default;
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(bytes as unknown as Parameters<typeof workbook.xlsx.load>[0]);
+    const sheet = workbook.getWorksheet(sheetName);
+    if (!sheet) return null;
+
+    const requestedRows = new Set<number>([1, 2, 3]);
+    for (const match of requestText.matchAll(/\b[A-Z]{1,3}(\d+)\b/gi)) requestedRows.add(Number(match[1]));
+    const lines = [`【最近成功執行使用的 Google Sheet：${sheetName}（保留真正 A1 格位）】`];
+    for (const rowNumber of [...requestedRows].sort((a, b) => a - b)) {
+      if (rowNumber < 1 || rowNumber > sheet.rowCount) continue;
+      const cells: string[] = [];
+      const maxColumns = Math.min(sheet.columnCount || 12, 80);
+      for (let column = 1; column <= maxColumns; column++) {
+        const cell = sheet.getRow(rowNumber).getCell(column);
+        const value = cellText(cell.value).trim();
+        if (value) cells.push(`${cell.address}=${value.slice(0, 80)}`);
+      }
+      if (cells.length) lines.push(`第${rowNumber}列：${cells.join(" | ")}`);
+    }
+    return lines.join("\n").slice(0, maxChars);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 把最近一次成功執行已經讀到的真實資料交給「對話改流程」。以前 builder 只有失敗現場，最新一次
+ * 明明已成功下載 Excel、讀到 Google Sheet，使用者接著說「先去檔案看 H6」時模型卻完全看不到，
+ * 只能反問使用者人工對照。這裡只保留讀表節點的白話表格與本機檔案的安全節錄，不把帳密、cookie、
+ * 網頁 session 或整包透傳 input 放進 prompt。
+ */
+export async function getLatestSuccessContext(
+  workflowId: string,
+  requestText: string,
+  maxChars = 24_000,
+): Promise<LatestSuccessContext | null> {
+  const db = getDb();
+  const run = db.prepare(`
+    SELECT id, status, started_at
+    FROM runs
+    WHERE workflow_id = ? AND status IN ('success', 'failed')
+    ORDER BY started_at DESC LIMIT 1
+  `).get(workflowId) as { id: string; status: string; started_at: string } | undefined;
+  if (!run || run.status !== "success") return null;
+
+  const { getWorkflow } = await import("./store");
+  const workflow = getWorkflow(workflowId);
+  if (!workflow) return null;
+  const nodeById = new Map(workflow.nodes.map((node) => [node.id, node] as const));
+  const rows = db.prepare(`
+    SELECT node_id, input_json, output_json
+    FROM node_runs WHERE run_id = ? AND status = 'success' ORDER BY id
+  `).all(run.id) as { node_id: string; input_json: string | null; output_json: string | null }[];
+
+  const readEvidence: { score: number; text: string; sheetUrl: string; sheetName: string }[] = [];
+  const fileCandidates = new Set<string>();
+  for (const row of rows) {
+    const node = nodeById.get(row.node_id);
+    const haystack = `${row.input_json ?? ""}\n${row.output_json ?? ""}`;
+    for (const match of haystack.replace(/\\\//g, "/").matchAll(/\/[^\s\"'`（）|,]+\.(?:xlsx|xlsm|xls|csv)/gi)) {
+      if (fs.existsSync(match[0])) fileCandidates.add(match[0]);
+    }
+    if (node?.type !== "google-sheet-read" || !row.output_json) continue;
+    try {
+      const output = JSON.parse(row.output_json) as { rowCount?: unknown; headers?: unknown; sheetText?: unknown };
+      const sheetText = typeof output.sheetText === "string" ? output.sheetText.slice(0, 6_000) : "";
+      if (!sheetText) continue;
+      const sheetName = String(node.config.sheetName ?? "").trim();
+      const score = (sheetName && requestText.includes(sheetName) ? 4 : 0) + (requestText.includes(node.label) ? 2 : 0);
+      readEvidence.push({
+        score,
+        text: `【最近成功執行實際讀到的 Google Sheet：${sheetName || node.label}】\n${sheetText}`,
+        sheetUrl: String(node.config.sheetUrl ?? ""),
+        sheetName,
+      });
+    } catch { /* 單一壞 output 不影響其他證據 */ }
+  }
+  readEvidence.sort((a, b) => b.score - a.score);
+  const highestScore = readEvidence[0]?.score ?? 0;
+  // 有命中使用者點名的分頁就只給最相關的一張；沒點名才最多給兩張作為保守背景。
+  const selectedReadEvidence = highestScore > 0
+    ? readEvidence.filter((item) => item.score === highestScore).slice(0, 1)
+    : readEvidence.slice(0, 2);
+  const pieces: string[] = [];
+  for (const item of selectedReadEvidence) {
+    // 需求點名儲存格時，用保留座標的 xlsx 證據取代會錯位的 CSV 資料清單。
+    pieces.push(await getGoogleSheetA1Evidence(item.sheetUrl, item.sheetName, requestText) ?? item.text);
+  }
+
+  let hasFileEvidence = false;
+  const fileHint = `${requestText}\n${pieces.join("\n")}`;
+  for (const filePath of fileCandidates) {
+    const remaining = maxChars - pieces.join("\n\n").length;
+    if (remaining < 1_000) break;
+    const dump = await dumpFileExcerpt(filePath, Math.min(10_000, remaining), fileHint);
+    if (dump) {
+      pieces.push(`【最近成功執行實際下載／處理的檔案】\n${dump}`);
+      hasFileEvidence = true;
+      break;
+    }
+  }
+  const evidence = pieces.join("\n\n").slice(0, maxChars);
+  if (!evidence) return null;
+  return { runId: run.id, startedAt: run.started_at, evidence, hasFileEvidence };
 }
 
 /** 從 ctx.input 找出「像檔案路徑」的值(下載附件/監聽檔案),回第一個真的存在的表格/文件檔路徑 */

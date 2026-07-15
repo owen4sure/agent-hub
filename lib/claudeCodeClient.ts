@@ -37,6 +37,51 @@ interface ClaudeCodeResult {
   is_error: boolean;
   result?: string;
   error?: string;
+  api_error_status?: number;
+}
+
+/** 新舊 Claude CLI 的 result event 欄位不完全一致；錯誤時要優先保留真正可行動的 result 文字。 */
+export function claudeCodeResultError(result: ClaudeCodeResult): string | null {
+  if (!result.is_error && result.result) return null;
+  return String(
+    result.error
+      ?? result.result
+      ?? (result.api_error_status ? `HTTP ${result.api_error_status}` : undefined)
+      ?? result.subtype
+      ?? "未知錯誤",
+  ).slice(0, 300);
+}
+
+export type ClaudeCodeEffort = "low" | "medium" | "high";
+
+/**
+ * Claude Code 平常是完整的程式開發代理，會載入專案記憶、plugins、Chrome 與整套工具。
+ * Agent Hub 只需要它「依提示產生答案」，附件情境最多只需要唯讀檔案工具；若沿用完整環境，
+ * 同一個模型在 Claude Code 視窗很快、到了 Agent Hub 卻可能為初始化無關工具多等數分鐘。
+ *
+ * 把參數產生獨立出來也讓測試能鎖住兩個企業級要求：無附件時零工具；有附件時只准唯讀。
+ */
+export function claudeCodeArgs(opts: { hasReadPaths: boolean; effort?: ClaudeCodeEffort }): string[] {
+  const args = [
+    "-p",
+    "--model", "sonnet",
+    "--safe-mode",
+    "--no-session-persistence",
+    "--disable-slash-commands",
+    "--no-chrome",
+    "--effort", opts.effort ?? "medium",
+    // 取代 Claude Code 為寫程式準備的龐大預設 system prompt；真正的任務規則仍由 stdin 傳入。
+    "--system-prompt", "你是 Agent Hub 的受控推理引擎。只依照輸入內容完成任務，不探索無關環境，不執行外部動作。",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+  ];
+  if (opts.hasReadPaths) {
+    args.push("--tools", "Read,Glob,Grep", "--allowedTools", "Read,Glob,Grep");
+  } else {
+    args.push("--tools", "");
+  }
+  return args;
 }
 
 // 「還在做事就一直等它做完」的心跳計時:只要 Claude Code 有任何輸出(串流逐字/工具往返)就重置。
@@ -53,22 +98,28 @@ const ABSOLUTE_MAX_MS = 20 * 60_000;
  *   會污染建流程的回應)。圖片改用 --add-dir 明確授權它讀那幾個目錄。
  * - 錯誤訊息一定截短：execFile/spawn 失敗時的原始訊息可能內嵌整段 prompt(幾百KB)，不截短會炸到 UI。
  */
-export function callClaudeCode(opts: { prompt: string; imagePaths?: string[]; signal?: AbortSignal }): Promise<string> {
-  const promptText = opts.imagePaths?.length
-    ? `${opts.prompt}\n\n【附上的圖片，請用 Read 工具讀取後再回答】\n${opts.imagePaths.map((p) => `- ${p}`).join("\n")}`
+export function callClaudeCode(opts: { prompt: string; imagePaths?: string[]; readPaths?: string[]; signal?: AbortSignal; effort?: ClaudeCodeEffort }): Promise<string> {
+  const allReadPaths = [...new Set([...(opts.readPaths ?? []), ...(opts.imagePaths ?? [])])];
+  const promptText = allReadPaths.length
+    ? `${opts.prompt}\n\n【附件工作區】\n請先用 Read 讀取下列主要檔案；若是壓縮專案，請用 Glob/Grep 搜尋同目錄並只深入與需求有關的檔案，不要盲目逐一讀完無關或二進位內容。\n${allReadPaths.map((p) => `- ${p}`).join("\n")}`
     : opts.prompt;
 
-  // 明確指定模型，不要讓它繼承使用者本機 CLI 當下的全域預設——那個預設會被使用者日常互動操作
-  // (如跑 /model 切換)悄悄改變，備援呼叫的行為不該因此跟著漂移，要固定、可預期。
+  // 明確指定模型與隔離模式，不繼承使用者日常 Claude Code 的模型、plugins、記憶、Chrome 或工具。
   // stream-json + --include-partial-messages:生成過程逐字吐事件當「還在做事」的心跳(見上方 IDLE_MS)。
-  const args = ["-p", "--model", "sonnet", "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
-  if (opts.imagePaths?.length) {
-    args.push("--allowedTools", "Read");
-    const dirs = [...new Set(opts.imagePaths.map((p) => path.dirname(p)))];
+  const args = claudeCodeArgs({ hasReadPaths: allReadPaths.length > 0, effort: opts.effort });
+  if (allReadPaths.length) {
+    const dirs = [...new Set(allReadPaths.map((p) => path.dirname(p)))];
     for (const d of dirs) args.push("--add-dir", d);
   }
 
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    console.info("[claude-code] start", {
+      promptChars: promptText.length,
+      attachments: allReadPaths.length,
+      tools: allReadPaths.length ? "Read,Glob,Grep" : "none",
+      effort: opts.effort ?? "medium",
+    });
     const child = spawn("claude", args, { cwd: os.tmpdir(), stdio: ["pipe", "pipe", "pipe"] });
     let buffer = "";       // 累積 stdout,逐行(JSONL)解析
     let stderr = "";
@@ -79,12 +130,15 @@ export function callClaudeCode(opts: { prompt: string; imagePaths?: string[]; si
 
     // 單一 watchdog:每幾秒檢查「閒置多久」跟「總時長」。閒置(完全沒輸出)超過 IDLE_MS=視為卡死;
     // 總時長超過 ABSOLUTE_MAX_MS=防失控。只要還在吐東西 lastActivity 就一直更新,永遠不會誤殺還在跑的。
-    const startedAt = Date.now();
     let lastActivity = startedAt;
     const cleanupAbortListener = () => opts.signal?.removeEventListener("abort", onAbort);
     const finish = (fn: () => void) => { if (settled) return; settled = true; clearInterval(watchdog); cleanupAbortListener(); fn(); };
     const fail = (msg: string) => finish(() => { child.kill("SIGTERM"); reject(new Error(msg)); });
-    const ok = (v: string) => finish(() => { child.kill("SIGTERM"); resolve(v); });
+    const ok = (v: string) => finish(() => {
+      child.kill("SIGTERM");
+      console.info("[claude-code] complete", { elapsedMs: Date.now() - startedAt, outputChars: v.length });
+      resolve(v);
+    });
     const watchdog = setInterval(() => {
       const now = Date.now();
       if (now - lastActivity > IDLE_MS) {
@@ -109,8 +163,16 @@ export function callClaudeCode(opts: { prompt: string; imagePaths?: string[]; si
         }
       } else if (t === "result") {
         const r = ev as unknown as ClaudeCodeResult;
-        if (r.is_error || !r.result) resultError = String(r.error ?? r.subtype ?? "未知錯誤").slice(0, 300);
-        else resultText = r.result;
+        const parsedError = claudeCodeResultError(r);
+        if (parsedError) {
+          // 新版 CLI 在額度用完時 subtype 仍可能是 "success"，真正可行動的原因放在 result，
+          // 舊解析器因此只顯示「Claude Code 回應錯誤：success」，使用者完全不知道要等額度重置。
+          if (r.api_error_status === 429 || /session limit|rate.?limit|usage limit|額度|用量上限/i.test(parsedError)) {
+            availableCache = { value: false, at: Date.now() };
+          }
+          resultError = parsedError;
+        }
+        else resultText = r.result ?? "";
       }
     };
 

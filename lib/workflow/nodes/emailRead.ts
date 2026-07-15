@@ -52,8 +52,9 @@ export const emailReadNode: NodeDefinition = {
 
     let client;
     try {
-      client = await openImap(creds);
+      client = await openImap(creds, ctx.cancelSignal);
     } catch (err) {
+      if (ctx.cancelSignal.aborted) throw new PermanentError("已停止執行");
       if (isImapAuthError(err)) {
         throw new PermanentError("IMAP 帳號或密碼錯誤——請到設定頁確認。注意：Gmail/大多數信箱不能用登入密碼，要用「應用程式密碼」");
       }
@@ -61,6 +62,10 @@ export const emailReadNode: NodeDefinition = {
     }
     // 使用者按「停止執行」時直接關掉連線讓 IMAP 操作立刻拋錯(鐵則19)
     const onAbort = () => { void client.logout().catch(() => {}); };
+    if (ctx.cancelSignal.aborted) {
+      client.close();
+      throw new PermanentError("已停止執行");
+    }
     ctx.cancelSignal.addEventListener("abort", onAbort, { once: true });
     try {
       const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000);

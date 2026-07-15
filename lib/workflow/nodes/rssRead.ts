@@ -1,7 +1,7 @@
 import type { NodeDefinition } from "../types";
 import { PermanentError, RetryableError } from "../types";
 import { cfgStr } from "../nodeHelpers";
-import { isPrivateHost } from "../../urlGuard";
+import { fetchWithUrlGuard } from "../../urlGuard";
 
 /**
  * 讀 RSS/Atom:抓一個 feed 的最新文章清單(標題/連結/時間/摘要)。
@@ -56,9 +56,7 @@ export const rssReadNode: NodeDefinition = {
     ctx.cancelSignal?.addEventListener("abort", onAbort, { once: true });
     // SSRF 檢查 + 抓文字(可能被呼叫兩次:原網址、以及自動偵測到的 feed 網址)
     const grab = async (u: string): Promise<string> => {
-      const host = new URL(u).hostname;
-      if (await isPrivateHost(host)) throw new PermanentError(`不允許讀取內部網路位址(${host})`);
-      const res = await fetch(u, { signal: controller.signal, redirect: "follow", headers: { "User-Agent": "AgentHub/1.0 RSS" } });
+      const res = await fetchWithUrlGuard(u, { signal: controller.signal, headers: { "User-Agent": "AgentHub/1.0 RSS" } });
       if (res.status === 404) throw new PermanentError("這個網址回 404——確認 feed 網址貼對(常見是 /rss、/feed、/atom.xml 結尾)");
       if (res.status >= 500) throw new RetryableError(`來源暫時錯誤(${res.status})`);
       if (res.status !== 200) throw new PermanentError(`抓取失敗(HTTP ${res.status})`);

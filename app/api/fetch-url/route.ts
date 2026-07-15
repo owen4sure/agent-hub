@@ -1,41 +1,78 @@
 import { NextResponse } from "next/server";
 import { isPrivateHost, privateUrlsAllowed } from "@/lib/urlGuard";
 import { readGoogleDoc, parseGoogleDocUrl } from "@/lib/googleExport";
+import { saveChatAttachment } from "@/lib/chatAttachments";
+import { getWorkflow, isValidWorkflowId } from "@/lib/workflow/store";
+import { compactVisibleWebText, looksLikeLoginPage } from "@/lib/urlContent";
+
+const URL_READ_TIMEOUT_MS = 50_000;
+
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("網址讀取已停止");
+}
 
 /**
- * 讓 dashboard 的 AI「看得到網址/網站」：用內建 chromium 打開網址 → 截整頁圖 + 抽出可見文字，
- * 回傳給對話。這樣使用者貼一個網址，AI 就能像人一樣看到那個網頁長什麼樣、寫了什麼。
- * 只允許 http/https，擋掉 file:// 之類的本機協定。
- *
- * SSRF 防護：這是「打開任意網址並把內容(含截圖)回傳」的功能，部署在雲端 VM 時若不擋內部位址，
- * 貼 http://169.254.169.254/... 就能整頁讀走雲端憑證、貼 192.168.x.x 能讀內網管理介面。
- * 除了進門先驗一次主機名，還要攔截頁面發出的「每一個請求」——不然對方網頁一個 302 轉址或
- * 一張 <img> 就繞過了進門檢查。內網有合法需求可設 AGENT_HUB_ALLOW_PRIVATE_URLS=1 關閉。
+ * 讓 dashboard 的 AI「看得到網址/網站」：用內建 chromium 打開網址 → 截圖 + 抽出可見文字，
+ * 回傳給對話。只允許 http/https，並對入口、轉址和子資源全部做 SSRF 防護。
  */
 export async function POST(req: Request) {
-  const body = (await req.json().catch(() => null)) as { url?: string } | null;
-  const url = body?.url?.trim();
-  if (!url || !/^https?:\/\//i.test(url)) {
-    return NextResponse.json({ error: "請提供正確的網址(要以 http:// 或 https:// 開頭)" }, { status: 400 });
-  }
-  const guardOn = !privateUrlsAllowed();
-  if (guardOn && (await isPrivateHost(new URL(url).hostname))) {
-    return NextResponse.json({ error: "這個網址指向內部網路位址，基於安全考量不開放讀取(自家內網有需要可設定環境變數 AGENT_HUB_ALLOW_PRIVATE_URLS=1)" }, { status: 400 });
-  }
+  const startedAt = Date.now();
+  const requestId = crypto.randomUUID().slice(0, 8);
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(new Error(`網址讀取超過 ${URL_READ_TIMEOUT_MS / 1000} 秒`)),
+    URL_READ_TIMEOUT_MS,
+  );
+  const cancelFromClient = () => controller.abort(new Error("使用者已停止網址讀取"));
+  req.signal.addEventListener("abort", cancelFromClient, { once: true });
 
-  // Google 試算表/文件是 canvas 畫的，DOM 抓不到真正的儲存格值——一定要用官方匯出拿到真實內容，
-  // 不能只靠截圖用猜的。讀得到就直接回真值(這是「連結他還是只會截圖」的根治)；讀不到(私有/需登入)
-  // 再往下退回 chromium 截圖，並在下面的 text 裡講明「只看得到畫面」。
-  const gDoc = await readGoogleDoc(url).catch(() => null);
-  if (gDoc) {
-    return NextResponse.json({ title: gDoc.title, text: gDoc.text, googleExport: true });
-  }
+  let hostname = "unknown";
+  const log = (stage: string) => console.info(`[fetch-url:${requestId}] ${stage} host=${hostname} elapsedMs=${Date.now() - startedAt}`);
 
   try {
+    const body = (await req.json().catch(() => null)) as { url?: string; workflowId?: string } | null;
+    const url = body?.url?.trim();
+    if (!url || !/^https?:\/\//i.test(url)) {
+      return NextResponse.json({ error: "請提供正確的網址(要以 http:// 或 https:// 開頭)" }, { status: 400 });
+    }
+    const workflowId = body?.workflowId?.trim();
+    if (workflowId && (!isValidWorkflowId(workflowId) || !getWorkflow(workflowId))) {
+      return NextResponse.json({ error: "網址所屬的 workflow 不存在" }, { status: 404 });
+    }
+    hostname = new URL(url).hostname;
+    const guardOn = !privateUrlsAllowed();
+    if (guardOn && (await isPrivateHost(hostname))) {
+      return NextResponse.json({ error: "這個網址指向內部網路位址，基於安全考量不開放讀取(自家內網有需要可設定環境變數 AGENT_HUB_ALLOW_PRIVATE_URLS=1 關閉)" }, { status: 400 });
+    }
+
+    // Google 試算表/文件先走官方匯出，才能讀到真正的儲存格/文件內容，而不是只看截圖。
+    log("google-export:start");
+    const gDoc = await readGoogleDoc(url, controller.signal);
+    if (gDoc) {
+      log("google-export:complete");
+      const asset = workflowId ? saveChatAttachment({
+        workflowId,
+        source: "url",
+        filename: gDoc.title || url,
+        mime: "text/plain",
+        text: gDoc.text,
+        originalBase64: "",
+        images: [],
+      }) : null;
+      return NextResponse.json({ title: gDoc.title, text: gDoc.text, googleExport: true, assetId: asset?.id });
+    }
+    if (controller.signal.aborted) throw abortError(controller.signal);
+
+    log("browser:launch");
     const { chromium } = await import("playwright");
     const browser = await chromium.launch({ headless: true });
+    const closeOnAbort = () => { void browser.close().catch(() => {}); };
+    controller.signal.addEventListener("abort", closeOnAbort, { once: true });
     try {
+      if (controller.signal.aborted) throw abortError(controller.signal);
       const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1.5 });
+      page.setDefaultTimeout(8_000);
+      page.setDefaultNavigationTimeout(20_000);
       if (guardOn) {
         await page.route("**/*", async (route) => {
           try {
@@ -47,33 +84,78 @@ export async function POST(req: Request) {
           return route.continue();
         });
       }
-      await page.goto(url, { waitUntil: "networkidle", timeout: 25000 }).catch(async () => {
-        // networkidle 有些站永遠等不到，退而求其次等 DOM 載完
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
-      });
-      await page.waitForTimeout(1200); // 給前端渲染一點時間
+
+      // 先等 DOM 可用就抽內容。舊版先等 networkidle 25 秒，失敗後又重開整頁等 15 秒，
+      // 遇到追蹤碼或長連線永不安靜的網站時，看起來就像無限卡住。
+      log("browser:navigate");
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20_000 });
+      await page.waitForLoadState("networkidle", { timeout: 4_000 }).catch(() => {});
+      await page.waitForTimeout(600);
+      if (controller.signal.aborted) throw abortError(controller.signal);
+
+      log("browser:extract");
       const title = await page.title().catch(() => "");
-      // 抽可見文字(去掉 script/style)，截斷避免太長
-      const text = await page.evaluate(() => {
+      const pageData = await page.evaluate(() => {
         const b = document.body;
-        return b ? (b.innerText || "").replace(/\n{3,}/g, "\n\n").slice(0, 8000) : "";
-      }).catch(() => "");
-      // 整頁截圖(有上限，太長的頁面只截前面一大段)
-      const shot = await page.screenshot({ type: "png", fullPage: true }).catch(() => page.screenshot({ type: "png" }));
-      // 是 Google 文件卻走到這裡 = 匯出讀不到(多半是沒開「知道連結的人可檢視」)——老實講明只看得到畫面，
-      // 讓 AI 不會假裝讀到了真值，也提示使用者把共用權限打開就能真正讀取。
+        const rawText = b ? (b.innerText || "") : "";
+        return {
+          // 在頁面端先設硬上限，避免把虛擬列表的幾 MB 文字搬回 Node；Node 端再做保留頭尾的精簡。
+          text: rawText.length > 40_000 ? `${rawText.slice(0, 25_000)}\n${rawText.slice(-15_000)}` : rawText,
+          height: Math.max(document.documentElement.scrollHeight, b?.scrollHeight ?? 0, 900),
+          hasPasswordField: Boolean(document.querySelector('input[type="password"]')),
+        };
+      }).catch(() => ({ text: "", height: 900, hasPasswordField: false }));
+
+      // 不截無限長整頁：虛擬列表/動態頁面的 fullPage 截圖可能耗掉數十秒和大量記憶體。
+      // 前 5000px 供視覺模型理解版面，文字則另外抽取。
+      log("browser:screenshot");
+      const shot = await page.screenshot({
+        type: "png",
+        clip: { x: 0, y: 0, width: 1280, height: Math.min(pageData.height, 5_000) },
+        timeout: 8_000,
+      }).catch(() => page.screenshot({ type: "png", timeout: 4_000 }));
+
       const gNote = parseGoogleDocUrl(url)
         ? `⚠️ 這是 Google 文件，但它沒有開放「知道連結的人可檢視」，我沒辦法讀到真正的儲存格內容，只能從下面這張截圖看到畫面(可能看不清楚)。請把共用權限改成「知道連結的人可檢視」，我就能直接讀到每一格的真實數值。\n\n`
         : "";
+      const visibleText = compactVisibleWebText(pageData.text);
+      const authNote = looksLikeLoginPage({ url: page.url(), title, text: visibleText, hasPasswordField: pageData.hasPasswordField })
+        ? "⚠️ 目前只打開到登入／驗證畫面，還沒有看到登入後的目標資料。以下內容不能算完成驗證；建立流程時需要登入方式，測試時若缺帳密要停下來請使用者提供。\n\n"
+        : "";
+      log("complete");
+      const text = `${gNote}${authNote}【網頁「${title || url}」的內容】\n${visibleText}`;
+      const image = Buffer.from(shot).toString("base64");
+      const imageName = `網頁截圖:${title || url}`;
+      const asset = workflowId ? saveChatAttachment({
+        workflowId,
+        source: "url",
+        filename: title || url,
+        mime: "text/html",
+        text,
+        originalBase64: "",
+        images: [{ b64: image, name: imageName, mime: "image/png" }],
+      }) : null;
       return NextResponse.json({
         title,
-        text: `${gNote}【網頁「${title || url}」的內容】\n${text}`,
-        image: Buffer.from(shot).toString("base64"),
+        text,
+        image,
+        assetId: asset?.id,
       });
     } finally {
+      controller.signal.removeEventListener("abort", closeOnAbort);
       await browser.close().catch(() => {});
     }
   } catch (err) {
-    return NextResponse.json({ error: `打不開這個網址：${err instanceof Error ? err.message.slice(0, 200) : "未知錯誤"}` }, { status: 502 });
+    const message = err instanceof Error ? err.message.slice(0, 200) : "未知錯誤";
+    const timedOut = controller.signal.aborted && Date.now() - startedAt >= URL_READ_TIMEOUT_MS - 250;
+    log(timedOut ? "timeout" : controller.signal.aborted ? "cancelled" : "failed");
+    return NextResponse.json(
+      { error: timedOut ? "這個網站 50 秒內沒有讀完，已自動停止；可能需要登入、網站阻擋自動讀取，或網站本身回應太慢。" : `打不開這個網址：${message}` },
+      { status: timedOut ? 504 : controller.signal.aborted ? 499 : 502 },
+    );
+  } finally {
+    clearTimeout(timeout);
+    req.signal.removeEventListener("abort", cancelFromClient);
+    log("request:finish");
   }
 }

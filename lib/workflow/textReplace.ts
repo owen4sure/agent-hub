@@ -45,6 +45,31 @@ export function parseReplacePairs(text: string): { pairs: ReplacePair[]; remaind
     pairs.push({ from: m[1], to: m[2] });
     remainder = remainder.replace(m[0], "");
   }
+  // 非工程使用者更自然的說法是列兩份平行清單：
+  // 「現在填『A』和『B』，我要改成填『C』和『B』」。逐位置比對後只替換真的不同的 A→C；
+  // B→B 不回報假修改。要求引號、清單長度相同且明講「現在/原本…我要改成」，避免猜配對。
+  if (pairs.length === 0) {
+    const marker = text.match(/我要(?:改成|改為)(?:填(?:入)?|寫入)/);
+    if (marker?.index !== undefined) {
+      const before = text.slice(0, marker.index);
+      const afterStart = marker.index + marker[0].length;
+      const after = text.slice(afterStart).split(/[。\n]/, 1)[0] ?? "";
+      if (/(?:現在|目前|原本)[\s\S]{0,120}(?:填|寫入)/.test(before)) {
+        const quoted = (value: string) => [...value.matchAll(/[『「"']([^』」"']{2,80})[』」"']/g)].map((m) => m[1]);
+        const targets = quoted(after);
+        const allSources = quoted(before);
+        const sources = targets.length > 0 ? allSources.slice(-targets.length) : [];
+        if (sources.length === targets.length) {
+          for (let i = 0; i < sources.length; i++) {
+            if (sources[i] !== targets[i]) pairs.push({ from: sources[i], to: targets[i] });
+          }
+          if (pairs.length > 0) remainder = (text.slice(0, Math.max(0, before.search(/(?:現在|目前|原本)/))) + text.slice(afterStart + after.length))
+            .replace(/^[\s，,、。;；]+|[\s，,、。;；]+$/g, "")
+            .trim();
+        }
+      }
+    }
+  }
   if (pairs.length === 0) return { pairs, remainder: text };
   // 把替換片段挖掉後，清掉殘留的引導詞/連接詞/標點——剩下的才是真的還需要模型處理的內容
   remainder = remainder
@@ -82,6 +107,32 @@ function replaceInConfig(cfg: Record<string, unknown>, pairs: ReplacePair[]): { 
 }
 
 /**
+ * 目的地完整名稱常比節點標籤長：設定是「每週業績折線圖_月報週會」，標籤只寫「讀月報週會週期欄」。
+ * 只有該節點 config 真的含完整舊目的地時，才把共同前綴分隔符後的語意尾碼同步到 label；
+ * 其他仍連到「月報彙整表」的節點不會被連坐改名。
+ */
+export function syncLabelForDestinationChange(label: string, config: Record<string, unknown>, pairs: ReplacePair[]): { label: string; count: number } {
+  const configText = JSON.stringify(config);
+  let next = label;
+  let count = 0;
+  for (const pair of pairs) {
+    if (!configText.includes(pair.from)) continue;
+    let common = 0;
+    while (common < pair.from.length && common < pair.to.length && pair.from[common] === pair.to[common]) common++;
+    const prefix = pair.from.slice(0, common);
+    const separator = Math.max(prefix.lastIndexOf("_"), prefix.lastIndexOf("/"), prefix.lastIndexOf("／"), prefix.lastIndexOf("-"));
+    if (separator < 0) continue;
+    const oldTail = pair.from.slice(separator + 1);
+    const newTail = pair.to.slice(separator + 1);
+    if (oldTail.length < 2 || newTail.length < 2 || !next.includes(oldTail)) continue;
+    const replaced = replaceAll(next, oldTail, newTail);
+    next = replaced.out;
+    count += replaced.count;
+  }
+  return { label: next, count };
+}
+
+/**
  * 對整張 workflow(名稱/節點名稱/所有設定字串/程式碼/repeat-steps 內嵌步驟/觸發參數)做替換並存檔。
  * 存檔前自動備份(可從「🕓 版本」一鍵還原)。以磁碟最新版為底(AGENTS 存檔鐵則2)。
  */
@@ -106,6 +157,9 @@ export function applyTextReplace(workflowId: string, pairs: ReplacePair[]): Omit
     const { cfg, count } = replaceInConfig(n.config ?? {}, pairs);
     nodeCount += count;
     let config = cfg;
+    const syncedLabel = syncLabelForDestinationChange(label, n.config ?? {}, pairs);
+    label = syncedLabel.label;
+    nodeCount += syncedLabel.count;
     // repeat-steps 的 steps 是一包 JSON 字串——必須「解析後對內部字串值替換、再序列化」，
     // 不能直接對 JSON 原文做字串替換(替換字若含引號/反斜線會把 JSON 弄壞)
     if (n.type === "repeat-steps" && typeof config.steps === "string") {

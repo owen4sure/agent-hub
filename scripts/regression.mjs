@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { request as httpRequest } from "node:http";
 /**
  * 複雜需求回歸庫(GPT 體檢 #8):代表性白話需求,每個都真的讓 AI 建圖,
  * 驗「有沒有建出該有的結構」(節點型別/分支 port/觸發設定/需求核對清單全 ✅)。
@@ -17,7 +18,7 @@ const CASES = [
   { name: "網頁抓取→備援網站→報表", need: "抓 A 網站的內容做成摘要存檔;A 網站抓不到的時候改抓 B 網站當備援。細節用合理預設。", expect: ["web-page", "write-file"], ports: ["error"] },
   { name: "資料夾監聽→摘要", need: "把文件丟進 ~/Documents/收件匣 這個資料夾就自動抽出文字,AI 摘要三個重點存檔並通知我。", expect: ["read-file", "llm-decide", "write-file"] },
   { name: "多路 switch", need: "收到的訊息(欄位 text)用 AI 分成 詢價/客訴/閒聊 三類,詢價通知業務、客訴通知客服、閒聊存檔就好。細節用合理預設。", expect: ["switch"], minPorts: 3 },
-  { name: "排程＋期間選擇", need: "每季抓上一季的資料表做彙總報告,我有時候要回頭抓以前某一季的。細節用合理預設。", expectAny: ["excel-process", "google-sheet-read", "web-page"], triggerParam: "periodUnit" },
+  { name: "排程＋期間選擇", need: "每季抓上一季的資料表做彙總報告,我有時候要回頭抓以前某一季的。細節用合理預設。", expectAny: ["excel-process", "google-sheet-read", "web-page", "read-file"], triggerParam: "periodUnit", periodFlow: true },
   { name: "失敗後執行備援流程", need: "這條流程每天抓資料,如果整條失敗,自動執行我另一條叫「告警通知」的流程。細節用合理預設。", onFailure: true },
   { name: "門檻簽核", need: "收到支出(欄位 item/amount),金額超過 3000 要先等我核准才登記,沒超過直接登記。細節用合理預設。", expect: ["if-condition", "wait-approval"], ports: ["approved", "true", "false"] },
   { name: "RSS→AI→Telegram", need: "每天讀我訂的 RSS,挑三則重點翻成繁中推到 telegram。細節用合理預設。", expect: ["rss-read", "llm-decide", "telegram-notify"] },
@@ -36,20 +37,37 @@ const CASES = [
   { name: "LINE訊息觸發建任務", need: "我傳 LINE 訊息給官方帳號,內容就變成一筆任務存檔。細節用合理預設。", expectAny: ["write-file", "custom-code"], triggerConfig: "lineWatch" },
 ];
 
-const api = async (m, p, b, timeout = 600000) => {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeout);
-  try {
-    const res = await fetch(BASE + p, {
-      method: m,
-      headers: b ? { "Content-Type": "application/json" } : undefined,
-      body: b ? JSON.stringify(b) : undefined,
-      signal: ctrl.signal,
+// Node 內建 fetch/Undici 另有約 5 分鐘的 headers timeout；就算 AbortController
+// 設 10 分鐘，它仍會先把正在做第二輪修正的 builder 切斷。回歸庫要真的能等滿宣告的
+// 預算，改用本機 HTTP request 並明確控制 socket timeout。
+const api = async (m, p, b, timeout = 600000) => new Promise((resolve, reject) => {
+  const payload = b ? JSON.stringify(b) : "";
+  const req = httpRequest(BASE + p, {
+    method: m,
+    headers: payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : undefined,
+  }, (res) => {
+    const chunks = [];
+    let size = 0;
+    res.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > 5 * 1024 * 1024) {
+        req.destroy(new Error("回歸 API 回應超過 5MB"));
+        return;
+      }
+      chunks.push(chunk);
     });
-    const txt = await res.text();
-    return { status: res.status, data: txt ? JSON.parse(txt) : {} };
-  } finally { clearTimeout(t); }
-};
+    res.on("end", () => {
+      try {
+        const txt = Buffer.concat(chunks).toString("utf8");
+        resolve({ status: res.statusCode ?? 0, data: txt ? JSON.parse(txt) : {} });
+      } catch (error) { reject(error); }
+    });
+  });
+  req.setTimeout(timeout, () => req.destroy(new Error(`API ${m} ${p} 超過 ${timeout}ms`)));
+  req.on("error", reject);
+  if (payload) req.write(payload);
+  req.end();
+});
 
 const from = Number(process.argv[2] ?? 1);
 const to = Number(process.argv[3] ?? CASES.length);
@@ -61,14 +79,19 @@ for (let i = from - 1; i < Math.min(to, CASES.length); i++) {
   const t0 = Date.now();
   const { data: created } = await api("POST", "/api/workflows", { name: `回歸-${i + 1}` });
   const wid = created.id;
-  let resp = await api("POST", `/api/workflows/${wid}/build`, { history: [{ role: "user", parts: [{ kind: "text", text: c.need }] }] }).then((r) => r.data);
+  try {
+  const firstResponse = await api("POST", `/api/workflows/${wid}/build`, { history: [{ role: "user", parts: [{ kind: "text", text: c.need }] }] });
+  if (firstResponse.status < 200 || firstResponse.status >= 300) throw new Error(`建圖 API ${firstResponse.status}：${firstResponse.data?.error ?? "未知錯誤"}`);
+  let resp = firstResponse.data;
   let rounds = 0;
   const history = [{ role: "user", parts: [{ kind: "text", text: c.need }] }];
   while (resp.phase === "clarify" && rounds < 2) {
     rounds++;
     history.push({ role: "assistant", parts: [{ kind: "text", text: resp.message ?? "" }] });
     history.push({ role: "user", parts: [{ kind: "text", text: "都用合理預設,直接建圖,不用再問。" }] });
-    resp = await api("POST", `/api/workflows/${wid}/build`, { history }).then((r) => r.data);
+    const followupResponse = await api("POST", `/api/workflows/${wid}/build`, { history });
+    if (followupResponse.status < 200 || followupResponse.status >= 300) throw new Error(`建圖 API ${followupResponse.status}：${followupResponse.data?.error ?? "未知錯誤"}`);
+    resp = followupResponse.data;
   }
   const problems = [];
   if (resp.phase !== "ready") problems.push(`沒出圖(phase=${resp.phase}):${String(resp.message ?? "").slice(0, 120)}`);
@@ -80,20 +103,49 @@ for (let i = from - 1; i < Math.min(to, CASES.length); i++) {
     for (const p of c.ports ?? []) if (!ports.includes(p)) problems.push(`缺分支 port ${p}`);
     if (c.minPorts && new Set(ports).size < c.minPorts) problems.push(`分支 port 少於 ${c.minPorts}`);
     if (c.triggerParam && !(resp.triggerParams ?? []).some((p) => p.key === c.triggerParam)) problems.push(`缺觸發參數 ${c.triggerParam}`);
+    if (c.periodFlow) {
+      const derived = (resp.triggerParams ?? []).filter((p) => p.derived && /\{\{\s*period\./.test(String(p.default ?? "")));
+      const configs = JSON.stringify(resp.nodes.map((n) => n.config ?? {}));
+      if (!derived.some((p) => configs.includes(`{{${p.key}}}`))) problems.push("期間選單沒有真的接到任何處理步驟");
+      if (/\{\{\s*period\./.test(configs)) problems.push("節點直接引用 period.*，執行期不會解析");
+    }
     if (c.triggerParamCount && (resp.triggerParams ?? []).filter((p) => !p.derived).length < c.triggerParamCount) problems.push(`觸發參數少於 ${c.triggerParamCount}`);
     if (c.onFailure && !resp.onFailureWorkflow) problems.push("沒帶 onFailureWorkflow");
     if (c.triggerConfig) {
       const trigger = resp.nodes.find((n) => n.type === "trigger");
       if (trigger?.config?.[c.triggerConfig] !== "on") problems.push(`trigger config.${c.triggerConfig} 沒設 on`);
     }
-    if (/⚠️/.test(String(resp.message)) && String(resp.message).includes("需求核對")) problems.push("需求核對清單有 ⚠️ 未達項");
+    const requirementSection = String(resp.message ?? "").match(/需求核對:\s*([\s\S]*?)(?=\n\n|$)/)?.[1] ?? "";
+    if (/⚠️/.test(requirementSection)) problems.push("需求核對清單有 ⚠️ 未達項");
+    if (/⚠️ 提醒：/.test(String(resp.message ?? ""))) problems.push("仍有未解析的變數引用警告");
   }
   const secs = Math.round((Date.now() - t0) / 1000);
   if (problems.length === 0) { pass++; console.log(`✅ ${i + 1}. ${c.name} (${secs}s)`); }
-  else { fail++; failures.push([c.name, problems]); console.log(`❌ ${i + 1}. ${c.name} (${secs}s) — ${problems.join(";")}`); }
-  await api("DELETE", `/api/workflows/${wid}`);
+  else {
+    fail++;
+    const evidence = {
+      phase: resp.phase,
+      message: String(resp.message ?? "").slice(0, 1600),
+      nodeTypes: Array.isArray(resp.nodes) ? resp.nodes.map((n) => n.type) : [],
+      ports: Array.isArray(resp.edges) ? resp.edges.map((e) => e.fromPort).filter(Boolean) : [],
+      triggerConfig: Array.isArray(resp.nodes) ? resp.nodes.find((n) => n.type === "trigger")?.config ?? {} : {},
+      onFailureWorkflow: resp.onFailureWorkflow ?? null,
+    };
+    failures.push([c.name, problems, evidence]);
+    console.log(`❌ ${i + 1}. ${c.name} (${secs}s) — ${problems.join(";")}\n   evidence=${JSON.stringify(evidence)}`);
+  }
+  } catch (error) {
+    fail++;
+    const message = error instanceof Error ? error.message : String(error);
+    failures.push([c.name, [`測試請求失敗:${message}`], { phase: "request-error" }]);
+    console.log(`❌ ${i + 1}. ${c.name} — 測試請求失敗:${message}`);
+  } finally {
+    await api("DELETE", `/api/workflows/${wid}`).catch((error) => {
+      console.error(`⚠️ 無法清理測試流程 ${wid}:`, error instanceof Error ? error.message : String(error));
+    });
+  }
 }
 
 console.log(`\n==== ${pass}/${pass + fail} PASS ====`);
-for (const [n, ps] of failures) console.log(`  ✗ ${n}: ${ps.join(";")}`);
+for (const [n, ps, evidence] of failures) console.log(`  ✗ ${n}: ${ps.join(";")}\n    ${JSON.stringify(evidence)}`);
 process.exit(fail ? 1 : 0);

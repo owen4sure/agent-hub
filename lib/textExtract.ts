@@ -3,6 +3,7 @@ import pdfParse from "pdf-parse";
 import ExcelJS from "exceljs";
 import * as XLSX from "xlsx";
 import WordExtractor from "word-extractor";
+import { simpleParser } from "mailparser";
 
 /**
  * 把 RTF 轉成純文字。RTF 是控制字(\word)+群組({...})構成的格式，
@@ -145,7 +146,9 @@ export function docxToText(buffer: Buffer): string {
   const zip = new AdmZip(buffer);
   const entry = zip.getEntry("word/document.xml");
   if (!entry) throw new Error("這個檔案不是有效的 .docx(找不到 word/document.xml)");
+  if ((Number(entry.header.size) || 0) > 20 * 1024 * 1024) throw new Error("這份 Word 文件解壓後內容過大，為避免耗盡記憶體已停止解析");
   const xml = entry.getData().toString("utf8");
+  if (Buffer.byteLength(xml) > 20 * 1024 * 1024) throw new Error("這份 Word 文件解壓後內容過大，為避免耗盡記憶體已停止解析");
   // <w:p> 是段落、<w:tab/> 是 tab、<w:br/> 是換行；先把這些換成對應的純文字符號，再把其餘標籤全部拿掉
   let text = xml
     .replace(/<w:p\b[^>]*>/g, "\n")
@@ -169,6 +172,8 @@ const MAX_COLS_PER_SHEET = 200;
 // 備援又慢,建一次圖拖好幾分鐘。所以:欄位對照完整留,資料列壓少,總量控制在能快速送進模型的範圍。
 const MAX_CELLS_PER_SHEET = 1200;
 const MAX_TOTAL_CHARS = 45_000;
+const MAX_ZIP_ENTRY_BYTES = 5 * 1024 * 1024;
+const MAX_ZIP_TOTAL_BYTES = 20 * 1024 * 1024;
 /** 依實際欄數動態算「要顯示幾列」:欄愈多、列愈少(結構靠欄位對照,資料列只要幾筆看出型態),至少留 6 列 */
 function rowLimitForWidth(rowCount: number, colLimit: number): number {
   const byCells = Math.max(6, Math.floor(MAX_CELLS_PER_SHEET / Math.max(1, colLimit)));
@@ -176,17 +181,14 @@ function rowLimitForWidth(rowCount: number, colLimit: number): number {
 }
 /** 把各分頁的文字段落組起來,超過總上限就截斷並註明——避免抽出的文字爆 token */
 function joinSectionsWithinBudget(sections: string[]): string {
-  const out: string[] = [];
-  let used = 0;
-  for (let i = 0; i < sections.length; i++) {
-    if (used + sections[i].length > MAX_TOTAL_CHARS) {
-      out.push(`…(檔案內容較大,其餘 ${sections.length - i} 個分頁略過。若需要看某個特定分頁,請告訴我分頁名)`);
-      break;
-    }
-    out.push(sections[i]);
-    used += sections[i].length + 2;
-  }
-  return out.join("\n\n").trim();
+  if (sections.length === 0) return "";
+  const joined = sections.join("\n\n");
+  if (joined.length <= MAX_TOTAL_CHARS) return joined.trim();
+  // 不能讓第一個超大分頁吃掉全部預算，也不能因為它一頁就超額而整頁消失。
+  // 把額度公平分給每一頁，每頁各保留頭尾；這樣最後一頁的規則與每個 sheet 名都還看得到。
+  const separators = Math.max(0, sections.length - 1) * 2;
+  const perSection = Math.max(350, Math.floor((MAX_TOTAL_CHARS - separators) / sections.length));
+  return sections.map((section) => excerptLongText(section, perSection)).join("\n\n").slice(0, MAX_TOTAL_CHARS).trim();
 }
 
 /** 把一個儲存格的值轉成純文字(處理日期/公式結果/超連結/錯誤/富文字等 ExcelJS 的各種物件形態) */
@@ -280,7 +282,7 @@ function sheetStyleSummary(sheet: ExcelJS.Worksheet): string {
   return parts.length ? `【分頁「${sheet.name}」的版型格式(要做出一樣的版型時照這個重現)】\n${parts.join("\n")}` : "";
 }
 
-/** 欄位對照:給 AI 一份「欄位代號 → 這欄的標題/分類」清單,讓它能精準指名某一欄(例如 BZ=每日新增/行銷專案),
+/** 欄位對照:給 AI 一份「欄位代號 → 這欄的標題/分類」清單,讓它能精準指名某一欄(例如 C=每日新增筆數/類別A),
  *  而不是去數一整列裡第幾個 tab——當同一個欄名重複出現(累積版 vs 當日新增版)時,靠上方的分類區分是能不能讀對的關鍵。
  *  標題不一定在第 1 列,所以取前幾列的「文字型」值合併當這一欄的說明(純數字/日期是資料,不算標題)。 */
 function columnMap(sheet: ExcelJS.Worksheet, colLimit: number): string {
@@ -336,18 +338,25 @@ export function pptxToText(buffer: Buffer): string {
       const na = Number(a.entryName.match(/slide(\d+)\.xml$/)?.[1] ?? 0);
       const nb = Number(b.entryName.match(/slide(\d+)\.xml$/)?.[1] ?? 0);
       return na - nb;
-    });
+    })
+    .slice(0, 100);
   if (slides.length === 0) throw new Error("這個檔案不是有效的 .pptx(找不到任何投影片)");
   const sections: string[] = [];
-  slides.forEach((entry, idx) => {
+  let expandedBytes = 0;
+  for (const [idx, entry] of slides.entries()) {
+    const declaredSize = Number(entry.header.size) || 0;
+    if (declaredSize > 5 * 1024 * 1024 || expandedBytes + declaredSize > 20 * 1024 * 1024) continue;
     const xml = entry.getData().toString("utf8");
+    const actualSize = Buffer.byteLength(xml);
+    if (actualSize > 5 * 1024 * 1024 || expandedBytes + actualSize > 20 * 1024 * 1024) continue;
+    expandedBytes += actualSize;
     // 投影片上的文字都在 <a:t>...</a:t> 裡；把每一段抓出來，還原 XML 跳脫字元
     const texts = Array.from(xml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)).map((m) =>
       m[1].replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'"),
     );
     const body = texts.join("\n").trim();
     if (body) sections.push(`【第 ${idx + 1} 張投影片】\n${body}`);
-  });
+  }
   return joinSectionsWithinBudget(sections);
 }
 
@@ -385,34 +394,107 @@ export async function docToText(buffer: Buffer): Promise<string> {
 export interface ExtractResult { text: string }
 export interface ExtractError { error: string }
 
+const MAX_GENERIC_TEXT_CHARS = 45_000;
+
+/** 長文字不能只留開頭：規則、輸出格式與例外處理很常寫在檔尾。 */
+function excerptLongText(text: string, maxChars = MAX_GENERIC_TEXT_CHARS): string {
+  if (text.length <= maxChars) return text;
+  const marker = "\n\n…(中間內容較長，已略過；保留檔案開頭與結尾)…\n\n";
+  const usable = Math.max(0, maxChars - marker.length);
+  const headChars = Math.ceil(usable * 0.65);
+  return text.slice(0, headChars) + marker + text.slice(-(usable - headChars));
+}
+
+/** 用內容判斷是不是文字檔，不靠副檔名白名單；這樣程式碼、YAML、SQL、日誌都讀得到。 */
+function decodeTextLike(buffer: Buffer): string | null {
+  if (buffer.length === 0) return "(空檔案)";
+  // Windows/Excel 匯出的「Unicode 文字」很常是 UTF-16；若先做 NUL 比例判斷會被誤認成二進位檔。
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return excerptLongText(new TextDecoder("utf-16le", { fatal: false }).decode(buffer.subarray(2)));
+  }
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    return excerptLongText(new TextDecoder("utf-16be", { fatal: false }).decode(buffer.subarray(2)));
+  }
+  const sample = buffer.subarray(0, Math.min(buffer.length, 16_384));
+  let nul = 0;
+  let control = 0;
+  for (const byte of sample) {
+    if (byte === 0) nul++;
+    else if (byte < 9 || (byte > 13 && byte < 32)) control++;
+  }
+  if (nul / sample.length > 0.01 || control / sample.length > 0.08) return null;
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(buffer);
+  return excerptLongText(text);
+}
+
+/** 壓縮檔不只列檔名：把裡面可讀的文字/程式碼一併展開，AI 才看得懂專案或資料包的邏輯。 */
+function zipToText(buffer: Buffer): string {
+  const zip = new AdmZip(buffer);
+  const entries = zip.getEntries().filter((e) => !e.isDirectory).slice(0, 40);
+  const sections: string[] = [];
+  let used = 0;
+  let expandedBytes = 0;
+  for (const entry of entries) {
+    const declaredSize = Number(entry.header.size) || 0;
+    if (declaredSize > MAX_ZIP_ENTRY_BYTES || expandedBytes + declaredSize > MAX_ZIP_TOTAL_BYTES) continue;
+    const data = entry.getData();
+    if (data.length > MAX_ZIP_ENTRY_BYTES || expandedBytes + data.length > MAX_ZIP_TOTAL_BYTES) continue;
+    expandedBytes += data.length;
+    const text = decodeTextLike(data);
+    if (text === null) continue;
+    // 單一大檔不能吃完整份 ZIP 預算，否則第一個檔案超長時會導致「一個內檔都沒讀到」。
+    const header = `【壓縮檔內：${entry.entryName}】\n`;
+    const remaining = MAX_GENERIC_TEXT_CHARS - used - header.length;
+    if (remaining < 300) break;
+    const section = header + excerptLongText(text, Math.min(12_000, remaining));
+    sections.push(section);
+    used += section.length + 2;
+  }
+  const listing = entries.map((e) => e.entryName).join("\n");
+  return `${sections.length ? sections.join("\n\n") : "(沒有可直接讀成文字的內部檔案)"}\n\n【壓縮檔內檔案清單】\n${listing}`.slice(0, MAX_GENERIC_TEXT_CHARS);
+}
+
 /** 依副檔名分派到對應的抽取方式；抓不到內容或格式不支援就回錯誤說明(不是靜默回空字串) */
 export async function extractTextFromFile(filename: string, buffer: Buffer): Promise<ExtractResult | ExtractError> {
   const ext = (filename.match(/\.([a-zA-Z0-9]+)$/)?.[1] ?? "").toLowerCase();
+  const bounded = (text: string): ExtractResult => ({ text: excerptLongText(text) });
   try {
     if (ext === "pdf") {
       const result = await pdfParse(buffer);
-      return { text: result.text };
+      const pageNote = result.numpages > 4
+        ? `【PDF 共 ${result.numpages} 頁；可搜尋文字已讀取全部頁面，視覺畫面附上前 2 頁與最後 2 頁。若這是沒有文字層的掃描檔，中間頁面目前無法可靠辨識，不可假裝已看完。】\n\n`
+        : `【PDF 共 ${result.numpages} 頁】\n\n`;
+      return bounded(pageNote + (result.text.trim() || "(這份 PDF 沒有可搜尋的文字，請以附上的頁面圖片判讀。)"));
     }
     if (ext === "docx") {
-      return { text: docxToText(buffer) };
+      return bounded(docxToText(buffer));
     }
     if (ext === "rtf") {
-      return { text: rtfToText(buffer.toString("utf8")) };
+      return bounded(rtfToText(buffer.toString("utf8")));
     }
     if (ext === "xlsx" || ext === "xlsm") {
-      return { text: await xlsxToText(buffer) };
+      return bounded(await xlsxToText(buffer));
     }
     if (ext === "pptx") {
-      return { text: pptxToText(buffer) };
+      return bounded(pptxToText(buffer));
     }
     // 舊版 Office 二進位格式：直接讀出來，不用逼使用者先另存新檔
     if (ext === "xls") {
-      return { text: xlsToText(buffer) };
+      return bounded(xlsToText(buffer));
     }
     if (ext === "doc") {
-      return { text: await docToText(buffer) };
+      return bounded(await docToText(buffer));
     }
-    return { error: `不支援直接讀取 .${ext || "?"} 格式` };
+    if (ext === "eml") {
+      const mail = await simpleParser(buffer);
+      const attachments = (mail.attachments ?? []).map((a) => a.filename || "(未命名附件)").join("、");
+      const recipients = Array.isArray(mail.to) ? mail.to.map((v) => v.text).join("、") : mail.to?.text ?? "";
+      return bounded(`主旨：${mail.subject ?? ""}\n寄件人：${mail.from?.text ?? ""}\n收件人：${recipients}\n日期：${mail.date?.toISOString() ?? ""}\n附件：${attachments || "無"}\n\n${mail.text ?? ""}`);
+    }
+    if (ext === "zip") return bounded(zipToText(buffer));
+    const genericText = decodeTextLike(buffer);
+    if (genericText !== null) return { text: genericText };
+    return { error: `這是無法可靠轉成文字的 .${ext || "?"} 二進位檔；可以把它當流程輸入，但不會假裝看懂裡面的邏輯` };
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
   }

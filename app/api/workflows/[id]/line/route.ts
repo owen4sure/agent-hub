@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getWorkflow, saveWorkflow, isValidWorkflowId } from "@/lib/workflow/store";
-import { getLineToken, rotateLineToken, disableLineToken } from "@/lib/lineHook";
+import { getLineToken, rotateLineToken, disableLineToken, restoreLineToken } from "@/lib/lineHook";
 import { getSharedSecrets } from "@/lib/settingsStore";
 import { autorunActive } from "@/lib/workflow/busyLocks";
 
@@ -45,6 +45,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   if (!wf.nodes.some((n) => n.type === "trigger")) {
     return NextResponse.json({ error: "這條流程沒有「開始」節點" }, { status: 400 });
   }
+  const previousToken = getLineToken(id);
   try {
     const token = rotateLineToken(id);
     setLineWatchFlag(id, true);
@@ -54,6 +55,9 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
       hasChannelSecret: Boolean(getSharedSecrets().lineChannelSecret),
     });
   } catch (err) {
+    // DB token 與 workflow 的 lineWatch 是同一個使用者動作；存 workflow 失敗時必須把 token
+    // 精確還原，否則面板顯示「啟用」、流程圖卻仍是關閉（或舊網址無故失效）。
+    try { restoreLineToken(id, previousToken); } catch { /* 原錯誤仍要回給使用者 */ }
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 });
   }
 }
@@ -64,7 +68,13 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   if (autorunActive.has(id)) {
     return NextResponse.json({ error: "這條流程的自動測試/修復正在進行中，等它跑完再停用 LINE 觸發" }, { status: 409 });
   }
-  disableLineToken(id);
-  setLineWatchFlag(id, false);
-  return NextResponse.json({ enabled: false });
+  const previousToken = getLineToken(id);
+  try {
+    disableLineToken(id);
+    setLineWatchFlag(id, false);
+    return NextResponse.json({ enabled: false });
+  } catch (err) {
+    try { restoreLineToken(id, previousToken); } catch { /* 原錯誤仍要回給使用者 */ }
+    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 });
+  }
 }

@@ -18,6 +18,21 @@ export function isPlaceholderCode(code: unknown): boolean {
   return /^return\s*\{\s*\.\.\.\s*ctx\.input\s*,?\s*\}\s*;?$/.test(s);
 }
 
+/**
+ * AI 修改既有 custom-code 時也必須走跟第一次產碼相同的語法閘門。
+ * 過去只有 generateCustomCode 會先 new AsyncFunction；對話／自動修復直接把模型回的 code 存檔，
+ * 少一個引號或括號就會把原本能跑的節點永久改壞，直到下一次執行才發現。
+ */
+export function customCodeSyntaxError(code: unknown): string | null {
+  if (isPlaceholderCode(code)) return null;
+  try {
+    new AsyncFunction("ctx", String(code));
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
 const CODE_CONTRACT = `這段程式碼是一個 async 函式的「函式主體」(不要寫 function 宣告、不要寫 async 關鍵字)，收到一個參數 ctx：
 - ctx.input：上游節點傳來的資料物件(用展開 {...ctx.input, 新欄位} 把上游資料一起往下傳)
 - ctx.config：這個節點的設定(含 intent)
@@ -105,7 +120,7 @@ ${PARSE_RULES}
     // signal 接 ctx.cancelSignal：這個呼叫常常是整條流程裡最久的一步(第一次執行要生程式碼)，
     // 不接的話使用者按「停止執行」對這一步完全無效，得等模型呼叫自己跑完或逾時才會停下來。
     if (isClaudeCodeModel(ctx.model)) {
-      return callAIWithRetry(() => callClaudeCode({ prompt: ccPrompt, signal: ctx.cancelSignal }), { label: "產生自訂步驟程式碼(Claude Code)", signal: ctx.cancelSignal });
+      return callAIWithRetry(() => callClaudeCode({ prompt: ccPrompt, signal: ctx.cancelSignal }), { label: "產生自訂步驟程式碼(Claude Code)", signal: ctx.cancelSignal, maxAttempts: 2 });
     }
     const client = new OpenAI({ baseURL: ctx.baseUrl, apiKey: ctx.apiKey, timeout: 60_000, maxRetries: 0 });
     const fallback = (await isClaudeCodeAvailable()) ? () => callClaudeCode({ prompt: ccPrompt, signal: ctx.cancelSignal }) : undefined;

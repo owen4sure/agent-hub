@@ -1,19 +1,32 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { getDb } from "../db";
 import { DEFAULT_MODEL } from "../models";
 import { getWorkflowModel, setWorkflowModel } from "../settingsStore";
 // 注意：registry→customCode→store 形成模組循環，但 getNodeDef 只在函式執行期被呼叫(不在模組初始化期)，
 // ESM 對這種「延遲取用」的循環是安全的。不要在模組頂層直接取用 registry 的值。
 import { getNodeDef } from "./registry";
+import { separateOverlappingNodes } from "./layout";
+import { deleteChatAttachmentsForWorkflow } from "../chatAttachments";
+import { deleteWorkflowChatState } from "./chatStateStore";
 import type { Workflow } from "./types";
 
-const EXAMPLES_DIR = path.join(process.cwd(), "examples");
-const USER_DIR = path.join(process.cwd(), "data", "workflows");
+const EXAMPLES_DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), "examples");
+const USER_DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), "data", "workflows");
+const WORKFLOW_BASE = Symbol.for("agent-hub.workflow-base");
+
+type VersionedWorkflow = Workflow & { [WORKFLOW_BASE]?: Workflow };
+
+export class WorkflowConflictError extends Error {
+  constructor(message = "流程同時被另一個視窗或背景程序修改；為了不蓋掉資料，這次沒有存檔，請重試一次") {
+    super(message);
+    this.name = "WorkflowConflictError";
+  }
+}
 
 function ensureUserDir() {
-  fs.mkdirSync(USER_DIR, { recursive: true });
+  fs.mkdirSync(/* turbopackIgnore: true */ USER_DIR, { recursive: true });
 }
 
 /** workflow id 只允許安全字元，擋掉 ../ 之類的路徑穿越 */
@@ -24,23 +37,203 @@ function assertValidId(id: string) {
   if (!isValidWorkflowId(id)) throw new Error(`不合法的 workflow id：${id}`);
 }
 
-function readWorkflowFile(file: string, builtinDefault: boolean): Workflow | null {
-  if (!fs.existsSync(file)) return null;
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function cloneWorkflow(wf: Workflow): Workflow {
+  return JSON.parse(JSON.stringify(wf)) as Workflow;
+}
+
+/** 把載入當下的內容藏在 symbol（JSON 不會輸出、object spread 會保留），供 saveWorkflow 做三方合併。 */
+function attachWorkflowBase(wf: Workflow): Workflow {
+  Object.defineProperty(wf, WORKFLOW_BASE, { value: cloneWorkflow(wf), enumerable: true, configurable: false });
+  return wf;
+}
+
+function same(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function mergeRecord(base: Record<string, unknown>, desired: Record<string, unknown>, latest: Record<string, unknown>, pathLabel: string): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const key of new Set([...Object.keys(base), ...Object.keys(desired), ...Object.keys(latest)])) {
+    const value = mergeValue(base[key], desired[key], latest[key], `${pathLabel}.${key}`);
+    if (value !== undefined) result[key] = value;
+  }
+  return result;
+}
+
+function mergeNodes(baseRaw: unknown[], desiredRaw: unknown[], latestRaw: unknown[], pathLabel: string): unknown[] {
+  const idOf = (value: unknown): string | null => isPlainObject(value) && typeof value.id === "string" ? value.id : null;
+  if ([...baseRaw, ...desiredRaw, ...latestRaw].some((value) => !idOf(value))) {
+    throw new WorkflowConflictError(`流程的 ${pathLabel} 同時被兩個程序修改，且內容無法安全辨識；這次沒有覆蓋`);
+  }
+  const base = new Map(baseRaw.map((value) => [idOf(value)!, value]));
+  const desired = new Map(desiredRaw.map((value) => [idOf(value)!, value]));
+  const latest = new Map(latestRaw.map((value) => [idOf(value)!, value]));
+  const orderedIds = [...latest.keys(), ...desired.keys()].filter((id, index, all) => all.indexOf(id) === index);
+  const out: unknown[] = [];
+  for (const id of orderedIds) {
+    const b = base.get(id);
+    const d = desired.get(id);
+    const l = latest.get(id);
+    if (b === undefined) {
+      if (d !== undefined && l !== undefined && !same(d, l)) throw new WorkflowConflictError(`節點「${id}」被兩邊同時新增成不同內容；這次沒有覆蓋`);
+      if (d !== undefined || l !== undefined) out.push(d ?? l);
+      continue;
+    }
+    if (d === undefined) {
+      if (l !== undefined && !same(l, b)) throw new WorkflowConflictError(`節點「${id}」一邊被刪除、一邊又被修改；這次沒有覆蓋`);
+      continue;
+    }
+    if (l === undefined) {
+      if (!same(d, b)) throw new WorkflowConflictError(`節點「${id}」一邊被刪除、一邊又被修改；這次沒有覆蓋`);
+      continue;
+    }
+    out.push(mergeValue(b, d, l, `${pathLabel}.${id}`));
+  }
+  return out;
+}
+
+function mergeEdges(base: unknown[], desired: unknown[], latest: unknown[]): unknown[] {
+  const key = (value: unknown) => JSON.stringify(value);
+  const baseKeys = new Set(base.map(key));
+  const desiredKeys = new Set(desired.map(key));
+  const removedByDesired = new Set([...baseKeys].filter((item) => !desiredKeys.has(item)));
+  const out = latest.filter((item) => !removedByDesired.has(key(item)));
+  const outKeys = new Set(out.map(key));
+  for (const item of desired) {
+    const k = key(item);
+    if (!baseKeys.has(k) && !outKeys.has(k)) { out.push(item); outKeys.add(k); }
+  }
+  return out;
+}
+
+function mergeValue(base: unknown, desired: unknown, latest: unknown, pathLabel: string): unknown {
+  if (same(desired, base)) return latest;
+  if (same(latest, base) || same(desired, latest)) return desired;
+  if (Array.isArray(base) && Array.isArray(desired) && Array.isArray(latest)) {
+    if (pathLabel === "workflow.nodes") return mergeNodes(base, desired, latest, pathLabel);
+    if (pathLabel === "workflow.edges") return mergeEdges(base, desired, latest);
+  }
+  if (isPlainObject(base) && isPlainObject(desired) && isPlainObject(latest)) {
+    return mergeRecord(base, desired, latest, pathLabel);
+  }
+  throw new WorkflowConflictError(`流程的「${pathLabel.replace(/^workflow\./, "") || "內容"}」同時被修改；這次沒有覆蓋任何一邊`);
+}
+
+/**
+ * 兩個 Node 行程都從同一基線開始修改時做三方合併。位置與 config 可各自保留；同一欄位真的互撞才拒絕。
+ * 匯出給回歸測試，正式路徑只由 saveWorkflow 在跨進程鎖內呼叫。
+ */
+export function mergeWorkflowWithLatest(base: Workflow, desired: Workflow, latest: Workflow): Workflow {
+  return mergeValue(base, desired, latest, "workflow") as Workflow;
+}
+
+function processAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/** mkdir 是跨進程原子的；把「檢查最新版→備份→rename→同步 DB」包在同一把 workflow 鎖。 */
+function withWorkflowFileLock<T>(target: string, fn: () => T): T {
+  const lockDir = `${target}.lock`;
+  const deadline = Date.now() + 5_000;
+  while (true) {
+    try {
+      fs.mkdirSync(lockDir);
+      fs.writeFileSync(path.join(lockDir, "owner.json"), JSON.stringify({ pid: process.pid, createdAt: Date.now() }));
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        const owner = JSON.parse(fs.readFileSync(path.join(lockDir, "owner.json"), "utf8")) as { pid?: number; createdAt?: number };
+        if (!processAlive(Number(owner.pid)) || Date.now() - Number(owner.createdAt ?? 0) > 5 * 60_000) {
+          fs.rmSync(lockDir, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        try {
+          if (Date.now() - fs.statSync(lockDir).mtimeMs > 30_000) { fs.rmSync(lockDir, { recursive: true, force: true }); continue; }
+        } catch { /* 下一圈重試 */ }
+      }
+      if (Date.now() >= deadline) throw new WorkflowConflictError("另一個 Agent Hub 程序正在存這條流程；等了 5 秒仍未完成，這次沒有覆蓋，請再試一次");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+  try { return fn(); } finally { fs.rmSync(lockDir, { recursive: true, force: true }); }
+}
+
+/**
+ * JSON.parse 成功不代表內容能用。這層只驗「載入後所有頁面都可安全讀取」的結構；圖是否能執行
+ * 另外由 graphLint／引擎閘門判斷，讓有邏輯錯誤的草稿仍可打開修復，而不是整份消失。
+ */
+function isWorkflowFileShape(raw: unknown, expectedId: string): raw is Workflow {
+  if (!isPlainObject(raw) || raw.id !== expectedId || !isValidWorkflowId(expectedId)) return false;
+  if (typeof raw.name !== "string" || (raw.status !== "draft" && raw.status !== "official")) return false;
+  if (!Array.isArray(raw.nodes) || !Array.isArray(raw.edges) || raw.nodes.length > 1_000 || raw.edges.length > 5_000) return false;
+  if (!raw.nodes.every((node) =>
+    isPlainObject(node) &&
+    typeof node.id === "string" &&
+    typeof node.type === "string" &&
+    typeof node.label === "string" &&
+    isPlainObject(node.config) &&
+    isPlainObject(node.position) &&
+    typeof node.position.x === "number" && Number.isFinite(node.position.x) &&
+    typeof node.position.y === "number" && Number.isFinite(node.position.y)
+  )) return false;
+  if (!raw.edges.every((edge) =>
+    isPlainObject(edge) && typeof edge.from === "string" && typeof edge.to === "string" &&
+    (edge.fromPort === undefined || typeof edge.fromPort === "string")
+  )) return false;
+  if (raw.triggerParams !== undefined && (!Array.isArray(raw.triggerParams) || !raw.triggerParams.every((field) =>
+    isPlainObject(field) && typeof field.key === "string" && typeof field.label === "string" && typeof field.type === "string" &&
+    (field.default === undefined || typeof field.default === "string") &&
+    (field.help === undefined || typeof field.help === "string") &&
+    (field.options === undefined || (Array.isArray(field.options) && field.options.every((item) => typeof item === "string"))) &&
+    (field.derived === undefined || typeof field.derived === "boolean")
+  ))) return false;
+  if (raw.requiresSecrets !== undefined && (!Array.isArray(raw.requiresSecrets) || !raw.requiresSecrets.every((field) =>
+    isPlainObject(field) && typeof field.key === "string" && typeof field.label === "string" &&
+    (field.type === "text" || field.type === "password")
+  ))) return false;
+  if (raw.description !== undefined && typeof raw.description !== "string") return false;
+  if (raw.longDescription !== undefined && typeof raw.longDescription !== "string") return false;
+  if (raw.defaultModel !== undefined && typeof raw.defaultModel !== "string") return false;
+  if (raw.onFailureWorkflow !== undefined && typeof raw.onFailureWorkflow !== "string") return false;
+  if (raw.group !== undefined && typeof raw.group !== "string") return false;
+  return true;
+}
+
+function readWorkflowFile(scope: "example" | "user", filename: string): Workflow | null {
+  // Keep the dynamic filename visibly scoped at the filesystem call. Passing an
+  // arbitrary absolute `file` into readFileSync makes Next's NFT tracer assume
+  // this route could read the entire repository and bloats every server trace.
+  const scopedFile = scope === "user"
+    ? path.join(/*turbopackIgnore: true*/ process.cwd(), "data", "workflows", filename)
+    : path.join(/*turbopackIgnore: true*/ process.cwd(), "examples", filename);
+  if (!fs.existsSync(/* turbopackIgnore: true */ scopedFile)) return null;
   // 單一檔案壞掉(手動編輯打錯字、或極端情況下寫到一半斷電)不能讓整個列表頁連鎖炸掉——
   // parse 失敗就當這個檔不存在，其他 workflow 照常運作，使用者還能從版本備份還原這一個。
-  let raw: Partial<Workflow>;
+  let parsed: unknown;
   try {
-    raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Partial<Workflow>;
+    parsed = JSON.parse(fs.readFileSync(/* turbopackIgnore: true */ scopedFile, "utf-8"));
   } catch {
-    console.error(`workflow 檔案損毀，已跳過：${file}(可到該流程的版本紀錄還原)`);
+    console.error(`workflow 檔案損毀，已跳過：${scopedFile}(可到該流程的版本紀錄還原)`);
     return null;
   }
-  if (!raw.id) return null;
-  return {
+  const expectedId = path.basename(filename, ".json");
+  if (!isWorkflowFileShape(parsed, expectedId)) {
+    console.error(`workflow 檔案結構不完整或 id 與檔名不一致，已跳過：${scopedFile}(可從版本紀錄還原)`);
+    return null;
+  }
+  const raw = parsed;
+  return attachWorkflowBase({
     id: raw.id,
-    name: raw.name ?? raw.id,
-    status: raw.status ?? (builtinDefault ? "official" : "draft"),
-    builtin: raw.builtin ?? builtinDefault,
+    name: raw.name,
+    status: raw.status,
+    builtin: raw.builtin ?? (scope === "example"),
     description: raw.description ?? "",
     longDescription: raw.longDescription,
     defaultModel: raw.defaultModel ?? DEFAULT_MODEL,
@@ -48,40 +241,62 @@ function readWorkflowFile(file: string, builtinDefault: boolean): Workflow | nul
     triggerParams: raw.triggerParams ?? [],
     onFailureWorkflow: raw.onFailureWorkflow,
     group: raw.group,
+    importedUntrusted: raw.importedUntrusted === true,
     nodes: raw.nodes ?? [],
     edges: raw.edges ?? [],
-  };
+  });
 }
 
 function workflowPath(id: string): { file: string; builtin: boolean } {
   assertValidId(id);
-  const userFile = path.join(USER_DIR, `${id}.json`);
-  if (fs.existsSync(userFile)) return { file: userFile, builtin: false };
-  return { file: path.join(EXAMPLES_DIR, `${id}.json`), builtin: true };
+  const userFile = path.join(/*turbopackIgnore: true*/ USER_DIR, `${id}.json`);
+  if (fs.existsSync(/* turbopackIgnore: true */ userFile)) return { file: userFile, builtin: false };
+  return { file: path.join(/*turbopackIgnore: true*/ EXAMPLES_DIR, `${id}.json`), builtin: true };
 }
 
 export function listWorkflows(): Workflow[] {
   const map = new Map<string, Workflow>();
-  if (fs.existsSync(EXAMPLES_DIR)) {
-    for (const f of fs.readdirSync(EXAMPLES_DIR)) {
+  if (fs.existsSync(/* turbopackIgnore: true */ EXAMPLES_DIR)) {
+    for (const f of fs.readdirSync(/* turbopackIgnore: true */ EXAMPLES_DIR)) {
       if (!f.endsWith(".json")) continue;
-      const wf = readWorkflowFile(path.join(EXAMPLES_DIR, f), true);
+      const wf = readWorkflowFile("example", f);
       if (wf) map.set(wf.id, wf);
     }
   }
-  if (fs.existsSync(USER_DIR)) {
-    for (const f of fs.readdirSync(USER_DIR)) {
+  if (fs.existsSync(/* turbopackIgnore: true */ USER_DIR)) {
+    for (const f of fs.readdirSync(/* turbopackIgnore: true */ USER_DIR)) {
       if (!f.endsWith(".json")) continue;
-      const wf = readWorkflowFile(path.join(USER_DIR, f), false);
+      const wf = readWorkflowFile("user", f);
       if (wf) map.set(wf.id, wf);
     }
   }
   return Array.from(map.values());
 }
 
+/** 健康檢查用：壞檔不能只在 console 被跳過，否則使用者只會覺得某條流程憑空消失。 */
+export function listWorkflowFileIssues(): { file: string }[] {
+  const issues: { file: string }[] = [];
+  for (const dir of [EXAMPLES_DIR, USER_DIR]) {
+    if (!fs.existsSync(/* turbopackIgnore: true */ dir)) continue;
+    for (const name of fs.readdirSync(/* turbopackIgnore: true */ dir)) {
+      if (!name.endsWith(".json")) continue;
+      const file = path.join(/*turbopackIgnore: true*/ dir, name);
+      try {
+        const parsed: unknown = JSON.parse(fs.readFileSync(/*turbopackIgnore: true*/ file, "utf-8"));
+        if (!isWorkflowFileShape(parsed, path.basename(name, ".json"))) issues.push({ file: name });
+      } catch {
+        issues.push({ file: name });
+      }
+    }
+  }
+  return issues;
+}
+
 export function getWorkflow(id: string): Workflow | null {
-  const { file, builtin } = workflowPath(id);
-  return readWorkflowFile(file, builtin);
+  // URL 參數／外部觸發可能直接進來；查不到應該是正常的 null/404，不該因路徑字元讓整個 API 變 500。
+  if (!isValidWorkflowId(id)) return null;
+  const { builtin } = workflowPath(id);
+  return readWorkflowFile(builtin ? "example" : "user", `${id}.json`);
 }
 
 /**
@@ -127,7 +342,9 @@ function syncMeta(wf: Workflow) {
  * 不推導的話，含登入/通知節點的流程使用者根本沒有地方填帳密，卡死在「尚未填入帳密」。
  */
 function deriveRequiresSecrets(wf: Workflow): Workflow["requiresSecrets"] {
-  const byKey = new Map((wf.requiresSecrets ?? []).map((f) => [f.key, f]));
+  // sheetAppendUrl 已改成每個寫入節點自己的 scriptUrl。舊流程殘留的全域欄位要在任何一次
+  // saveWorkflow 時清掉，否則設定頁仍會冒出一個不該存在、又很容易和 sheetUrl 填反的欄位。
+  const byKey = new Map((wf.requiresSecrets ?? []).filter((f) => f.key !== "sheetAppendUrl").map((f) => [f.key, f]));
   for (const node of wf.nodes) {
     const def = getNodeDef(node.type);
     for (const f of def?.secretFields?.(node.config ?? {}) ?? []) {
@@ -157,26 +374,38 @@ export function graphUntouchedSinceApply(
 export function saveWorkflow(wf: Workflow): void {
   assertValidId(wf.id);
   ensureUserDir();
+  const target = path.join(/*turbopackIgnore: true*/ USER_DIR, `${wf.id}.json`);
+  withWorkflowFileLock(target, () => {
+  let effective = wf;
+  const base = (wf as VersionedWorkflow)[WORKFLOW_BASE];
+  if (base?.id === wf.id && fs.existsSync(/* turbopackIgnore: true */ target)) {
+    const latest = readWorkflowFile("user", `${wf.id}.json`);
+    if (latest && !same(base, latest)) effective = mergeWorkflowWithLatest(base, wf, latest);
+  }
   backupWorkflow(wf.id);
   // repeat-steps 的 steps 全系統的不變量是「JSON 字串」(lint/說明/截短/persistStepCode 都這樣讀)，
   // 但 AI 建圖常直接給真陣列——在唯一的存檔入口正規化成字串，下游全部不用各自防
   // (實測踩過：真陣列被 String() 成 "[object Object]"，節點直接炸，還得靠修復迴圈燒一輪 AI 救)。
-  const nodes = wf.nodes.map((n) =>
+  let nodes = effective.nodes.map((n) =>
     n.type === "repeat-steps" && Array.isArray(n.config?.steps)
       ? { ...n, config: { ...n.config, steps: JSON.stringify(n.config.steps) } }
       : n,
   );
-  const normalized: Workflow = { ...wf, nodes };
+  // 任何存檔來源（AI 套圖、匯入、插節點、版本還原）都必須遵守「畫布不重疊」。只在前端修不夠，
+  // API／舊資料仍能繞過；放在唯一存檔入口才是全系統不變量。
+  const separated = separateOverlappingNodes(nodes);
+  if (separated.changed) nodes = nodes.map((node) => ({ ...node, position: separated.positions[node.id] }));
+  const normalized: Workflow = { ...effective, nodes };
   const toSave: Workflow = { ...normalized, builtin: false, requiresSecrets: deriveRequiresSecrets(normalized) };
   // 原子寫入：先寫暫存檔再 rename(同一檔案系統內 rename 是原子的)。
   // 直接 writeFileSync 寫到一半程式崩潰/斷電，會留下半截 JSON，整個 workflow 檔就毀了。
   // 暫存檔名必須帶 pid+隨機值：同一顆資料目錄可能有兩個進程(daemon 常駐 + 使用者又開 dev)同時存
   // 同一個 workflow，固定檔名會讓兩邊寫進同一個 .tmp、交錯出半截 JSON 再 rename 上去(整檔損毀)。
-  const target = path.join(USER_DIR, `${wf.id}.json`);
   const tmp = `${target}.${process.pid}-${randomUUID().slice(0, 6)}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(toSave, null, 2));
-  fs.renameSync(tmp, target);
+  fs.writeFileSync(/* turbopackIgnore: true */ tmp, JSON.stringify(toSave, null, 2));
+  fs.renameSync(/* turbopackIgnore: true */ tmp, target);
   syncMeta(toSave);
+  });
 }
 
 export function createWorkflow(name: string): Workflow {
@@ -210,18 +439,49 @@ export function copyWorkflow(id: string): Workflow | null {
     status: "draft",
     builtin: false,
   };
-  saveWorkflow(copy);
-  // 模型選擇存在 wf_model 表(不在 workflow JSON 裡)，複製時要一起帶過去，
-  // 不然原本特意選了 minimax-m3/Claude Code 的流程，複製出來會悄悄退回預設模型
-  setWorkflowModel(newId, getWorkflowModel(id, src.defaultModel));
-  return copy;
+  try {
+    saveWorkflow(copy);
+    // 模型選擇存在 wf_model 表(不在 workflow JSON 裡)，複製時要一起帶過去，
+    // 不然原本特意選了 minimax-m3/Claude Code 的流程，複製出來會悄悄退回預設模型
+    setWorkflowModel(newId, getWorkflowModel(id, src.defaultModel));
+    // 排程/Webhook/LINE 不在 workflow JSON 裡，以前按「複製」會無聲遺失這些細節。
+    // 排程的啟用狀態也照原樣複製；新流程仍是草稿，scheduler 會硬性略過草稿，所以不會立刻重複執行，
+    // 等使用者把副本設為正式後才依原本設定生效。這樣才是真正「所有細節完整複製」。
+    // Webhook/LINE 若原本有啟用，產生「新」token：保留啟用狀態，但絕不共用原本的秘密網址。
+    const db = getDb();
+    const sourceMeta = db.prepare(`SELECT webhook_token, line_token FROM workflows_meta WHERE id = ?`).get(id) as
+      | { webhook_token: string | null; line_token: string | null }
+      | undefined;
+    db.transaction(() => {
+      const schedules = db.prepare(`SELECT enabled, cron, params_json FROM schedules WHERE workflow_id = ? ORDER BY created_at`).all(id) as
+        { enabled: number; cron: string; params_json: string | null }[];
+      const insert = db.prepare(
+        `INSERT INTO schedules (id, workflow_id, enabled, cron, params_json, last_fired_minute, next_run_at, created_at)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, datetime('now'))`,
+      );
+      for (const schedule of schedules) insert.run(randomUUID(), newId, schedule.enabled ? 1 : 0, schedule.cron, schedule.params_json);
+      db.prepare(`UPDATE workflows_meta SET webhook_token = ?, line_token = ? WHERE id = ?`).run(
+        sourceMeta?.webhook_token ? randomBytes(24).toString("hex") : null,
+        sourceMeta?.line_token ? randomBytes(24).toString("hex") : null,
+        newId,
+      );
+    })();
+    return copy;
+  } catch (error) {
+    // 複製是單一使用者動作：任何細節失敗都不能留下「看似成功但缺排程/模型」的半份副本。
+    try { deleteWorkflow(newId); } catch { fs.rmSync(/* turbopackIgnore: true */ path.join(/*turbopackIgnore: true*/ USER_DIR, `${newId}.json`), { force: true }); }
+    throw error;
+  }
 }
 
 export function deleteWorkflow(id: string): void {
   assertValidId(id);
-  const userFile = path.join(USER_DIR, `${id}.json`);
-  if (fs.existsSync(userFile)) fs.rmSync(userFile);
-  fs.rmSync(historyDir(id), { recursive: true, force: true }); // 版本備份也一起清掉，不然刪了的 workflow 留著孤兒備份資料夾
+  const userFile = path.join(/*turbopackIgnore: true*/ USER_DIR, `${id}.json`);
+  if (fs.existsSync(/* turbopackIgnore: true */ userFile)) fs.rmSync(/* turbopackIgnore: true */ userFile);
+  fs.rmSync(/* turbopackIgnore: true */ historyDir(id), { recursive: true, force: true }); // 版本備份也一起清掉，不然刪了的 workflow 留著孤兒備份資料夾
+  fs.rmSync(/* turbopackIgnore: true */ path.join(/* turbopackIgnore: true */ process.cwd(), "data", "browser-sessions", `${id}.json`), { force: true });
+  deleteChatAttachmentsForWorkflow(id);
+  deleteWorkflowChatState(id);
   // 連帶清掉所有跟這個 workflow 綁定的資料，不留孤兒(執行紀錄/產出檔紀錄/排程/模型選擇/AI修法提案/除錯截圖/產出檔)
   const db = getDb();
   const runIds = (db.prepare(`SELECT id FROM runs WHERE workflow_id = ?`).all(id) as { id: string }[]).map((r) => r.id);
@@ -235,8 +495,8 @@ export function deleteWorkflow(id: string): void {
   for (const runId of runIds) {
     db.prepare(`DELETE FROM node_runs WHERE run_id = ?`).run(runId);
     db.prepare(`DELETE FROM run_logs WHERE run_id = ?`).run(runId);
-    fs.rmSync(path.join(process.cwd(), "data", "runs", runId), { recursive: true, force: true });
-    fs.rmSync(path.join(process.cwd(), "data", "outputs", runId), { recursive: true, force: true });
+    fs.rmSync(/* turbopackIgnore: true */ path.join(/* turbopackIgnore: true */ process.cwd(), "data", "runs", runId), { recursive: true, force: true });
+    fs.rmSync(/* turbopackIgnore: true */ path.join(/* turbopackIgnore: true */ process.cwd(), "data", "outputs", runId), { recursive: true, force: true });
   }
   db.prepare(`DELETE FROM runs WHERE workflow_id = ?`).run(id);
 }
@@ -246,7 +506,7 @@ export function deleteWorkflow(id: string): void {
 const MAX_BACKUPS = 60;
 
 function historyDir(id: string): string {
-  return path.join(USER_DIR, "history", id);
+  return path.join(/*turbopackIgnore: true*/ USER_DIR, "history", id);
 }
 
 /** 去掉節點座標後序列化——用來判斷「這次存檔是不是只有拖動節點位置、內容根本沒變」 */
@@ -265,13 +525,15 @@ export function backupWorkflow(id: string): void {
   const wf = getWorkflow(id);
   if (!wf) return;
   const dir = historyDir(id);
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(/* turbopackIgnore: true */ dir, { recursive: true });
   const serialized = JSON.stringify(wf, null, 2);
 
-  const existing = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith(".json")).sort() : [];
+  const existing = fs.existsSync(/* turbopackIgnore: true */ dir)
+    ? fs.readdirSync(/* turbopackIgnore: true */ dir).filter((f) => f.endsWith(".json")).sort()
+    : [];
   const latest = existing[existing.length - 1];
   if (latest) {
-    const latestRaw = fs.readFileSync(path.join(dir, latest), "utf-8");
+    const latestRaw = fs.readFileSync(/* turbopackIgnore: true */ path.join(/*turbopackIgnore: true*/ dir, latest), "utf-8");
     if (latestRaw === serialized) return;
     try {
       if (serializeWithoutPositions(JSON.parse(latestRaw) as Workflow) === serializeWithoutPositions(wf)) return;
@@ -281,12 +543,12 @@ export function backupWorkflow(id: string): void {
   }
 
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  fs.writeFileSync(path.join(dir, `${ts}.json`), serialized);
+  fs.writeFileSync(/* turbopackIgnore: true */ path.join(/*turbopackIgnore: true*/ dir, `${ts}.json`), serialized);
 
-  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).sort();
+  const files = fs.readdirSync(/* turbopackIgnore: true */ dir).filter((f) => f.endsWith(".json")).sort();
   const excess = files.length - MAX_BACKUPS;
   if (excess > 0) {
-    for (const f of files.slice(0, excess)) fs.rmSync(path.join(dir, f));
+    for (const f of files.slice(0, excess)) fs.rmSync(/* turbopackIgnore: true */ path.join(/*turbopackIgnore: true*/ dir, f));
   }
 }
 
@@ -296,15 +558,15 @@ export interface BackupInfo { filename: string; timestamp: string; name: string;
 export function listBackups(id: string): BackupInfo[] {
   assertValidId(id);
   const dir = historyDir(id);
-  if (!fs.existsSync(dir)) return [];
+  if (!fs.existsSync(/* turbopackIgnore: true */ dir)) return [];
   return fs
-    .readdirSync(dir)
+    .readdirSync(/* turbopackIgnore: true */ dir)
     .filter((f) => f.endsWith(".json"))
     .sort()
     .reverse()
     .map((filename) => {
       try {
-        const wf = JSON.parse(fs.readFileSync(path.join(dir, filename), "utf-8")) as Workflow;
+        const wf = JSON.parse(fs.readFileSync(/* turbopackIgnore: true */ path.join(/*turbopackIgnore: true*/ dir, filename), "utf-8")) as Workflow;
         // 檔名格式固定是 ISO 時間把 : 和 . 換成 -(見 backupWorkflow)，直接抓回來組成好讀的時間
         const m = filename.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-\d+Z\.json$/);
         const timestamp = m ? `${m[1]} ${m[2]}:${m[3]}:${m[4]}` : filename;
@@ -321,9 +583,9 @@ export function restoreBackup(id: string, filename: string): Workflow | null {
   assertValidId(id);
   if (!/^[0-9T-]+Z\.json$/.test(filename)) throw new Error("不合法的備份檔名");
   const dir = historyDir(id);
-  const backupPath = path.join(dir, filename);
-  if (!fs.existsSync(backupPath)) return null;
-  const backup = JSON.parse(fs.readFileSync(backupPath, "utf-8")) as Workflow;
+  const backupPath = path.join(/*turbopackIgnore: true*/ dir, filename);
+  if (!fs.existsSync(/* turbopackIgnore: true */ backupPath)) return null;
+  const backup = JSON.parse(fs.readFileSync(/* turbopackIgnore: true */ backupPath, "utf-8")) as Workflow;
   const current = getWorkflow(id);
   backupWorkflow(id); // 現況也存一份，還原這個動作本身還能再復原
   // 只還原「內容」(節點/連線/參數/名稱)，不還原 status——不然還原一個當初是草稿時存的備份，
