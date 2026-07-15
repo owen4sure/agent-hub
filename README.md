@@ -40,10 +40,12 @@ Open http://127.0.0.1:3000 (bound to localhost only — other devices can't reac
 ## Building flows in plain language
 
 - **Build**: describe your need in the chat panel (you can upload screenshots/documents to help the AI understand). If anything is unclear, the AI asks before drawing → you confirm and apply.
-- **Manual editing is first-class too**: a "＋ Add step" drawer to browse every block, a "＋" on each edge to insert a step between two nodes, direct field editing on any node (change a URL or keyword without asking the AI), and Cmd/Ctrl-Z undo for every canvas edit. AI and manual modes work side by side.
+- **Manual editing is first-class too**: a "＋ Add step" drawer to browse every block, a "＋" on each edge to insert a step between two nodes, direct field editing on any node (change a URL or keyword without asking the AI), and Cmd/Ctrl-Z undo for every canvas edit. Dragging a connection into an if/switch/approval node first pops a plain-language branch picker (true/false, each case, approved/rejected, on-error) so a miswired edge never gets saved. The divider between the canvas and the chat panel is drag-resizable, so you can make room for a long flow or a long conversation. AI and manual modes work side by side.
 - **Tweak one step**: click a node on the canvas → say "search for the XX email instead" → the AI edits just that node; each node card also shows its key settings (which URL, which cases, which filename) at a glance.
 - **Self-repair on failure**: a node turns red → click "🔧 Let AI fix this step" → the AI reads the error and page screenshot and proposes a fix.
 - **Add/remove steps**: tell the AI "add an email-sending step at the end" or "drop the notification step".
+- **Verify understanding without touching your data**: no fresh data to run a real test with, but want proof the AI actually understood your file? Click "🔍 Verify understanding" in the chat and drop a file — the AI really reads it and computes the real numbers for you to check, running everything up to the point of writing — it never writes to a spreadsheet or sends a notification.
+- **Control execution by just talking**: "test it", "confirm, run for real", "stop", "what's the status", "approve/reject", "retry" — type these directly in chat, no need to hunt for a button. If a single message both requests an edit and mentions running it (e.g. "change step 9 to read E7, that should be fine, run for real") the concrete edit always takes priority — it won't get silently swallowed by a plain "confirm and run" classification.
 - **Standing preferences**: write your habits once on the Settings page ("always suffix filenames with today's date", "always notify via Telegram") — the AI honors them in every flow it builds, so you never repeat yourself.
 
 ![A failed node turns red: the error message is in plain words, with a one-click "Let AI fix this step"](docs/screenshots/ai-fix.png)
@@ -116,7 +118,9 @@ lib/workflow/
   graphRepair.ts               graph-aware repair shared by chat, autofix, and autorun; locates the actual upstream cause
   fixProposals.ts              background fix proposals for failed scheduled runs (one-click apply & re-run)
   learnedFixes.ts              remembered fixes, applied directly when similar errors recur
-  explain.ts                   translates the whole graph into plain-language steps
+  explain.ts plainLanguage.ts   translates the whole graph and its run results into plain language; code and internal field names never surface
+  chatCommand.ts                classifies plain-language chat commands (test/confirm-run/stop/repair/approve…); a concrete edit always wins over an execution classification
+  fingerprint.ts previewReplay.ts   replay protection: a preview can only be confirmed into a real run if the graph genuinely hasn't changed since
   store.ts                     workflows stored as data/workflows/*.json, with version backup/restore (history/)
   nodes/*.ts                   one file per node type
 lib/aiRetry.ts                 model-call retry (backoff + empty responses count as failures) + Claude Code fallback
@@ -130,6 +134,9 @@ lib/mailWatcher.ts              email trigger (60s IMAP poll, same claim/seed di
 lib/telegramPoller.ts          single Telegram getUpdates consumer: approval buttons + message trigger
 lib/lineHook.ts                 LINE webhook token + X-Line-Signature verification; endpoint at app/api/line-hooks/
 lib/notify.ts                  desktop notifications for schedule success/failure (macOS)
+lib/exportSanitizer.ts         replaces known secrets/script URLs with `{{field}}` placeholders on export — never leaks them in plaintext
+lib/dataBackup.ts              daily packages SQLite, workflow JSON/history, and `.env` into data/backups/
+lib/sheetWriteUrlMigration.ts  safely moves the old global Google Sheet write URL into each node's own field (crash-safe, resumable)
 data/                          local state (gitignored): DB, workflows, debug screenshots, output files
 docs/ARCHITECTURE_V2.md        the original design document (partially outdated; code and this README win)
 ```
@@ -151,6 +158,8 @@ node scripts/regression.mjs [from to]  # complex-request regression suite: repre
 - **This is a single-user local tool, bound to `127.0.0.1` by default** (`npm run dev` / `npm run start` both pass `-H 127.0.0.1`). **Do not change it to `-H 0.0.0.0` or host it publicly** — the `custom-code` node (AI-written custom steps) and the `http-request` node execute code / reach arbitrary URLs on your machine, so exposing them is equivalent to RCE/SSRF.
 - **Built-in cross-site protection** (`proxy.ts`): binding to 127.0.0.1 alone can't stop a malicious web page from making your own browser send requests to localhost. All `/api` requests verify the Host header (against DNS rebinding), and non-GET requests additionally require a local Origin — cross-site requests from external sites get 403.
 - **The `custom-code` node runs AI-generated code on your machine with your user permissions.** The normal UI shows only the step's plain-language purpose; code is generated on first execution and stored locally. Test the workflow visibly in draft mode before promoting it. Code embedded in imported workflow files is discarded and regenerated from the stated intent.
+- **Imported workflows of unknown origin are locked until you confirm.** Before an imported flow's first run, the UI spells out the risk plainly — it may read local files or send data to an external URL — and nothing executes until you confirm. No schedule or webhook can slip through before that confirmation.
+- **A confirmed "run for real" can't silently apply to a workflow that changed underneath it.** If you edit a node, connection, or parameter after a preview run, the old "confirm and run" no longer reuses the stale result — the server re-checks the flow's actual current content and asks you to preview again if anything changed.
 - **Webhook URLs are credentials**: the random token in the path is compared in constant time, and a wrong token returns the same 404 as a nonexistent workflow (no probing). Since the server only listens on 127.0.0.1, only programs on this machine can reach a webhook at all.
 - **Model fallback**: your configured (often free) API is primary; only when the whole retry chain fails does the local Claude Code CLI step in once (see `lib/aiRetry.ts`) — it's not called on every request and incurs no surprise costs.
 - License: MIT (see `LICENSE`).
