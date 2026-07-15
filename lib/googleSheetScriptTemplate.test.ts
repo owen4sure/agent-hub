@@ -1,6 +1,24 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { GOOGLE_SHEET_SCRIPT_TEMPLATE } from "./googleSheetScriptTemplate";
+import { GOOGLE_SHEET_SCRIPT_TEMPLATE, sheetWriteNodesNeedingSetup } from "./googleSheetScriptTemplate";
+
+describe("sheetWriteNodesNeedingSetup", () => {
+  it("只挑出還沒填寫入網址的試算表寫入步驟，其他節點與已設定的不算", () => {
+    const labels = sheetWriteNodesNeedingSetup([
+      { type: "trigger", label: "開始", config: {} },
+      { type: "google-sheet-read", label: "讀表", config: { sheetUrl: "https://docs.google.com/x" } },
+      { type: "google-sheet-update", label: "填回週增量", config: {} },
+      { type: "google-sheet-append", label: "新增紀錄", config: { scriptUrl: "  " } },
+      { type: "google-sheet-update", label: "已設定的", config: { scriptUrl: "https://script.google.com/macros/s/x/exec" } },
+      { type: "google-sheet-update", config: {} },
+    ]);
+    assert.deepEqual(labels, ["填回週增量", "新增紀錄", "寫入試算表"]);
+  });
+
+  it("沒有需要設定的節點時回空陣列(對話不出卡)", () => {
+    assert.deepEqual(sheetWriteNodesNeedingSetup([{ type: "write-file", label: "落檔", config: {} }]), []);
+  });
+});
 
 interface Harness {
   call(body: Record<string, unknown>): Record<string, unknown>;

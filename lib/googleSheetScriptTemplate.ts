@@ -87,3 +87,18 @@ function out(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
 }`;
+
+/**
+ * 找出「還沒完成第一次 Apps Script 設定」的試算表寫入步驟。
+ * 對話在套用流程圖後用它決定要不要主動附上「一鍵複製腳本」設定卡——
+ * 使用者不用自己想到要點開節點找教學(真實回饋:一般使用者根本不知道腳本藏在節點裡)。
+ */
+export function sheetWriteNodesNeedingSetup(
+  nodes: { type?: string; label?: string; config?: Record<string, unknown> }[],
+): string[] {
+  return nodes
+    .filter((node) =>
+      (node.type === "google-sheet-append" || node.type === "google-sheet-update") &&
+      !String(node.config?.scriptUrl ?? "").trim())
+    .map((node) => node.label || "寫入試算表");
+}
