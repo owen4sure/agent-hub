@@ -24,6 +24,7 @@ export interface Workflow {
   name: string;
   status: "draft" | "official";
   builtin: boolean;
+  importedUntrusted?: boolean;
   longDescription?: string;
   triggerParams?: ParamField[];
   nodes: WFNode[];

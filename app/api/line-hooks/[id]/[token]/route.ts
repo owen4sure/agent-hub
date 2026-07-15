@@ -20,7 +20,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (!isValidWorkflowId(id)) return denied();
   if (!lineTokenMatches(id, token)) return denied();
   const wf = getWorkflow(id);
-  if (!wf) return denied();
+  if (!wf || wf.status !== "official") return denied();
 
   const raw = await req.text().catch(() => "");
   if (raw.length > MAX_BODY_BYTES) {

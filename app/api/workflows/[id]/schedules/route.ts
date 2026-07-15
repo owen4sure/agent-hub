@@ -11,6 +11,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const { id } = await params;
   const body = (await req.json().catch(() => null)) as { cron?: string; params?: Record<string, unknown> } | null;
   if (!body?.cron?.trim()) return NextResponse.json({ error: "缺少 cron" }, { status: 400 });
+  if (body.cron.length > 200) return NextResponse.json({ error: "cron 內容過長" }, { status: 400 });
+  if (body.params !== undefined && (!body.params || typeof body.params !== "object" || Array.isArray(body.params))) {
+    return NextResponse.json({ error: "params 必須是物件" }, { status: 400 });
+  }
   // 入口就把不合法的 cron 擋下來，不然存進 DB 後 tick 端每分鐘誤觸發、使用者也看不到錯誤
   if (!isValidCron(body.cron)) return NextResponse.json({ error: "排程時間格式不正確" }, { status: 400 });
   // 先確認流程存在(id 不合法時 getWorkflow 會 throw，一樣當作找不到)，避免建出指向不存在流程的孤兒排程

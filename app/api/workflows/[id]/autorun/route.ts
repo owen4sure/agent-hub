@@ -5,7 +5,7 @@ import { getClient } from "@/lib/modelClient";
 import { getWorkflow, saveWorkflow } from "@/lib/workflow/store";
 import { getWorkflowModel } from "@/lib/settingsStore";
 import { aiRepairGraph, applyNodeConfigEdits, type RepairAttempt, type NodeEdit } from "@/lib/workflow/graphRepair";
-import { runWorkflowAndWait, classifyFailure, isUserCancelled, getVarWarnings } from "@/lib/workflow/engine";
+import { runWorkflowAndWait, classifyFailure, getMissingWorkflowSettings, isUserCancelled, getVarWarnings } from "@/lib/workflow/engine";
 import { autorunActive, loopCancelRequested, loopAbortControllers } from "@/lib/workflow/busyLocks";
 import { recordFix } from "@/lib/workflow/learnedFixes";
 import { checkRunSemantics, verifyAgainstExpected } from "@/lib/workflow/resultCheck";
@@ -68,6 +68,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const { id } = await params;
   const wf = getWorkflow(id);
   if (!wf) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
+  const missing = getMissingWorkflowSettings(wf);
+  if (missing.length > 0) {
+    return NextResponse.json({
+      ok: false,
+      needsHuman: true,
+      code: "MISSING_REQUIRED_SETTINGS",
+      missing,
+      steps: [{ kind: "human", title: "執行前還有設定沒填", detail: `請先到「設定」頁補上：${missing.map((item) => item.label).join("、")}。這次沒有開始登入或抓資料。` }],
+    }, { status: 400 });
+  }
   if (autorunActive.has(id)) {
     return NextResponse.json({ error: "這條流程的自動測試已經在跑了，等它結束再開新的一輪" }, { status: 409 });
   }
@@ -84,12 +94,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 }
 
 async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnType<typeof getWorkflow>>, loopSignal: AbortSignal) {
-  const body = (await req.json().catch(() => ({}))) as { params?: unknown; expected?: unknown };
+  const body = (await req.json().catch(() => ({}))) as { params?: unknown; expected?: unknown; dryRun?: unknown };
   const rawParams = body.params && typeof body.params === "object" && !Array.isArray(body.params)
     ? (body.params as Record<string, unknown>)
     : {};
   // 使用者(選填)給的「這次已知正確答案」——跑綠後拿去對,對不上就當失敗餵回修復迴圈(見下面 answerVerified)
   const expected = typeof body.expected === "string" ? body.expected.trim() : "";
+  // 對話裡的「修到會跑」預設先用只讀模式收斂：抓資料/計算/瀏覽器操作照跑，但寫試算表、寄信、
+  // 通知都攔住。原本工具列的「測到會跑」不帶這個旗標，維持既有完整測試行為。
+  const dryRun = body.dryRun === true;
 
   const db = getDb();
   const model = getWorkflowModel(id, wf.defaultModel);
@@ -239,7 +252,7 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
   const pendingRecordFixes: Parameters<typeof recordFix>[0][] = [];
 
   // 先跑第一輪(把剩餘預算當這次執行的上限，不然單次最長可掛 25 分鐘、預算檢查形同虛設)
-  let result = await runWorkflowAndWait(id, triggerParams, { headed, timeoutMs: remainingMs() });
+  let result = await runWorkflowAndWait(id, triggerParams, { headed, timeoutMs: remainingMs(), dryRun });
   steps.push({ kind: "run", title: "跑了一輪測試", detail: result.status === "success" ? "整條流程都通過" : "有一步失敗，準備自動處理", runId: result.runId });
 
   const cleanSuccess = () => result.status === "success" && result.varWarnings === 0;
@@ -285,7 +298,7 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
         answerVerified = true;
         continue;
       }
-      const av = await verifyAgainstExpected(client, model, id, result.runId, expected);
+      const av = await verifyAgainstExpected(client, model, id, result.runId, expected, loopSignal);
       if (av.matches) {
         answerVerified = true;
         lastAnswerMismatch = null; // 對上了就清掉疑點
@@ -310,7 +323,7 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
         semanticOk = true;
         continue;
       }
-      const verdict = await checkRunSemantics(client, model, id, result.runId);
+      const verdict = await checkRunSemantics(client, model, id, result.runId, loopSignal);
       if (!verdict.suspicious) {
         semanticOk = true;
         lastSuspicion = null;
@@ -362,7 +375,7 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
       // 「資料類」(找不到某封信/報表)先讓整圖修復試一次(可能是上游把搜尋條件算錯了)，
       // 試過還是資料類錯誤才真的停下來問使用者。
       const triedThisNode = fixCountByNode[failedNode] ?? 0;
-      const mustAskHuman = category === "credentials" || (category === "data" && triedThisNode >= 1);
+      const mustAskHuman = category === "credentials" || category === "configuration" || (category === "data" && triedThisNode >= 1);
       if (mustAskHuman) {
         steps.push({
           kind: "human",
@@ -452,7 +465,7 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
     });
 
     // 重跑驗證(帶剩餘時間預算)
-    result = await runWorkflowAndWait(id, triggerParams, { headed, timeoutMs: Math.max(remainingMs(), 10_000) });
+    result = await runWorkflowAndWait(id, triggerParams, { headed, timeoutMs: Math.max(remainingMs(), 10_000), dryRun });
     // 修好上游後這輪跑到了「等人簽核」＝簽核之前全通過，收工(不能把等簽核當失敗繼續修)
     if (result.status === "waiting") {
       for (const e of edits) verifiedFixes.set(e.nodeId, e.after); // 這批修改被驗證有效(跑到簽核了)，不能回滾
@@ -500,7 +513,7 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
     // 迴圈可能因「修復次數用完」在剛轉綠的當下退出——語意驗收根本沒跑到就不能直接蓋章成功，
     // 在這裡補跑一次(驗收員自己壞掉會回不可疑放行，不會擋住成功路徑)
     if (!semanticOk && !lastSuspicion) {
-      const finalVerdict = await checkRunSemantics(client, model, id, result.runId);
+      const finalVerdict = await checkRunSemantics(client, model, id, result.runId, loopSignal);
       if (finalVerdict.suspicious) lastSuspicion = finalVerdict.reason;
     }
     if (lastAnswerMismatch) {

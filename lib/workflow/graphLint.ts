@@ -21,6 +21,9 @@ export function lintGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): string[
 
   // ── 節點本體 ──
   for (const n of nodes) {
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(n.id)) {
+      errors.push(`節點 id「${String(n.id).slice(0, 80)}」格式不正確——只能用英數、-、_，長度 1–80。`);
+    }
     if (ids.has(n.id)) errors.push(`節點 id "${n.id}" 重複了——每個節點的 id 必須唯一。`);
     ids.add(n.id);
     const def = getNodeDef(n.type);
@@ -33,11 +36,18 @@ export function lintGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): string[
       continue;
     }
     errors.push(...validateConfigTypes(n.id, n.config ?? {}, def.configSchema));
+    if (n.type === "custom-code" && !String(n.config?.code ?? "").trim() && !String(n.config?.intent ?? "").trim()) {
+      errors.push(`節點 "${n.id}"(自訂步驟)沒有白話 intent，也沒有可執行內容——至少要說清楚這一步要做什麼。`);
+    }
   }
 
   // ── 連線 ──
   const nodeById = new Map(nodes.map((n) => [n.id, n]));
+  const edgeKeys = new Set<string>();
   for (const e of edges) {
+    const edgeKey = `${e.from}\u0000${e.to}\u0000${e.fromPort ?? ""}`;
+    if (edgeKeys.has(edgeKey)) errors.push(`連線 ${e.from}→${e.to}${e.fromPort ? `(${e.fromPort})` : ""} 重複了——同一路徑只留一條。`);
+    edgeKeys.add(edgeKey);
     if (!ids.has(e.from)) errors.push(`連線 ${e.from}→${e.to} 的起點 "${e.from}" 不是任何節點的 id。`);
     if (!ids.has(e.to)) errors.push(`連線 ${e.from}→${e.to} 的終點 "${e.to}" 不是任何節點的 id。`);
     if (e.from === e.to) errors.push(`連線 ${e.from}→${e.to} 自己連自己，不允許。`);
@@ -45,6 +55,31 @@ export function lintGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): string[
     // 但 trigger 不會失敗、拉錯是模型誤解，直接打回。
     if (e.fromPort === "error" && nodeById.get(e.from)?.type === "trigger") {
       errors.push(`連線 ${e.from}→${e.to} 標了 fromPort:"error"，但觸發節點不會失敗——失敗分支要從「可能出錯的那個步驟」拉出來。`);
+    }
+  }
+
+  // ── 一般節點／二路條件的出口契約 ──
+  // 引擎遇到 activePorts 時只跑 fromPort 有命中的線；if 的線若漏標，畫面看似有接、實際永遠不會走。
+  for (const n of nodes) {
+    const outs = edges.filter((edge) => edge.from === n.id);
+    if (n.type === "if-condition") {
+      for (const e of outs) {
+        if (e.fromPort !== "true" && e.fromPort !== "false" && e.fromPort !== "error") {
+          errors.push(
+            `條件分支 "${n.id}" 的出線 ${n.id}→${e.to} 必須標 "true"(成立)、"false"(不成立)或 "error"(出錯)，` +
+              `目前是「${e.fromPort ?? "(沒標)"}」。`,
+          );
+        }
+      }
+      continue;
+    }
+    if (n.type === "switch" || n.type === "wait-approval") continue;
+    for (const e of outs) {
+      if (n.type === "trigger" && e.fromPort) {
+        errors.push(`觸發節點 "${n.id}" 的出線不能標分支「${e.fromPort}」——觸發後只會直接往下走。`);
+      } else if (n.type !== "trigger" && e.fromPort && e.fromPort !== "error") {
+        errors.push(`節點 "${n.id}" 不是分支節點，出線只能是正常完成(不標 fromPort)或 "error"，不能標「${e.fromPort}」。`);
+      }
     }
   }
 
@@ -89,19 +124,49 @@ export function lintGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): string[
     }
   }
 
-  // ── repeat-steps 內不能包等人簽核：迴圈裡的暫停/恢復不支援，會被當成錯誤重試 ──
+  // ── repeat-steps 內嵌圖也要完整驗證：它不是引擎眼中的獨立節點，漏驗會等到執行才爆 ──
   for (const n of nodes) {
     if (n.type !== "repeat-steps") continue;
     const stepsRaw = (n.config ?? {}).steps;
-    const stepsStr = typeof stepsRaw === "string" ? stepsRaw : JSON.stringify(stepsRaw ?? "");
-    if (/"type"\s*:\s*"wait-approval"/.test(stepsStr)) {
-      errors.push(`節點 "${n.id}"(重複執行)的內嵌步驟裡有 wait-approval——迴圈裡不能等人簽核。請把簽核節點放在迴圈外面(先簽核再進迴圈，或迴圈整理完資料後再簽核)。`);
+    let steps: { type?: unknown; config?: unknown }[] | null = null;
+    try {
+      const parsed = Array.isArray(stepsRaw) ? stepsRaw : JSON.parse(String(stepsRaw ?? "[]"));
+      if (Array.isArray(parsed)) steps = parsed as { type?: unknown; config?: unknown }[];
+    } catch { /* 下面統一回具體錯誤 */ }
+    if (!steps || steps.length === 0) {
+      errors.push(`節點 "${n.id}"(重複執行)的 steps 必須是非空的合法 JSON 陣列。`);
+      continue;
+    }
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      const type = typeof step?.type === "string" ? step.type : "";
+      if (type === "wait-approval") {
+        errors.push(`節點 "${n.id}"(重複執行)的內嵌步驟裡有 wait-approval——迴圈裡不能等人簽核。請把簽核節點放在迴圈外面(先簽核再進迴圈，或迴圈整理完資料後再簽核)。`);
+        continue;
+      }
+      const def = type ? getNodeDef(type) : undefined;
+      if (!def) {
+        errors.push(`節點 "${n.id}" 的第 ${i + 1} 個內嵌步驟 type "${type || "(空)"}" 不存在。`);
+        continue;
+      }
+      if (!step.config || typeof step.config !== "object" || Array.isArray(step.config)) {
+        errors.push(`節點 "${n.id}" 的第 ${i + 1} 個內嵌步驟 config 必須是物件。`);
+        continue;
+      }
+      const stepConfig = step.config as Record<string, unknown>;
+      errors.push(...validateConfigTypes(`${n.id}[步驟${i}]`, stepConfig, def.configSchema));
+      if (type === "custom-code" && !String(stepConfig.code ?? "").trim() && !String(stepConfig.intent ?? "").trim()) {
+        errors.push(`節點 "${n.id}" 的第 ${i + 1} 個自訂步驟沒有白話 intent，清除外來程式碼後無法安全重新產生。`);
+      }
     }
   }
 
   // ── 結構 ──
-  if (nodes.length > 0 && !nodes.some((n) => n.type === "trigger")) {
+  const triggerCount = nodes.filter((n) => n.type === "trigger").length;
+  if (nodes.length > 0 && triggerCount === 0) {
     errors.push(`圖裡沒有 type "trigger" 的節點——每條流程必須有一個觸發起點。`);
+  } else if (triggerCount > 1) {
+    errors.push(`圖裡有 ${triggerCount} 個觸發節點——每條流程只能有一個明確起點，請合併成一個。`);
   }
   const cycle = findCycle(nodes, edges);
   if (cycle) errors.push(`圖裡有環(${cycle.join("→")})——流程必須是由前往後的單向圖，不能繞圈。`);
@@ -133,9 +198,16 @@ export function lintGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): string[
   // ── 變數引用不能用「節點id.欄位」格式 ──
   // 資料模型是扁平的:上游輸出的欄位直接用 {{欄位名}} 引用。踩過:模型發明 {{parse.result}}
   // (parse 是節點 id)——執行期解析不到、條件永遠 false,流程全綠但走錯分支。
-  // 注意 {{period.start}}/{{item.欄位}} 是合法的(period/item 不是節點 id),只擋「前綴=某個節點 id」。
+  // {{item.欄位}} 是 repeat-steps 內部合法範圍；{{period.*}} 只能放在 triggerParams 的 derived
+  // default 裡，節點 config 執行期不認得它，必須改引用衍生欄位(如 {{filterStart}})。
   for (const n of nodes) {
     const cfgStr = JSON.stringify(n.config ?? {});
+    if (/\{\{\s*period\.[^}]+\}\}/.test(cfgStr)) {
+      errors.push(
+        `節點 "${n.id}" 直接引用了 {{period.*}}，執行時不會解析。` +
+          `請在 triggerParams 宣告 derived:true 的衍生欄位(default 才放 {{period.start}} 等)，節點改引用該欄位名(如 {{filterStart}})。`,
+      );
+    }
     for (const m of cfgStr.matchAll(/\{\{\s*([A-Za-z0-9_-]+)\.([A-Za-z0-9_一-鿿-]+)\s*\}\}/g)) {
       if (ids.has(m[1])) {
         errors.push(
@@ -147,6 +219,17 @@ export function lintGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): string[
   }
 
   return errors;
+}
+
+/**
+ * 所有執行來源共用的最後安全閘門。建圖／匯入時的 lint 只能證明「當時」正確；之後還可能經過
+ * 手動連線、版本還原或舊版資料升級。引擎真正要做副作用之前必須再驗一次，不能對壞圖採保底順序硬跑。
+ */
+export function assertRunnableGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): void {
+  const errors = lintGraph(nodes, edges);
+  if (errors.length > 0) {
+    throw new Error(`流程圖目前不能安全執行，請先修正：\n${errors.slice(0, 8).map((e) => `- ${e}`).join("\n")}`);
+  }
 }
 
 /** type 打錯時給最接近的合法型別(去掉 -_ 後比對，抓 excel_process/excelprocess 這類手滑) */
@@ -256,7 +339,13 @@ function outputFieldNames(outputs: string | undefined): string[] {
  * 合法地可能要字面 {{}}，當硬錯誤擋圖會把合法的圖修壞。呈現方式是附在 ready 訊息裡請使用者/模型留意，
  * 執行期還有 cfgStr 警告 + autorun「髒綠燈不收工」雙保險。
  */
-export function lintVarRefWarnings(nodes: WorkflowNode[], edges: WorkflowEdge[], triggerParams?: ParamField[]): string[] {
+export function lintVarRefWarnings(
+  nodes: WorkflowNode[],
+  edges: WorkflowEdge[],
+  triggerParams?: ParamField[],
+  /** Webhook 等外部觸發由使用者明確描述的 JSON 欄位；只放行點名的 key，不把任意拼錯字都當合法。 */
+  knownTriggerInputKeys: Iterable<string> = [],
+): string[] {
   const errors: string[] = [];
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const parents = new Map<string, string[]>();
@@ -265,6 +354,7 @@ export function lintVarRefWarnings(nodes: WorkflowNode[], edges: WorkflowEdge[],
   // 但引擎會把它們塞進 ctx.input(見 engine.ts trigger 分支)——不算進 acc 的話，任何節點引用
   // {{targetDate}} 這類週期性衍生欄位都會被誤判成「上游不會輸出」，每條週期性流程都會挨一次假警告。
   const triggerParamKeys = new Set((triggerParams ?? []).map((p) => p.key));
+  for (const key of knownTriggerInputKeys) if (/^[A-Za-z_][A-Za-z0-9_.-]{0,99}$/.test(key)) triggerParamKeys.add(key);
 
   // 每個節點的「可用欄位集合」= 所有(遞迴)上游節點的輸出欄位聯集(引擎會沿鏈自動往下傳)。
   // null = 上游含 custom-code 等靜態列舉不了的來源，放棄檢查。

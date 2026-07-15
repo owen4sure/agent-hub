@@ -1,4 +1,5 @@
 import { extractTextFromFile } from "./textExtract";
+import { fetchWithUrlGuard } from "./urlGuard";
 
 /**
  * 為什麼要這支：Google 試算表/文件是用 <canvas> 畫出來的網頁應用，儲存格的「值」根本不在 HTML DOM 裡——
@@ -13,15 +14,20 @@ import { extractTextFromFile } from "./textExtract";
  */
 
 export type GoogleDocKind = "spreadsheet" | "document";
-
-const URL_RE = /https?:\/\/docs\.google\.com\/(spreadsheets|document|presentation)\/d\/([a-zA-Z0-9_-]+)/;
+const MAX_GOOGLE_EXPORT_BYTES = 20 * 1024 * 1024;
 
 export function parseGoogleDocUrl(url: string): { kind: GoogleDocKind | "presentation"; id: string; gid: string | null } | null {
-  const m = url.match(URL_RE);
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return null; }
+  // 不能對整段字串做未錨定 regex：`https://evil.test/?next=https://docs.google.com/...` 也會命中，
+  // 讓畫面誤稱自己讀了 Google 文件，實際卻走到任意網站。主機、協定、路徑都逐項驗證。
+  if (parsed.protocol !== "https:" || parsed.hostname !== "docs.google.com") return null;
+  const m = parsed.pathname.match(/^\/(spreadsheets|document|presentation)\/d\/([a-zA-Z0-9_-]+)(?:\/|$)/);
   if (!m) return null;
   const kindMap = { spreadsheets: "spreadsheet", document: "document", presentation: "presentation" } as const;
-  const gidMatch = url.match(/[#&?]gid=([0-9]+)/);
-  return { kind: kindMap[m[1] as keyof typeof kindMap], id: m[2], gid: gidMatch ? gidMatch[1] : null };
+  const hashParams = new URLSearchParams(parsed.hash.replace(/^#/, ""));
+  const gid = parsed.searchParams.get("gid") ?? hashParams.get("gid");
+  return { kind: kindMap[m[1] as keyof typeof kindMap], id: m[2], gid: gid && /^\d+$/.test(gid) ? gid : null };
 }
 
 /** 匯出回來的到底是不是「真的檔案」——私有文件會被導到 accounts.google 登入頁，回的是 HTML 不是檔案 */
@@ -29,6 +35,35 @@ function looksLikeHtmlLogin(contentType: string, buf: Buffer): boolean {
   if (contentType.includes("text/html")) return true;
   const head = buf.subarray(0, 200).toString("utf8").trimStart().toLowerCase();
   return head.startsWith("<!doctype html") || head.startsWith("<html");
+}
+
+/** 匯出端點可能沒帶 Content-Length；串流逐段計數，不能先 arrayBuffer() 把超大回應整包吃進記憶體。 */
+export async function readResponseBufferWithinLimit(response: Response, maxBytes = MAX_GOOGLE_EXPORT_BYTES): Promise<Buffer | null> {
+  const declared = Number(response.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel().catch(() => {});
+    return null;
+  }
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks, total);
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 /**
@@ -43,9 +78,13 @@ export async function readGoogleDoc(url: string, signal?: AbortSignal): Promise<
     if (info.kind === "spreadsheet") {
       // 匯出整本 xlsx(所有分頁一起)——比單分頁 csv 完整，過 textExtract 會帶欄位代號對照
       const exportUrl = `https://docs.google.com/spreadsheets/d/${info.id}/export?format=xlsx`;
-      const res = await fetch(exportUrl, { redirect: "follow", signal });
+      const res = await fetchWithUrlGuard(exportUrl, { signal });
       if (!res.ok) return null;
-      const buf = Buffer.from(await res.arrayBuffer());
+      const buf = await readResponseBufferWithinLimit(res);
+      if (!buf) return {
+        title: "Google 試算表",
+        text: "⚠️ 這份 Google 試算表匯出後超過 20MB，這次沒有假裝讀完。請先另存需要的分頁或縮小資料範圍，再把檔案附進對話。",
+      };
       if (looksLikeHtmlLogin(res.headers.get("content-type") ?? "", buf)) return null;
       const r = await extractTextFromFile("google-sheet.xlsx", buf);
       if ("error" in r) return null;
@@ -56,15 +95,21 @@ export async function readGoogleDoc(url: string, signal?: AbortSignal): Promise<
     }
     if (info.kind === "document") {
       const exportUrl = `https://docs.google.com/document/d/${info.id}/export?format=txt`;
-      const res = await fetch(exportUrl, { redirect: "follow", signal });
+      const res = await fetchWithUrlGuard(exportUrl, { signal });
       if (!res.ok) return null;
-      const buf = Buffer.from(await res.arrayBuffer());
+      const buf = await readResponseBufferWithinLimit(res);
+      if (!buf) return {
+        title: "Google 文件",
+        text: "⚠️ 這份 Google 文件匯出後超過 20MB，這次沒有假裝讀完。請拆成幾份，或把需要的章節另存後附進對話。",
+      };
       if (looksLikeHtmlLogin(res.headers.get("content-type") ?? "", buf)) return null;
-      const txt = buf.toString("utf8").slice(0, 20000);
-      if (!txt.trim()) return null;
-      return { title: "Google 文件", text: `【Google 文件「${url}」的實際內容——直接讀取(不是截圖)】\n${txt}` };
+      const extracted = await extractTextFromFile("google-document.txt", buf);
+      if ("error" in extracted || !extracted.text.trim()) return null;
+      return { title: "Google 文件", text: `【Google 文件「${url}」的實際內容——直接讀取(不是截圖)】\n${extracted.text}` };
     }
-  } catch {
+  } catch (error) {
+    // 使用者按停止或整體網址讀取已逾時時，不能把 abort 吞掉後又退回 Chromium 再跑一輪。
+    if (signal?.aborted) throw (signal.reason instanceof Error ? signal.reason : error);
     return null; // 匯出打不通(網路/逾時)就退回截圖，別讓整個讀取失敗
   }
   return null; // 簡報(presentation)先交給截圖

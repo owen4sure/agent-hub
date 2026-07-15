@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getWorkflow, isValidWorkflowId } from "@/lib/workflow/store";
-import { startWorkflowRun } from "@/lib/workflow/engine";
+import { QueueCapacityError, startWorkflowRun } from "@/lib/workflow/engine";
 import { resolveParams } from "@/lib/relativeDate";
 import { webhookTokenMatches } from "@/lib/webhookStore";
 
@@ -18,7 +18,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (!isValidWorkflowId(id)) return denied();
   if (!webhookTokenMatches(id, token)) return denied();
   const wf = getWorkflow(id);
-  if (!wf) return denied();
+  // 所有無人值守觸發都只能跑正式流程；草稿可先保留 token/設定，但絕不能在背景做副作用。
+  if (!wf || wf.status !== "official") return denied();
 
   const raw = await req.text().catch(() => "");
   if (raw.length > MAX_BODY_BYTES) {
@@ -41,7 +42,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const runId = startWorkflowRun(id, { ...body, ...resolved }, { trigger: "webhook", headed: false });
     return NextResponse.json({ ok: true, runId });
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: err instanceof QueueCapacityError ? 429 : 500, headers: err instanceof QueueCapacityError ? { "Retry-After": "10" } : undefined },
+    );
   }
 }
 

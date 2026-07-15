@@ -7,6 +7,7 @@ import { getWorkflow, saveWorkflow } from "./store";
 import { findRelevantFixes } from "./learnedFixes";
 import { callAIWithRetry } from "../aiRetry";
 import { extractJsonObject } from "../jsonExtract";
+import { customCodeSyntaxError } from "./codegen";
 import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../claudeCodeClient";
 import { findLatestScreenshotPath, findLatestHtml, extractFormElements } from "./repairContext";
 import type { WorkflowNode } from "./types";
@@ -23,7 +24,7 @@ export async function editNode(
   workflowId: string,
   nodeId: string,
   instruction: string,
-  opts: { repairRunId?: string; errorForLearning?: string; apply?: boolean } = {},
+  opts: { repairRunId?: string; errorForLearning?: string; apply?: boolean; signal?: AbortSignal } = {},
 ): Promise<{ config: Record<string, unknown>; before: Record<string, unknown>; nodeType: string }> {
   const wf = getWorkflow(workflowId);
   if (!wf) throw new Error("workflow 不存在");
@@ -86,20 +87,27 @@ ${extractFormElements(html)}
   // 同樣做到對為止：模型網關暫時性問題自動重試，不要一次失敗就讓「讓 AI 修」整個掛掉。
   // 主力永遠是使用者選的模型；只有主力徹底失敗、且這台機器有裝 Claude Code，才自動切備援頂一次。
   // 本機 Claude Code：截圖直接給檔案路徑讀，不用轉 base64；其餘走 OpenAI 相容 API 才組多模態 content。
-  const claudeCodeFallback = () => callClaudeCode({ prompt: mainText, imagePaths: screenshotPath ? [screenshotPath] : undefined });
+  const claudeCodeFallback = () => callClaudeCode({
+    prompt: mainText,
+    imagePaths: screenshotPath ? [screenshotPath] : undefined,
+    signal: opts.signal,
+  });
   let raw: string;
   if (isClaudeCodeModel(model)) {
-    raw = await callAIWithRetry(claudeCodeFallback, { label: "修改節點(Claude Code)" });
+    raw = await callAIWithRetry(claudeCodeFallback, { label: "修改節點(Claude Code)", signal: opts.signal, maxAttempts: 2 });
   } else {
     const content: OpenAI.Chat.ChatCompletionContentPart[] = [{ type: "text", text: mainText }];
     if (screenshotPath) {
-      const b64 = fs.readFileSync(screenshotPath).toString("base64");
+      const b64 = fs.readFileSync(/* turbopackIgnore: true */ screenshotPath).toString("base64");
       content.push({ type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } });
     }
     const fallback = (await isClaudeCodeAvailable()) ? claudeCodeFallback : undefined;
     raw = await callAIWithRetry(
-      () => client.chat.completions.create({ model, messages: [{ role: "user", content }], max_tokens: 2000 }).then((res) => res.choices[0]?.message?.content ?? ""),
-      { label: "修改節點", fallback },
+      () => client.chat.completions.create(
+        { model, messages: [{ role: "user", content }], max_tokens: 2000 },
+        { signal: opts.signal },
+      ).then((res) => res.choices[0]?.message?.content ?? ""),
+      { label: "修改節點", fallback, signal: opts.signal },
     );
   }
   // 括號配對+逐候選解析(共用 lib/jsonExtract.ts)：模型回覆的說明文字裡常有 { } 或 {{變數}}，
@@ -125,6 +133,10 @@ ${extractFormElements(html)}
   const typeErrors = validateConfigTypes(node.id, newConfig, def.configSchema);
   if (typeErrors.length > 0) {
     throw new Error(`AI 回的設定型別不正確，沒有套用：${typeErrors.join("；")}`);
+  }
+  if (node.type === "custom-code") {
+    const syntaxError = customCodeSyntaxError(newConfig.code);
+    if (syntaxError) throw new Error(`AI 回的自訂程式碼有語法錯誤(${syntaxError})，沒有套用`);
   }
   // ②「等於沒改」偵測:比對執行期實際生效值(過 withSchemaDefaults 後)——零效果的修改不能回報「已更新」
   // 騙使用者(實測踩過:(空)→(空)還說已套用)

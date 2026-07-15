@@ -19,15 +19,25 @@ import {
   type ReactFlowInstance,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { autoLayout } from "@/lib/workflow/layout";
-import { useWFChat, sendChatToAI, stopChatToAI, startAutoTest, stopAutoTest, clearPendingGraph, closeAutoTest, clearChat, appendAssistantNote, verifyUnderstanding, type Part, type ChatMsg } from "@/lib/wfChatStore";
-import { MODELS, KNOWN_WORKING_MODELS, supportsVision } from "@/lib/models";
+import { autoLayout, compactLegacyLongChain, separateOverlappingNodes, simpleChainSequence } from "@/lib/workflow/layout";
+import {
+  useWFChat, sendChatToAI, stopChatToAI, stopVerification, startAutoTest, stopAutoTest,
+  clearPendingGraph, closeAutoTest, clearChat, discardWorkflowChat, appendAssistantNote,
+  verifyUnderstanding, confirmPendingExecution, cancelPendingExecution, submitChatInputs,
+  cancelChatInput, stopAllChatWork, retryChatExecution, decideChatApproval,
+  trustImportedAndContinue, cancelPendingTrust, recoverChatRuntime,
+  type Part, type ChatMsg,
+} from "@/lib/wfChatStore";
+import { MODELS, KNOWN_WORKING_MODELS, supportsVision, supportsCaptchaVision } from "@/lib/models";
 import type { Workflow, NodeRun, RunRecord, ExplainData } from "./types";
 import { nodeTypes } from "./nodeVisuals";
 import { edgeTypes } from "./WFEdge";
 import { AddNodePanel } from "./AddNodePanel";
 import { nodeSummary } from "@/lib/workflow/nodeSummary";
+import { plainChatMessage, plainLanguage } from "@/lib/workflow/plainLanguage";
+import { latestLiveRunDetail, type PublicRunLog } from "@/lib/workflow/liveProgress";
 import { RunForm } from "./RunForm";
+import { ChatInputCard } from "./ChatInputCard";
 import { NodePanel } from "./NodePanel";
 import { HistoryPanel } from "./HistoryPanel";
 import { ExplainPanel } from "./ExplainPanel";
@@ -45,6 +55,42 @@ type UndoAction =
   | { kind: "positions"; positions: Record<string, { x: number; y: number }> }
   | { kind: "rename"; nodeId: string; label: string };
 
+/** 手動畫線時可選的「什麼情況走這條」；分支節點不允許存一條語意不明的普通線。 */
+function connectionChoices(node: Workflow["nodes"][number]): { value?: string; label: string; help: string }[] {
+  if (node.type === "if-condition") {
+    return [
+      { value: "true", label: "條件成立", help: "判斷結果為是時走這條" },
+      { value: "false", label: "條件不成立", help: "判斷結果為否時走這條" },
+      { value: "error", label: "判斷出錯", help: "這一步本身執行失敗時走這條備援路徑" },
+    ];
+  }
+  if (node.type === "switch") {
+    const cases = String(node.config?.cases ?? "")
+      .split(/[\n,，]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    return [
+      ...cases.map((item) => ({ value: item, label: item, help: `分類結果是「${item}」時走這條` })),
+      { value: "其他", label: "其他", help: "沒有符合任何選項時走這條" },
+      { value: "error", label: "分流出錯", help: "這一步本身執行失敗時走這條備援路徑" },
+    ];
+  }
+  if (node.type === "wait-approval") {
+    return [
+      { value: "approved", label: "核准", help: "使用者核准後走這條" },
+      { value: "rejected", label: "拒絕", help: "使用者拒絕後走這條" },
+      { value: "error", label: "簽核出錯", help: "簽核步驟本身失敗時走這條備援路徑" },
+    ];
+  }
+  if (node.type === "trigger") {
+    return [{ label: "開始後", help: "流程被觸發後接著執行這條" }];
+  }
+  return [
+    { label: "完成後", help: "這一步正常完成後接著執行" },
+    { value: "error", label: "出錯時", help: "這一步失敗時改走這條備援路徑" },
+  ];
+}
+
 export default function WorkflowPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -54,21 +100,72 @@ export default function WorkflowPage() {
   const [nodeRuns, setNodeRuns] = useState<Record<string, NodeRun>>({});
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [activeRunStatus, setActiveRunStatus] = useState<string | null>(null);
+  const [activeRunDetail, setActiveRunDetail] = useState("");
   const [cancelling, setCancelling] = useState(false);
   const [stoppingAutoTest, setStoppingAutoTest] = useState(false);
   const [autoTestMinimized, setAutoTestMinimized] = useState(false);
   // 使用者(選填)貼上「這次已知的正確答案」——測到會跑後拿去對，對不上就繼續修到對
   const [expectedAnswer, setExpectedAnswer] = useState("");
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  // 節點面板裡尚未按「儲存」的值不能只活在 React 草稿：執行與「測到會跑」都要先存這份，
+  // 否則畫面看起來已改、正式引擎卻從磁碟讀到舊值（Google Sheet 寫入網址曾真實踩過）。
+  const [pendingNodeConfigs, setPendingNodeConfigs] = useState<Record<string, Record<string, string | boolean>>>({});
+  const trackNodeDraft = useCallback((nodeId: string, config: Record<string, string | boolean> | null) => {
+    setPendingNodeConfigs((current) => {
+      if (config) return { ...current, [nodeId]: config };
+      if (!(nodeId in current)) return current;
+      const next = { ...current };
+      delete next[nodeId];
+      return next;
+    });
+  }, []);
   // 「＋ 加步驟」抽屜(手動加節點)與「連線上插一步」共用(要宣告在畫布 edges 映射之前,onInsert 會用到)
   const [drawer, setDrawer] = useState<null | { mode: "add" } | { mode: "insert"; from: string; to: string; fromPort?: string }>(null);
+  const [pendingConnection, setPendingConnection] = useState<null | { from: string; to: string }>(null);
   // 每個節點的白話說明——一次抓整條流程的說明，點哪個節點就從裡面挑那一步，不用每點一個節點都重打一次 API
   const [explainData, setExplainData] = useState<ExplainData | null>(null);
   // 對話/思考中/待套用流程/自動測試 → 存在跨頁面存活的 store，切換畫面不遺失
-  const { chat, thinking, pendingGraph, autoTest, reloadToken, editToast, verifying } = useWFChat(id);
+  const {
+    chat, thinking, pendingGraph, autoTest, reloadToken, editToast, verifying, pendingExecution,
+    pendingInput, activeExecution, pendingApproval, pendingTrust,
+  } = useWFChat(id);
+  const [approvalNote, setApprovalNote] = useState("");
+  useEffect(() => { void recoverChatRuntime(id); }, [id]);
   const [toast, setToast] = useState<{ text: string; token: number } | null>(null);
   const toastSeq = useRef(0);
   const flashToast = useCallback((text: string) => setToast({ text, token: ++toastSeq.current }), []);
+  // 停止輸入一小段時間就背景存檔：關節點面板、切紀錄/說明也不會丟掉剛才改的值。
+  // 執行入口仍會同步再存一次 pending，涵蓋「改完立刻按執行、debounce 還沒到」的競態。
+  useEffect(() => {
+    const entries = Object.entries(pendingNodeConfigs);
+    if (entries.length === 0) return;
+    const timer = window.setTimeout(async () => {
+      for (const [nodeId, config] of entries) {
+        try {
+          const response = await fetch(`/api/workflows/${id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ nodeConfig: { id: nodeId, config } }),
+          });
+          const data = await response.json().catch(() => ({})) as { error?: string };
+          if (!response.ok) {
+            flashToast(`修改尚未存好：${data.error ?? "請再試一次"}`);
+            continue;
+          }
+          setPendingNodeConfigs((current) => {
+            // 存檔途中若使用者又繼續打字，不能用舊 request 的完成訊號清掉新草稿。
+            if (current[nodeId] !== config) return current;
+            const next = { ...current };
+            delete next[nodeId];
+            return next;
+          });
+        } catch {
+          flashToast("修改尚未存好：連不上伺服器，系統會保留草稿供下次重試");
+        }
+      }
+    }, 800);
+    return () => window.clearTimeout(timer);
+  }, [pendingNodeConfigs, id, flashToast]);
   const [thinkingLong, setThinkingLong] = useState(false);
   // 建圖進度階段(理解需求→畫圖→驗證→修正):thinking 期間每秒輪詢,讓使用者知道慢在哪一步
   const [buildStage, setBuildStage] = useState<{ stage: string; seconds: number } | null>(null);
@@ -103,6 +200,8 @@ export default function WorkflowPage() {
   // 長操作(解析上傳檔案、開網址截圖、組送出訊息)進行中要顯示的提示；非 null 時輸入區顯示 spinner+文字、送出鈕 disabled，
   // 讓使用者知道「正在處理、別重複送」——不然拖檔/貼網址後畫面沒反應，使用者會狂拖狂送造成重複。
   const [busyHint, setBusyHint] = useState<string | null>(null);
+  const [urlReadProgress, setUrlReadProgress] = useState<{ current: number; total: number; seconds: number; stopping?: boolean } | null>(null);
+  const urlReadAbortRef = useRef<AbortController | null>(null);
   const [starting, setStarting] = useState(false); // 按「▶ 執行」到真正開跑之間的空窗，用來 disable 按鈕防重複點
   const [dragOver, setDragOver] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -110,6 +209,18 @@ export default function WorkflowPage() {
   const [showExplain, setShowExplain] = useState(false);
   const [showVersions, setShowVersions] = useState(false);
   const [showRunForm, setShowRunForm] = useState(false);
+  const [focusedHistoryRun, setFocusedHistoryRun] = useState<string | null>(null);
+  useEffect(() => {
+    const query = new URLSearchParams(window.location.search);
+    if (query.get("run") === "1") {
+      queueMicrotask(() => setShowRunForm(true));
+      window.history.replaceState(null, "", window.location.pathname);
+    } else if (query.get("history")) {
+      const runId = query.get("history")!;
+      queueMicrotask(() => { setFocusedHistoryRun(runId); setShowHistory(true); });
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  }, [id]);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const moreMenuRef = useRef<HTMLDivElement>(null);
   const [notFound, setNotFound] = useState(false);
@@ -120,6 +231,9 @@ export default function WorkflowPage() {
   // 開源可攜性缺口)。預設仍是下拉(對用內建免費服務的人最省事)，但可以切換成文字輸入自訂代號；
   // 目前存的 model 若本來就不在清單裡(表示已經自訂過)，直接視覺上以自訂模式呈現。
   const [showCustomModel, setShowCustomModel] = useState(false);
+  const [sidePanelWidth, setSidePanelWidth] = useState(440);
+  const [panelWidthReady, setPanelWidthReady] = useState(false);
+  const [chainStepIndex, setChainStepIndex] = useState(0);
   const wfNameCancelledRef = useRef(false);
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -128,9 +242,24 @@ export default function WorkflowPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const wfRef = useRef<Workflow | null>(null);
   const rfInstance = useRef<ReactFlowInstance | null>(null);
+  const chainSequence = wf ? simpleChainSequence(wf.nodes, wf.edges) : null;
+  const chainKey = chainSequence?.join(">");
+  const chainFirstNode = chainSequence?.length ? nodes.find((node) => node.id === chainSequence[0]) : undefined;
+  const chainFirstX = chainFirstNode?.position.x;
+  const chainFirstY = chainFirstNode?.position.y;
   const chatInputRef = useRef("");
   useEffect(() => { wfRef.current = wf; }, [wf]);
   useEffect(() => { chatInputRef.current = chatInput; }, [chatInput]);
+  // 長直鏈不再 fit 全圖縮成火柴棒；保留可讀縮放，但把第一步真正放在「畫布中央」，
+  // 不是以前寫死 x=10/y=40 貼在左上角。等右側面板記憶寬度恢復後再置中，避免畫布寬度二次改變又推歪。
+  useEffect(() => {
+    if (!panelWidthReady || !chainKey || chainFirstX === undefined || chainFirstY === undefined || !rfInstance.current) return;
+    const timer = window.setTimeout(() => {
+      setChainStepIndex(0);
+      rfInstance.current?.setCenter(chainFirstX + 85, chainFirstY + 50, { zoom: 0.8, duration: 0 });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [id, panelWidthReady, chainKey, chainFirstX, chainFirstY]);
 
   // 工具列「⋯」選單：點選單以外任何地方就關閉
   useEffect(() => {
@@ -143,59 +272,81 @@ export default function WorkflowPage() {
   }, [showMoreMenu]);
 
   const fileToBase64 = (f: File) =>
-    new Promise<string>((res) => {
+    new Promise<string>((resolve, reject) => {
       const r = new FileReader();
-      r.onload = () => res((r.result as string).split(",")[1]);
+      r.onload = () => {
+        const encoded = typeof r.result === "string" ? r.result.split(",")[1] : "";
+        if (!encoded) reject(new Error(`讀不到「${f.name}」的內容`));
+        else resolve(encoded);
+      };
+      r.onerror = () => reject(new Error(`讀取「${f.name}」失敗`));
+      r.onabort = () => reject(new Error(`已停止讀取「${f.name}」`));
       r.readAsDataURL(f);
     });
 
   // 處理拖進來/貼上/上傳的檔案：依「使用者操作的順序」加入素材(先收當前文字再接檔案)，順序不亂。
   // PDF/Word(.docx/.doc)/RTF/Excel(.xlsx/.xls)/PowerPoint(.pptx) 這些瀏覽器讀不懂的格式，交給伺服器用真正的函式庫解析成純文字(不用逼使用者自己轉檔)。
   const processFiles = useCallback(async (files: File[]) => {
+    const selectedFiles = files.slice(0, 12);
     const newParts: Part[] = [];
     // 解析檔案(尤其 Excel 要伺服器渲染表格圖、PDF 逐頁渲染)通常要好幾秒，一定要給進度提示，
     // 不然畫面沒反應、附件也還沒出現，使用者會以為沒吃到檔案而重複拖(最後冒出重複附件)。
-    setBusyHint(files.length > 1 ? `讀取 ${files.length} 個檔案中…` : `讀取「${files[0]?.name ?? "檔案"}」中…`);
+    setBusyHint(selectedFiles.length > 1 ? `讀取 ${selectedFiles.length} 個檔案中…` : `讀取「${selectedFiles[0]?.name ?? "檔案"}」中…`);
     try {
-    for (const f of files) {
+    for (const f of selectedFiles) {
+      if (f.size > 20 * 1024 * 1024) {
+        newParts.push({ kind: "file", name: f.name, content: "(這個檔案超過 20MB，沒有送給 AI。請縮小檔案、拆成幾份，或只匯出需要的分頁後再附上。)" });
+        continue;
+      }
       if (f.type.startsWith("image/")) {
         const b64 = await fileToBase64(f);
-        newParts.push({ kind: "image", b64, name: f.name || "截圖" });
-      } else if (/\.(pdf|docx|rtf|xlsx|xlsm|xls|doc|pptx)$/i.test(f.name)) {
-        // 這個判斷一定要排在「純文字」分支前面：.rtf 瀏覽器常回報 MIME 是 "text/rtf"，
-        // 會被下面 f.type.startsWith("text/") 誤判成純文字直接讀出控制字亂碼，要先攔在這裡送伺服器正確解析。
-        // (.xls/.doc 舊版二進位 Office 格式、.pptx 投影片，伺服器都會直接解析成文字，不用另存新檔)
+        try {
+          const res = await fetch("/api/extract-text", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ filename: f.name || "截圖", dataBase64: b64, mime: f.type || "image/png", workflowId: id }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error ?? "圖片保存失敗");
+          for (const img of (data.images ?? []) as { b64: string; name: string; mime?: string }[]) {
+            newParts.push({ kind: "image", b64: img.b64, name: img.name, mime: img.mime || f.type || "image/png", assetId: data.assetId });
+          }
+        } catch {
+          newParts.push({ kind: "image", b64, name: f.name || "截圖", mime: f.type || "image/png" });
+        }
+      } else {
+        // 所有非圖片都走同一條伺服器解析管線：除了 Office/PDF，也包含程式碼、
+        // YAML/SQL/EML/ZIP 等。不再用白名單把陌生副檔名當「不明二進位」，那會讓 AI 只看到檔名。
         try {
           const dataBase64 = await fileToBase64(f);
           const res = await fetch("/api/extract-text", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ filename: f.name, dataBase64 }),
+            body: JSON.stringify({ filename: f.name, dataBase64, mime: f.type, workflowId: id }),
           });
           const data = await res.json();
           if (res.ok) {
-            newParts.push({ kind: "file", name: f.name, content: data.text.slice(0, 6000) });
+            newParts.push({ kind: "file", name: f.name, content: data.text, assetId: data.assetId });
             // 伺服器渲染的圖(Excel 的表格圖)+ 檔案裡嵌入的圖 → 當成圖片一起給 AI 看，讓它像人一樣看到顏色/版型/圖片
-            for (const img of (data.images ?? []) as { b64: string; name: string }[]) {
-              newParts.push({ kind: "image", b64: img.b64, name: img.name });
+            for (const img of (data.images ?? []) as { b64: string; name: string; mime?: string }[]) {
+              newParts.push({ kind: "image", b64: img.b64, name: img.name, mime: img.mime || "image/png", assetId: data.assetId });
             }
           } else newParts.push({ kind: "file", name: f.name, content: `(這個檔案讀取失敗：${data.error ?? "未知錯誤"})` });
         } catch {
           newParts.push({ kind: "file", name: f.name, content: "(檔案上傳/解析時連線出錯，可以再試一次，或直接把內容貼成文字)" });
         }
-      } else if (/\.(txt|csv|json|md|log|html?|xml|tsv)$/i.test(f.name) || f.type.startsWith("text/")) {
-        const text = await f.text();
-        newParts.push({ kind: "file", name: f.name, content: text.slice(0, 6000) });
-      } else if (/\.rtfd$/i.test(f.name)) {
-        // .rtfd 是 macOS 的「檔案目錄」(不是單一檔案)，用點檔案按鈕選取時瀏覽器讀不出真正內容(size 通常是 0)；
-        // 直接從 Finder 拖拉進來才能正確讀到裡面的 TXT.rtf(見上面 resolveDroppedFiles)。這裡給明確的提示，不要默默失敗。
-        newParts.push({ kind: "file", name: f.name, content: "(.rtfd 是 macOS 的檔案目錄，用這個按鈕選取讀不到內容——請改成直接把檔案從 Finder 拖拉進這個視窗，就能正確讀到內容)" });
-      } else {
-        newParts.push({ kind: "file", name: f.name, content: `(二進位檔案，類型 ${f.type || "未知"}，可作為流程要處理的輸入)` });
       }
     }
     } finally {
       setBusyHint(null);
+    }
+    if (files.length > selectedFiles.length) {
+      newParts.push({
+        kind: "file",
+        name: "尚未讀取的檔案",
+        content: `這次選了 ${files.length} 個檔案；為避免瀏覽器卡住，只讀取前 ${selectedFiles.length} 個。其餘 ${files.length - selectedFiles.length} 個沒有送給 AI，請分批再附上。`,
+      });
+      flashToast(`一次最多處理 12 個檔案；其餘 ${files.length - selectedFiles.length} 個請分批傳`);
     }
     if (newParts.length === 0) return;
     setDraftParts((prev) => {
@@ -204,7 +355,7 @@ export default function WorkflowPage() {
       return [...committed, ...newParts];
     });
     setChatInput("");
-  }, []);
+  }, [id, flashToast]);
 
   // macOS 的 .rtfd(富文字檔「目錄」，不是單一檔案)拖進來時，瀏覽器的 dataTransfer.files 拿到的是
   // 讀不出內容的空殼——要用 webkitGetAsEntry() 走訪目錄，把裡面真正的 TXT.rtf 抓出來當 RTF 處理。
@@ -299,13 +450,19 @@ export default function WorkflowPage() {
       if (old !== undefined && old !== name) pushUndo({ kind: "rename", nodeId, label: old });
       const newNodes = cur.nodes.map((n) => (n.id === nodeId ? { ...n, label: name } : n));
       setWf({ ...cur, nodes: newNodes });
-      await fetch(`/api/workflows/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rename: { id: nodeId, label: name } }),
-      }).catch(() => {});
+      try {
+        const response = await fetch(`/api/workflows/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rename: { id: nodeId, label: name } }),
+        });
+        if (!response.ok) throw new Error((await response.json().catch(() => ({})) as { error?: string }).error ?? "改名失敗");
+      } catch (error) {
+        flashToast(error instanceof Error ? error.message : "改名失敗，已還原原名稱");
+        setWf((latest) => latest ? { ...latest, nodes: latest.nodes.map((n) => n.id === nodeId ? { ...n, label: old ?? n.label } : n) } : latest);
+      }
     },
-    [id, setWf],
+    [id, setWf, flashToast],
   );
 
   const load = useCallback(async () => {
@@ -314,11 +471,70 @@ export default function WorkflowPage() {
       if (!res.ok) { setNotFound(true); return; }
       const data = await res.json();
       if (!data.workflow) { setNotFound(true); return; }
-      setWf(data.workflow);
+      const compacted = compactLegacyLongChain(data.workflow.nodes ?? [], data.workflow.edges ?? []);
+      const candidateNodes = compacted
+        ? data.workflow.nodes.map((node: Workflow["nodes"][number]) => ({ ...node, position: compacted[node.id] ?? node.position }))
+        : (data.workflow.nodes ?? []);
+      const separated = separateOverlappingNodes(candidateNodes);
+      const workflow = separated.changed
+        ? { ...data.workflow, nodes: candidateNodes.map((n: Workflow["nodes"][number]) => ({ ...n, position: separated.positions[n.id] })) }
+        : compacted ? { ...data.workflow, nodes: candidateNodes } : data.workflow;
+      setWf(workflow);
+      // 既有流程若曾存進重疊座標或舊版超寬單列，載入時一次性修正；只送座標，不會覆蓋 AI 同時修好的 config。
+      if (separated.changed || compacted) {
+        void fetch(`/api/workflows/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ positions: Object.fromEntries(workflow.nodes.map((node: Workflow["nodes"][number]) => [node.id, node.position])) }),
+        });
+      }
     } catch {
       setNotFound(true);
     }
   }, [id]);
+
+  useEffect(() => {
+    const saved = Number(localStorage.getItem("agenthub_workflow_panel_width"));
+    const restore = window.setTimeout(() => {
+      if (Number.isFinite(saved) && saved >= 360 && saved <= 760) setSidePanelWidth(saved);
+      setPanelWidthReady(true);
+    }, 0);
+    return () => window.clearTimeout(restore);
+  }, []);
+
+  const resizeSidePanel = useCallback((delta: number) => {
+    setSidePanelWidth((current) => {
+      const max = Math.max(360, Math.min(760, window.innerWidth - 420));
+      const next = Math.min(max, Math.max(360, current + delta));
+      localStorage.setItem("agenthub_workflow_panel_width", String(next));
+      return next;
+    });
+  }, []);
+
+  const startPanelResize = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (window.innerWidth < 901) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidePanelWidth;
+    const onMove = (event: PointerEvent) => {
+      const max = Math.max(360, Math.min(760, window.innerWidth - 420));
+      setSidePanelWidth(Math.min(max, Math.max(360, startWidth + startX - event.clientX)));
+    };
+    const onUp = (event: PointerEvent) => {
+      const max = Math.max(360, Math.min(760, window.innerWidth - 420));
+      const width = Math.min(max, Math.max(360, startWidth + startX - event.clientX));
+      setSidePanelWidth(width);
+      localStorage.setItem("agenthub_workflow_panel_width", String(width));
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  }, [sidePanelWidth]);
 
   // 跟 load() 一起刷新——節點被 AI 改過(reloadToken 變動)白話說明也要跟著變新，不然使用者點開節點
   // 看到的「這一步在做什麼」還是改之前的舊說明。這裡只抓一次、NodePanel 從裡面挑對應那一步，
@@ -390,6 +606,8 @@ export default function WorkflowPage() {
   // wf 定義變動時(載入/套用/改名) → 重建畫布節點與連線
   useEffect(() => {
     if (!wf) return;
+    const order = simpleChainSequence(wf.nodes, wf.edges);
+    const stepById = new Map((order ?? []).map((nodeId, index) => [nodeId, index]));
     setNodes(
       wf.nodes.map((n) => ({
         id: n.id,
@@ -399,8 +617,12 @@ export default function WorkflowPage() {
           label: n.label,
           type: n.type,
           status: nodeRuns[n.id]?.status,
-          summary: nodeSummary(n.type, n.config),
-          onClick: () => setSelectedNode(n.id),
+          stepNumber: stepById.has(n.id) ? stepById.get(n.id)! + 1 : undefined,
+          summary: plainLanguage(nodeSummary(n.type, n.config)),
+          onClick: () => {
+            setSelectedNode(n.id);
+            if (stepById.has(n.id)) setChainStepIndex(stepById.get(n.id)!);
+          },
           onRename: (name: string) => renameNode(n.id, name),
         },
       })),
@@ -431,7 +653,7 @@ export default function WorkflowPage() {
     if (!activeRunId) return;
     async function poll() {
       // 掛在 1.5 秒 interval 上，一定要接錯誤(伺服器重啟期間會連續失敗)
-      let data: { nodeRuns?: NodeRun[]; run?: { status: string } };
+      let data: { nodeRuns?: NodeRun[]; run?: { status: string }; logs?: PublicRunLog[] };
       try {
         const res = await fetch(`/api/runs/${activeRunId}`);
         if (!res.ok) return;
@@ -458,6 +680,7 @@ export default function WorkflowPage() {
           return changed ? prev.map((e) => ({ ...e, animated: map[e.source]?.status === "running" })) : prev;
         });
       }
+      setActiveRunDetail(latestLiveRunDetail(data.logs));
       setActiveRunStatus(data.run?.status ?? null);
       if (data.run && data.run.status !== "running" && data.run.status !== "queued") {
         if (pollRef.current) clearInterval(pollRef.current);
@@ -492,16 +715,25 @@ export default function WorkflowPage() {
       const cur = wfRef.current;
       if (!cur) return;
       const posById = Object.fromEntries(changed.map((n) => [n.id, n.position]));
-      const newNodes = cur.nodes.map((n) => (posById[n.id] ? { ...n, position: posById[n.id] } : n));
+      let newNodes = cur.nodes.map((n) => (posById[n.id] ? { ...n, position: posById[n.id] } : n));
+      const separated = separateOverlappingNodes(newNodes);
+      if (separated.changed) newNodes = newNodes.map((node) => ({ ...node, position: separated.positions[node.id] }));
+      const safePositions = Object.fromEntries(newNodes.map((node) => [node.id, node.position]));
       setWf({ ...cur, nodes: newNodes });
       // 只送位置(伺服器端合併)，不送整包 nodes——見上面 renameNode 的說明
-      await fetch(`/api/workflows/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ positions: posById }),
-      }).catch(() => {});
+      try {
+        const response = await fetch(`/api/workflows/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ positions: safePositions }),
+        });
+        if (!response.ok) throw new Error();
+      } catch {
+        flashToast("節點位置保存失敗，已重新載入");
+        await load();
+      }
     },
-    [id],
+    [id, flashToast, load],
   );
 
   const handleNodesChange = useCallback(
@@ -521,19 +753,30 @@ export default function WorkflowPage() {
           if (Object.keys(oldPos).length) pushUndo({ kind: "positions", positions: oldPos });
         }
         setNodes((c) => {
-          persistPositions(c);
+          const wfNodes = c.map((node) => ({
+            id: node.id,
+            type: "",
+            label: "",
+            config: {},
+            position: { x: node.position.x, y: node.position.y },
+          }));
+          const separated = separateOverlappingNodes(wfNodes);
+          const adjusted = separated.changed
+            ? c.map((node) => ({ ...node, position: separated.positions[node.id] ?? node.position }))
+            : c;
+          persistPositions(adjusted);
           // 同步 wfRef 的位置成拖完的新值——連拖兩次時,第二次記到的「舊位置」才是第一次拖完的位置。
           // (寫進 ref 不觸發重繪;updater 內冪等,StrictMode 重放也安全)
           if (wfRef.current) {
             wfRef.current = {
               ...wfRef.current,
               nodes: wfRef.current.nodes.map((n) => {
-                const rf = c.find((x) => x.id === n.id);
+                const rf = adjusted.find((x) => x.id === n.id);
                 return rf ? { ...n, position: { x: rf.position.x, y: rf.position.y } } : n;
               }),
             };
           }
-          return c;
+          return adjusted;
         });
       }
       // 刪除節點(框選後按 Delete / 或單一刪除)→ 存回 workflow，連帶清掉相關連線
@@ -560,32 +803,54 @@ export default function WorkflowPage() {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ removeNodeIds: removed }),
-          }).catch(() => {});
+          }).then(async (response) => {
+            if (response.ok) return;
+            const data = await response.json().catch(() => ({}));
+            flashToast((data as { error?: string }).error ?? "刪除節點失敗");
+            await load();
+          }).catch(() => { flashToast("刪除節點保存失敗，已重新載入"); load(); });
         }
       }
     },
-    [onNodesChange, persistPositions, setNodes, id, load],
+    [onNodesChange, persistPositions, setNodes, id, load, flashToast],
+  );
+
+  const saveConnection = useCallback(
+    (from: string, to: string, fromPort?: string) => {
+      const cur = wfRef.current;
+      // 擋掉自己連自己(會形成環)和重複連線(同一對節點拉兩次會存兩條，執行走兩遍)
+      if (!cur || from === to) return;
+      if (cur.edges.some((e) => e.from === from && e.to === to && (e.fromPort ?? "") === (fromPort ?? ""))) return;
+      setEdges((eds) => addEdge({ id: `pending-${from}-${to}-${fromPort ?? "normal"}`, source: from, target: to, type: "wf", className: fromPort === "error" ? "edge-error" : "edge-main" }, eds));
+      {
+        const edge = { from, to, ...(fromPort ? { fromPort } : {}) };
+        pushUndo({ kind: "addEdge", edge });
+        const newEdges = [...cur.edges, edge];
+        setWf({ ...cur, edges: newEdges });
+        fetch(`/api/workflows/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ addEdges: [edge] }),
+        }).then(async (res) => {
+          if (res.ok) return;
+          const data = await res.json().catch(() => ({}));
+          flashToast((data as { error?: string }).error ?? "連線失敗");
+          await load();
+        }).catch(() => { flashToast("連線保存失敗，已重新載入"); load(); });
+      }
+    },
+    [id, setEdges, flashToast, load],
   );
 
   const onConnect = useCallback(
     (conn: Connection) => {
       const cur = wfRef.current;
-      // 擋掉自己連自己(會形成環)和重複連線(同一對節點拉兩次會存兩條，執行走兩遍)
-      if (!conn.source || !conn.target || conn.source === conn.target) return;
-      if (cur?.edges.some((e) => e.from === conn.source && e.to === conn.target)) return;
-      setEdges((eds) => addEdge({ ...conn, type: "wf", className: "edge-main" }, eds));
-      if (cur && conn.source && conn.target) {
-        pushUndo({ kind: "addEdge", edge: { from: conn.source, to: conn.target } });
-        const newEdges = [...cur.edges, { from: conn.source, to: conn.target }];
-        setWf({ ...cur, edges: newEdges });
-        fetch(`/api/workflows/${id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ edges: newEdges }),
-        });
-      }
+      if (!cur || !conn.source || !conn.target || conn.source === conn.target) return;
+      // 每條手動畫的線都先讓人選「什麼情況走這條」。以前只有一個無名稱的輸出點，
+      // switch/條件/簽核永遠存不出 fromPort，錯誤分支也完全沒入口，所謂手動編輯其實做不出分支圖。
+      setPendingConnection({ from: conn.source, to: conn.target });
     },
-    [id, setEdges],
+    [],
   );
 
   // 單獨刪除一條連線(不是刪節點)：React Flow 的 onEdgesChange 本身只改本地畫面，
@@ -611,10 +876,15 @@ export default function WorkflowPage() {
       fetch(`/api/workflows/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ edges: newEdges }),
-      }).catch(() => {});
+        body: JSON.stringify({ removeEdges: cur.edges.filter((_, i) => removedIdx.has(i)) }),
+      }).then(async (res) => {
+        if (res.ok) return;
+        const data = await res.json().catch(() => ({}));
+        flashToast((data as { error?: string }).error ?? "刪除連線失敗");
+        await load();
+      }).catch(() => { flashToast("刪除連線保存失敗，已重新載入"); load(); });
     },
-    [id, onEdgesChange, setWf, flashToast],
+    [id, onEdgesChange, setWf, flashToast, load],
   );
 
   // 自動排列(由左到右分層對齊)
@@ -626,21 +896,40 @@ export default function WorkflowPage() {
     const newNodes = cur.nodes.map((n) => ({ ...n, position: pos[n.id] ?? n.position }));
     setWf({ ...cur, nodes: newNodes });
     // 只送位置(伺服器端合併)，不送整包 nodes——見上面 renameNode 的說明
-    await fetch(`/api/workflows/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ positions: pos }),
-    }).catch(() => {});
-    // 排列完畫面要自動縮放到剛好裝得下全部節點，不然節點數一多、排完版反而超出畫面看不到全貌
-    requestAnimationFrame(() => rfInstance.current?.fitView({ padding: 0.15, duration: 300 }));
-  }, [id]);
+    try {
+      const response = await fetch(`/api/workflows/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ positions: pos }),
+      });
+      if (!response.ok) throw new Error();
+    } catch {
+      flashToast("自動排列保存失敗，已重新載入");
+      await load();
+      return;
+    }
+    requestAnimationFrame(() => {
+      const sequence = simpleChainSequence(cur.nodes, cur.edges);
+      if (sequence) {
+        const first = newNodes.find((node) => node.id === sequence[0]);
+        if (first) rfInstance.current?.setCenter(first.position.x + 85, first.position.y + 50, { zoom: 0.8, duration: 300 });
+      } else {
+        rfInstance.current?.fitView({ padding: 0.15, duration: 300, minZoom: 0.2 });
+      }
+    });
+  }, [id, flashToast, load]);
 
   // ── Ctrl-Z 復原執行:反向操作送伺服器端合併,再重載 ──
   const undo = useCallback(async () => {
     const a = undoStackRef.current.pop();
     if (!a) { flashToast("沒有可復原的操作"); return; }
-    const patch = (body: Record<string, unknown>) =>
-      fetch(`/api/workflows/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const patch = async (body: Record<string, unknown>) => {
+      const response = await fetch(`/api/workflows/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error((data as { error?: string }).error ?? "復原操作被拒絕");
+      }
+    };
     try {
       switch (a.kind) {
         case "removeNodes":
@@ -669,8 +958,9 @@ export default function WorkflowPage() {
       }
       await load();
       flashToast("↩︎ 已復原");
-    } catch {
-      flashToast("復原失敗,請再試一次");
+    } catch (error) {
+      flashToast(error instanceof Error ? `復原失敗：${error.message}` : "復原失敗，請再試一次");
+      await load();
     }
   }, [id, load, flashToast]);
 
@@ -740,7 +1030,10 @@ export default function WorkflowPage() {
   async function deleteWorkflow() {
     if (!confirm(`確定要刪除「${wf!.name}」嗎？此動作無法復原。`)) return;
     const res = await fetch(`/api/workflows/${id}`, { method: "DELETE" });
-    if (res.ok) router.push("/");
+    if (res.ok) {
+      discardWorkflowChat(id);
+      router.push("/");
+    }
     else alert((await res.json()).error ?? "刪除失敗");
   }
 
@@ -748,6 +1041,24 @@ export default function WorkflowPage() {
     if (starting) return; // 啟動請求還在飛就別重複按
     setStarting(true);
     try {
+    // 使用者直接改欄位後就按執行，不需要記得再按一次儲存；而且一定等伺服器確認存好才啟動。
+    for (const [nodeId, config] of Object.entries(pendingNodeConfigs)) {
+      const saveRes = await fetch(`/api/workflows/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nodeConfig: { id: nodeId, config } }),
+      });
+      const saveData = await saveRes.json().catch(() => ({})) as { error?: string };
+      if (!saveRes.ok) {
+        alert(`目前畫面上的修改還沒存成功：${saveData.error ?? "請再試一次"}\n\n流程尚未開始，沒有使用舊設定。`);
+        return;
+      }
+    }
+    if (Object.keys(pendingNodeConfigs).length > 0) {
+      setPendingNodeConfigs({});
+      await load();
+      flashToast("已先儲存目前修改，再開始執行");
+    }
     // 先確認沒有正在跑/排隊的執行——首頁或排程剛觸發的執行，本頁的狀態可能還沒接上(輪詢有 5 秒空窗)，
     // 這時再按「執行」會排進第二次重複執行，使用者看起來像按一次跑兩遍。改成直接接上正在跑的那個。
     try {
@@ -760,12 +1071,25 @@ export default function WorkflowPage() {
       }
     } catch { /* 查不到就照舊執行 */ }
     try {
-      const res = await fetch(`/api/workflows/${id}/run`, {
+      let res = await fetch(`/api/workflows/${id}/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ params, headed }),
       });
-      const data = await res.json();
+      let data = await res.json();
+      if (res.status === 409 && data.code === "IMPORTED_WORKFLOW_CONFIRMATION_REQUIRED") {
+        const confirmed = window.confirm(
+          "這是從外部檔案匯入的流程。\n\n它可能讀取你電腦上的檔案、開啟網站，或把資料傳到外部服務。請先檢查節點與網址；你是否信任來源並要繼續第一次執行？",
+        );
+        if (!confirmed) return;
+        res = await fetch(`/api/workflows/${id}/run`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ params, headed, confirmImported: true }),
+        });
+        data = await res.json();
+        if (res.ok) await load();
+      }
       if (res.ok && data.runId) {
         setNodeRuns({});
         setActiveRunId(data.runId);
@@ -823,9 +1147,27 @@ export default function WorkflowPage() {
 
   // 草稿區「幫我測到會跑」：跑一輪 → 失敗自動修再跑 → 直到成功或確定要人處理。旁邊有頭瀏覽器會自己動。
   // fetch 在 store(模組層)發動，切走畫面也不中斷；跑完後(若還在本頁)刷新畫布。
-  function runAutoTest() {
+  async function runAutoTest() {
     if (autoTest?.running) { setAutoTestMinimized(false); return; } // 已在跑就是把縮小的視窗叫回來
     setAutoTestMinimized(false);
+    // 自動修復也只能以已儲存設定為起點；否則 AI 會對著舊設定修，既慢又會讓人誤以為它不懂指令。
+    for (const [nodeId, config] of Object.entries(pendingNodeConfigs)) {
+      const saveRes = await fetch(`/api/workflows/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nodeConfig: { id: nodeId, config } }),
+      });
+      const saveData = await saveRes.json().catch(() => ({})) as { error?: string };
+      if (!saveRes.ok) {
+        alert(`目前畫面上的修改還沒存成功：${saveData.error ?? "請再試一次"}\n\n自動測試尚未開始，沒有使用舊設定。`);
+        return;
+      }
+    }
+    if (Object.keys(pendingNodeConfigs).length > 0) {
+      setPendingNodeConfigs({});
+      await load();
+      flashToast("已先儲存目前修改，再開始測試");
+    }
     // expectedAnswer 有填才會啟動「對答案」——沒填就是原本的一鍵測到會跑
     startAutoTest(id, expectedAnswer).then(() => { load(); loadRuns(); });
   }
@@ -855,25 +1197,66 @@ export default function WorkflowPage() {
     // 訊息裡若有網址：用伺服器的 chromium 打開它、截圖+抽文字，把網頁內容和畫面一起附上，
     // 讓 AI「看得到那個網站」——跟人點開連結看是一樣的。這段要幾秒，一定要顯示進度+擋重複送，
     // 不然訊息文字瞬間消失、聊天區毫無變化，使用者會以為沒送出而重貼重送(開兩條 chromium 重複抓)。
-    const urls = (text.match(/https?:\/\/[^\s，。、）)】」]+/g) ?? []).slice(0, 3);
+    const allUrls = [...new Set(text.match(/https?:\/\/[^\s，。、）)】」]+/g) ?? [])];
+    const urls = allUrls.slice(0, 3);
+    const omittedUrls = allUrls.slice(3);
     if (urls.length) {
-      setBusyHint(urls.length > 1 ? `讀取 ${urls.length} 個網址中…` : "讀取網址中…");
+      const controller = new AbortController();
+      urlReadAbortRef.current = controller;
+      let current = 1;
+      const startedAt = Date.now();
+      setUrlReadProgress({ current, total: urls.length, seconds: 0 });
+      setBusyHint(urls.length > 1 ? `正在連線第 1/${urls.length} 個網址…` : "正在連線網址…");
+      const ticker = window.setInterval(() => {
+        setUrlReadProgress((prev) => prev ? { ...prev, current, seconds: Math.floor((Date.now() - startedAt) / 1000) } : null);
+      }, 1_000);
+      const failures: string[] = [];
       try {
-        for (const url of urls) {
+        for (const [index, url] of urls.entries()) {
+          if (controller.signal.aborted) break;
+          current = index + 1;
+          setUrlReadProgress((prev) => prev ? { ...prev, current } : null);
+          setBusyHint(urls.length > 1 ? `正在讀取第 ${current}/${urls.length} 個網址…` : "正在讀取網頁內容與畫面…");
           try {
-            const res = await fetch(`/api/fetch-url`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+            const res = await fetch(`/api/fetch-url`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ url, workflowId: id }),
+              signal: controller.signal,
+            });
             const d = await res.json();
             if (res.ok) {
               // Google 試算表/文件是直接讀到的真實內容(可能好幾個分頁、很密)——給多一點額度，
               // 不然只留 6000 字會把後面的分頁/日期區間切掉，AI 又變成「看不到」。一般網頁維持 6000。
               const cap = d.googleExport ? 16000 : 6000;
-              parts.push({ kind: "file", name: url, content: (d.text ?? "").slice(0, cap) });
-              if (d.image) parts.push({ kind: "image", b64: d.image, name: `網頁截圖:${d.title || url}` });
-            }
-          } catch { /* 打不開就算了，訊息照送 */ }
+              parts.push({ kind: "file", name: url, content: (d.text ?? "").slice(0, cap), assetId: d.assetId });
+              if (d.image) parts.push({ kind: "image", b64: d.image, name: `網頁截圖:${d.title || url}`, mime: "image/png", assetId: d.assetId });
+            } else failures.push(`${url}：${d.error ?? "讀取失敗"}`);
+          } catch (error) {
+            if (!controller.signal.aborted) failures.push(`${url}：${error instanceof Error ? error.message : "連線失敗"}`);
+          }
         }
       } finally {
+        window.clearInterval(ticker);
+        urlReadAbortRef.current = null;
+        setUrlReadProgress(null);
         setBusyHint(null);
+      }
+      if (omittedUrls.length) {
+        parts.push({
+          kind: "file",
+          name: "尚未讀取的網址",
+          content: `為避免一次等待過久，這則訊息只實際讀取前 3 個網址；以下 ${omittedUrls.length} 個還沒有打開，AI 不可以假裝已驗證：\n${omittedUrls.join("\n")}\n請分成下一則訊息再傳，我會接續同一份流程。`,
+        });
+        flashToast(`這則有 ${allUrls.length} 個網址；已讀前 3 個，其餘請下一則再傳`);
+      }
+      // 不再靜默吞掉失敗：AI 和使用者都要知道這次其實沒有讀到網頁內容，避免模型只看網址後假裝驗證過。
+      if (controller.signal.aborted) {
+        parts.push({ kind: "file", name: "網址讀取狀態", content: "使用者已停止讀取網址；以下回答不能假裝已驗證網頁內容。" });
+        flashToast("已停止讀取網址；原本的文字仍會送給 AI");
+      } else if (failures.length) {
+        parts.push({ kind: "file", name: "網址讀取失敗", content: failures.join("\n") });
+        flashToast(failures.length === 1 ? "網址沒有讀成功，已把原因交給 AI" : `${failures.length} 個網址沒有讀成功，已附上原因`);
       }
     }
 
@@ -908,7 +1291,7 @@ export default function WorkflowPage() {
     clearPendingGraph(id);
     // 觸發自動套用的結果講清楚:webhook/表單/LINE 網址直接給、失敗備援關聯建了沒——不用使用者去面板翻
     const extras = [
-      pendingGraph.schedule ? "排程也已建立並啟用。" : "",
+      pendingGraph.schedule ? (wf!.status === "official" ? "排程也已建立並啟用。" : "排程已建立；這條流程還是草稿，設為正式後才會自動執行。") : "",
       applied.webhookUrl ? `\n🔗 Webhook 已啟用:${applied.webhookUrl}` : "",
       applied.formUrl ? `\n📝 表單網址:${applied.formUrl}` : "",
       applied.lineUrl ? `\n💬 LINE webhook 已啟用:${applied.lineUrl}\n(LINE 平台只能打公網 HTTPS——先用 cloudflared/ngrok 把這個網址開出去,再填進 LINE Developers;Channel Secret 記得到設定頁填)` : "",
@@ -923,17 +1306,29 @@ export default function WorkflowPage() {
     const layout = autoLayout(pendingGraph.nodes, pendingGraph.edges);
     // 只送「座標」不送整包 nodes(規則1：前端絕不整包送 nodes)——上面的 PUT 已存好整張圖，這裡只補位置。
     // 送整包 config 有可能把這幾毫秒間 autofix/autorun 在後端剛改好的節點設定無聲蓋掉。
-    const positions = Object.fromEntries(
+    const preferredPositions = Object.fromEntries(
       pendingGraph.nodes.map((n) => [n.id, existingPos.get(n.id) ?? layout[n.id] ?? n.position]),
     );
-    await fetch(`/api/workflows/${id}`, {
+    const preferredNodes = pendingGraph.nodes.map((node) => ({ ...node, position: preferredPositions[node.id] }));
+    const separatedPreferred = separateOverlappingNodes(preferredNodes);
+    const positions = separatedPreferred.changed ? separatedPreferred.positions : preferredPositions;
+    const positionResponse = await fetch(`/api/workflows/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ positions }),
-    });
+    }).catch(() => null);
+    if (!positionResponse?.ok) flashToast("流程已套用；自訂位置未能保存，已使用安全排列");
     await load();
-    // 套用後畫面自動縮放到剛好裝得下全部節點，不然節點數一多，新流程圖反而超出畫面外看不到
-    requestAnimationFrame(() => rfInstance.current?.fitView({ padding: 0.15, duration: 300 }));
+    requestAnimationFrame(() => {
+      const sequence = simpleChainSequence(pendingGraph.nodes, pendingGraph.edges);
+      if (sequence) {
+        const first = pendingGraph.nodes.find((node) => node.id === sequence[0]);
+        const position = first ? positions[first.id] ?? first.position : null;
+        if (position) rfInstance.current?.setCenter(position.x + 85, position.y + 50, { zoom: 0.8, duration: 300 });
+      } else {
+        rfInstance.current?.fitView({ padding: 0.15, duration: 300, minZoom: 0.2 });
+      }
+    });
   }
 
   async function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
@@ -946,8 +1341,13 @@ export default function WorkflowPage() {
     const f = e.target.files?.[0];
     e.target.value = ""; // 清掉，讓同一個檔案可以再選一次驗證
     if (!f) return;
-    const b64 = await fileToBase64(f);
-    verifyUnderstanding(id, f.name, b64);
+    if (f.size > 20 * 1024 * 1024) { flashToast("檔案超過 20MB；請縮小或拆成幾份再驗證"); return; }
+    try {
+      const b64 = await fileToBase64(f);
+      verifyUnderstanding(id, f.name, b64);
+    } catch (error) {
+      flashToast(error instanceof Error ? error.message : "讀取檔案失敗");
+    }
   }
 
   // 改名的存/取消全部走這一條(onBlur)：Enter 靠 blur() 觸發它(只存一次)，Esc 先標記取消再 blur()
@@ -956,33 +1356,66 @@ export default function WorkflowPage() {
     if (wfNameCancelledRef.current) { wfNameCancelledRef.current = false; setWfNameDraft(wf!.name); return; }
     const name = wfNameDraft.trim();
     if (!name || name === wf!.name) return;
-    await fetch(`/api/workflows/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
-    load();
+    try {
+      const response = await fetch(`/api/workflows/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error((data as { error?: string }).error ?? "流程改名失敗");
+      await load();
+    } catch (error) {
+      setWfNameDraft(wf!.name);
+      flashToast(error instanceof Error ? error.message : "流程改名失敗");
+    }
   }
 
   async function promote() {
-    await fetch(`/api/workflows/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "official" }) });
+    const res = await fetch(`/api/workflows/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "official" }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { flashToast((data as { error?: string }).error ?? "設為正式失敗"); return; }
+    flashToast("已設為正式；已啟用的自動觸發現在會開始運作");
     load();
   }
   // 這個流程實際執行要用哪個模型：之前設定頁那個下拉選單只是給「測試連線」用的，跟 workflow 真正執行完全無關
   // (選了也沒存、重整就消失)，難怪使用者會覺得「選了又跳回去」。這裡是真正會存、真正影響執行的選擇器。
   async function changeModel(model: string) {
+    const previous = wfRef.current?.model;
+    if (!previous) return;
     setWf((w) => (w ? { ...w, model } : w));
-    await fetch(`/api/workflows/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }) });
+    try {
+      const response = await fetch(`/api/workflows/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error((data as { error?: string }).error ?? "模型儲存失敗");
+    } catch (error) {
+      setWf((current) => (current ? { ...current, model: previous } : current));
+      flashToast(error instanceof Error ? error.message : "模型儲存失敗");
+    }
   }
   async function copy() {
-    const data = await (await fetch(`/api/workflows/${id}/copy`, { method: "POST" })).json();
-    router.push(`/workflows/${data.id}`);
+    const res = await fetch(`/api/workflows/${id}/copy`, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !(data as { id?: string }).id) { flashToast((data as { error?: string }).error ?? "複製失敗"); return; }
+    router.push(`/workflows/${(data as { id: string }).id}`);
   }
 
   const selNode = wf.nodes.find((n) => n.id === selectedNode);
   const selRun = selectedNode ? nodeRuns[selectedNode] : null;
+  const pendingSourceNode = pendingConnection ? wf.nodes.find((n) => n.id === pendingConnection.from) : null;
+  const activeChainStep = chainSequence ? Math.min(chainStepIndex, chainSequence.length - 1) : 0;
+  const activeChainNode = chainSequence ? wf.nodes.find((node) => node.id === chainSequence[activeChainStep]) : null;
+
+  function focusChainStep(nextIndex: number) {
+    if (!chainSequence?.length) return;
+    const bounded = Math.max(0, Math.min(chainSequence.length - 1, nextIndex));
+    setChainStepIndex(bounded);
+    const target = nodes.find((node) => node.id === chainSequence[bounded]);
+    if (!target) return;
+    rfInstance.current?.setCenter(target.position.x + 85, target.position.y + 50, { zoom: 0.95, duration: 300 });
+  }
 
   return (
-    <div className="flex h-screen">
+    <div className="workflow-shell flex h-[100dvh] overflow-hidden">
       {/* 左：畫布 */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <div className="h-14 bar-float px-4 flex items-center gap-2 shrink-0">
+      <div className="workflow-main flex-1 flex flex-col min-w-0 min-h-0">
+        <div className="workflow-toolbar h-14 bar-float px-4 flex items-center gap-2 shrink-0 overflow-x-auto overflow-y-visible">
           <button onClick={() => router.push("/")} aria-label="回首頁" className="faint hover:text-[var(--text)] text-sm mr-1">←</button>
           {renamingWf ? (
             <input
@@ -1023,10 +1456,10 @@ export default function WorkflowPage() {
               onChange={(e) => changeModel(e.target.value)}
               className="input text-xs py-1 min-w-[80px] max-w-[110px] min-[1400px]:max-w-[190px]"
               style={{ width: "auto" }}
-              title="這個流程實際執行時用的模型(✓=內建免費服務實測穩定可用；🖼️=能看圖，流程裡有「登入網站」要辨識圖形驗證碼的話一定要選有 🖼️ 的模型，否則會自動改用其他能看圖的模型頂上)。接的是自己的 API 服務就按旁邊「自訂」直接輸入代號。"
+              title="這個流程實際執行時用的模型(✓=文字實測可用；🖼️=能看一般圖片；🔤=圖形驗證碼也實測可用。Claude Code 能看一般圖片，但會拒絕解 CAPTCHA，系統會在驗證碼步驟自動改用 🔤 模型)。"
             >
               {MODELS.map((m) => (
-                <option key={m} value={m}>{(KNOWN_WORKING_MODELS as readonly string[]).includes(m) || m.startsWith("claude-code") ? "✓ " : ""}{supportsVision(m) ? "🖼️ " : ""}{m}</option>
+                <option key={m} value={m}>{(KNOWN_WORKING_MODELS as readonly string[]).includes(m) || m.startsWith("claude-code") ? "✓ " : ""}{supportsVision(m) ? "🖼️ " : ""}{supportsCaptchaVision(m) ? "🔤 " : ""}{m}</option>
               ))}
             </select>
           )}
@@ -1037,16 +1470,16 @@ export default function WorkflowPage() {
           >
             {showCustomModel ? "清單" : "自訂"}
           </button>
-          {wf.nodes.some((n) => n.type === "browser-login") && !supportsVision(wf.model) && (
+          {wf.nodes.some((n) => n.type === "browser-login") && !supportsCaptchaVision(wf.model) && (
             <span
               className="text-xs truncate max-w-[230px] hidden min-[1500px]:inline"
               style={{ color: "var(--amber, #b45309)" }}
-              title="這個流程有「登入網站」步驟(可能要辨識圖形驗證碼)，但目前選的模型不能看圖。系統會自動改用能看圖的模型讀驗證碼，但如果只是想確定選對，建議直接換成有 🖼️ 標記的模型。"
+              title="這個流程可能遇到圖形驗證碼；目前模型不是驗證碼實測候選（Claude Code 也會拒絕 CAPTCHA）。系統會在那一步自動改用有 🔤 標記的模型。"
             >
-              ⚠️ 模型不能看圖(驗證碼會自動代讀)
+              ⚠️ 驗證碼會自動改用 🔤 模型
             </span>
           )}
-          <div className="ml-auto flex items-center gap-1.5">
+          <div className="workflow-toolbar-actions ml-auto flex items-center gap-1.5">
             {/* AI 對話還在處理中，但目前右側面板顯示的是別的東西(節點/紀錄/說明…)——不加這個提示的話，
                 點一下節點看內容會讓「AI 正在想…」整個從畫面消失，使用者以為 AI 停下來了。
                 其實 fetch 在 store 層跑，切哪個面板都不受影響，這裡只是把「還在跑」的視覺線索找補回來。
@@ -1073,7 +1506,7 @@ export default function WorkflowPage() {
               </button>
             )}
             {wf.status === "draft" && (
-              <button onClick={runAutoTest} disabled={autoTest?.running} className="btn shrink-0" style={{ background: "var(--accent)", color: "#fff" }} title="幫我測到會跑：跑一輪，失敗的話 AI 自動修再跑，直到會動">
+              <button onClick={runAutoTest} disabled={autoTest?.running} className="btn shrink-0" style={{ background: "var(--accent)", color: "#fff" }} title="實際執行、失敗就讓 AI 看整條流程修正後再測；會受安全時間與重試預算限制，修不掉會明確停下回報">
                 {autoTest?.running ? "測試中…" : "🪄 測到會跑"}
               </button>
             )}
@@ -1099,7 +1532,7 @@ export default function WorkflowPage() {
                 ⋯
               </button>
               {showMoreMenu && (
-                <div className="menu absolute right-0 top-full mt-1.5 z-40">
+                <div className="menu fixed right-3 top-[62px] z-40">
                   {wf.status === "draft" && (
                     <>
                       <button className="menu-item" style={{ color: "var(--green)" }} onClick={() => { setShowMoreMenu(false); promote(); }}>
@@ -1145,6 +1578,32 @@ export default function WorkflowPage() {
               <span className="font-medium">{toast.text}</span>
             </div>
           )}
+          {chainSequence && (
+            <div
+              className="wf-chain-nav absolute left-1/2 top-3 z-20 -translate-x-1/2 flex items-center gap-2 rounded-full px-2 py-1.5"
+              aria-label="長流程步驟導覽"
+            >
+              <button
+                type="button"
+                className="btn btn-ghost h-8 px-2 text-xs"
+                disabled={activeChainStep === 0}
+                onClick={() => focusChainStep(activeChainStep - 1)}
+              >
+                ← 上一步
+              </button>
+              <span className="min-w-0 max-w-[190px] truncate text-center text-xs font-semibold" title={activeChainNode?.label}>
+                第 {activeChainStep + 1}/{chainSequence.length} 步 · {activeChainNode?.label}
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost h-8 px-2 text-xs"
+                disabled={activeChainStep === chainSequence.length - 1}
+                onClick={() => focusChainStep(activeChainStep + 1)}
+              >
+                下一步 →
+              </button>
+            </div>
+          )}
           <ReactFlow
             nodes={nodes}
             edges={edges}
@@ -1153,10 +1612,17 @@ export default function WorkflowPage() {
             onConnect={onConnect}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
-            onInit={(instance) => { rfInstance.current = instance; }}
-            fitView
-            fitViewOptions={{ padding: 0.15 }}
-            minZoom={0.05}
+            onInit={(instance) => {
+              rfInstance.current = instance;
+              if (panelWidthReady && chainSequence?.length) requestAnimationFrame(() => {
+                const first = nodes.find((node) => node.id === chainSequence[0]);
+                if (first) instance.setCenter(first.position.x + 85, first.position.y + 50, { zoom: 0.8, duration: 0 });
+              });
+            }}
+            fitView={!chainSequence}
+            fitViewOptions={{ padding: 0.15, minZoom: 0.2 }}
+            defaultViewport={{ x: 10, y: 40, zoom: 0.8 }}
+            minZoom={0.2}
             selectionMode={SelectionMode.Partial}
             panOnDrag
             panOnScroll
@@ -1187,12 +1653,17 @@ export default function WorkflowPage() {
             const runningNode = wf.nodes.find((n) => nodeRuns[n.id]?.status === "running");
             return (
               <div
-                className="wf-statusbar absolute left-1/2 bottom-5 z-20 -translate-x-1/2 flex items-center gap-3 rounded-full px-5 py-2.5 text-sm"
+                className="wf-statusbar absolute left-1/2 bottom-5 z-20 -translate-x-1/2 flex items-center gap-3 rounded-2xl px-5 py-2.5 text-sm max-w-[calc(100%-2rem)]"
                 style={{ background: "var(--menu-bg)", border: "1px solid var(--border-strong)", boxShadow: "var(--shadow-lg)", backdropFilter: "blur(18px)" }}
               >
                 <span className="inline-block w-2 h-2 rounded-full animate-pulse" style={{ background: "var(--amber)" }} />
-                <span className="font-medium">
-                  {activeRunStatus === "queued" ? "排隊中…" : runningNode ? `正在跑「${runningNode.label}」` : "執行中…"}
+                <span className="min-w-0">
+                  <span className="font-medium block truncate">
+                    {activeRunStatus === "queued" ? "排隊中…" : runningNode ? `正在跑「${runningNode.label}」` : "執行中…"}
+                  </span>
+                  {activeRunStatus === "running" && activeRunDetail && (
+                    <span className="faint text-[11px] block truncate max-w-72" title={activeRunDetail}>{activeRunDetail}</span>
+                  )}
                 </span>
                 <span className="faint text-xs">{done}/{total} 步</span>
                 <div className="w-28 h-1.5 rounded-full overflow-hidden" style={{ background: "var(--surface-2)" }}>
@@ -1214,7 +1685,7 @@ export default function WorkflowPage() {
         </div>
       )}
 
-      {autoTest && !autoTestMinimized && (
+      {autoTest && autoTest.source !== "chat" && !autoTestMinimized && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.45)" }}>
           <div className="card w-full max-w-lg max-h-[85vh] flex flex-col" style={{ boxShadow: "var(--shadow-lg)" }}>
             <div className="h-14 px-5 border-b flex items-center gap-2 shrink-0">
@@ -1295,7 +1766,22 @@ export default function WorkflowPage() {
       )}
 
       {/* 右：AI 對話 / 節點面板 / 執行紀錄 */}
-      <div className="w-[400px] shrink-0 border-l flex flex-col panel-glass">
+      <div
+        className="workflow-panel-resizer shrink-0"
+        role="separator"
+        aria-label="調整畫布與對話區寬度"
+        aria-orientation="vertical"
+        aria-valuemin={360}
+        aria-valuemax={760}
+        aria-valuenow={sidePanelWidth}
+        tabIndex={0}
+        onPointerDown={startPanelResize}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowLeft") { e.preventDefault(); resizeSidePanel(24); }
+          if (e.key === "ArrowRight") { e.preventDefault(); resizeSidePanel(-24); }
+        }}
+      />
+      <div className="workflow-side-panel shrink-0 flex flex-col panel-glass min-w-0 min-h-0" style={{ width: sidePanelWidth }}>
         {selNode ? (
           <NodePanel
             key={selNode.id} /* 切換節點時強制重建面板，不然上一個節點的訊息/diff 卡片會殘留，看起來像這個節點被改過 */
@@ -1308,11 +1794,13 @@ export default function WorkflowPage() {
             onChanged={load}
             onToast={flashToast}
             onRename={(name) => renameNode(selNode.id, name)}
+            onDraftChange={trackNodeDraft}
           />
         ) : showHistory ? (
           <HistoryPanel
             runs={runs}
             nodeLabels={Object.fromEntries(wf.nodes.map((n) => [n.id, n.label]))}
+            focusRunId={focusedHistoryRun}
             onClose={() => setShowHistory(false)}
             onPickFailedNode={(nodeId, runId) => { setShowHistory(false); loadHistoricalRunNode(runId); setSelectedNode(nodeId); }}
             onResume={async (runId) => {
@@ -1340,7 +1828,7 @@ export default function WorkflowPage() {
         ) : (
           <div className="flex flex-col h-full">
             <div className="h-14 px-5 border-b flex items-center text-sm font-medium">
-              💬 跟 AI 建立 / 修改流程
+              💬 用對話建立、修改、測試與執行
               {chat.length > 0 && (
                 <button
                   onClick={() => { if (window.confirm("確定要清除整段對話、重新開始嗎？(已套用的流程圖不會被動到)")) clearChat(id); }}
@@ -1362,8 +1850,8 @@ export default function WorkflowPage() {
                     >
                       💬
                     </div>
-                    <p className="font-medium">用白話描述你要自動化的事</p>
-                    <p className="text-xs muted">AI 會先問清楚細節，再幫你畫出流程圖</p>
+                    <p className="font-medium">直接說你想完成什麼</p>
+                    <p className="text-xs muted">可以建流程、改流程、只讀測試、修到會跑，也能確認後正式執行</p>
                   </div>
                   <div className="space-y-1.5">
                     <p className="text-[11px] faint px-1">試試這些：</p>
@@ -1384,7 +1872,7 @@ export default function WorkflowPage() {
                     ))}
                   </div>
                   <p className="text-[11px] leading-relaxed faint px-1">
-                    📎 也可以直接拖檔案進來、⌘V 貼截圖、或貼網址——支援 Excel、PDF、Word、PowerPoint、照片。AI 會像人一樣真的「看到」內容，不只是讀文字。
+                    📎 也可以直接拖檔案進來、⌘V 貼截圖、或貼網址——文件、試算表、簡報、程式碼、壓縮檔、Email 與照片都會讀取實際內容和邏輯，不只看檔名或截圖。
                   </p>
                 </div>
               )}
@@ -1404,10 +1892,12 @@ export default function WorkflowPage() {
                       p.kind === "text" ? (
                         // overflow-wrap:anywhere(不是 break-word)——只有 anywhere 會同時「縮小 min-content
                         // 尺寸」,長網址才真的斷得掉、氣泡才縮得下去。break-word 不影響 min-content 所以治不了。
-                        <p key={j} className="whitespace-pre-wrap [overflow-wrap:anywhere] text-sm">{p.text}</p>
-                      ) : p.kind === "image" ? (
+                        <p key={j} className="whitespace-pre-wrap [overflow-wrap:anywhere] text-sm">{m.role === "assistant" ? plainChatMessage(p.text) : p.text}</p>
+                      ) : p.kind === "image" && p.b64 ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img key={j} src={`data:image/png;base64,${p.b64}`} alt="" className="rounded-lg max-h-32 border" />
+                        <img key={j} src={`data:${p.mime || "image/png"};base64,${p.b64}`} alt={p.name ?? "已附上的圖片"} className="rounded-lg max-h-32 border" />
+                      ) : p.kind === "image" ? (
+                        <p key={j} className="text-xs faint break-all">🖼 {p.name ?? "圖片"}（送出時會重新載入）</p>
                       ) : (
                         // 附上的常是長網址：break-all 讓它一定斷得掉，不跟著撐爆氣泡
                         <p key={j} className="text-xs faint break-all">📄 {p.name}</p>
@@ -1416,6 +1906,84 @@ export default function WorkflowPage() {
                   </div>
                 </div>
               ))}
+              {pendingInput && (
+                <ChatInputCard
+                  key={pendingInput.token}
+                  input={pendingInput}
+                  onSubmit={(values) => submitChatInputs(id, values)}
+                  onCancel={() => cancelChatInput(id)}
+                />
+              )}
+              {pendingTrust && (
+                <div className="card p-3 space-y-2" style={{ borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))" }}>
+                  <p className="text-sm font-medium">先確認外部流程來源</p>
+                  <p className="text-xs muted leading-relaxed">只讀試跑不會寫入，但仍可能讀本機檔案或開啟外部網站。只有你確認信任後才會開始。</p>
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" className="btn btn-primary text-xs" onClick={() => trustImportedAndContinue(id)}>信任來源並安全試跑</button>
+                    <button type="button" className="btn btn-ghost text-xs" onClick={() => cancelPendingTrust(id)}>取消</button>
+                  </div>
+                </div>
+              )}
+              {autoTest?.source === "chat" && (
+                <div className="card p-3 space-y-2" style={{ borderColor: "color-mix(in srgb, var(--accent) 40%, var(--border))" }}>
+                  <div className="flex items-center gap-2 min-w-0">
+                    {autoTest.running && <span className="inline-block w-3.5 h-3.5 rounded-full border-2 animate-spin shrink-0" style={{ borderColor: "var(--border-strong)", borderTopColor: "var(--accent)" }} />}
+                    <p className="text-sm font-medium min-w-0">{autoTest.running ? "正在實際測試、分析失敗並修復…" : autoTest.ok ? "只讀修復測試已通過" : "這輪修復已停止"}</p>
+                  </div>
+                  <p className="text-xs muted leading-relaxed">
+                    {autoTest.running ? "不是只問模型：每一輪都會真的執行與驗證，外部寫入則全部攔住。最長 15 分鐘。" : autoTest.needsHuman ? "有一項只有你能提供的資料，照下方欄位補完即可繼續。" : "詳細結果已寫在對話裡。"}
+                  </p>
+                  {autoTest.running && (
+                    <button type="button" className="btn text-xs" style={{ background: "var(--red)", color: "#fff" }} onClick={() => stopAllChatWork(id)}>⏹ 停止</button>
+                  )}
+                </div>
+              )}
+              {activeExecution && ["starting", "queued", "running", "failed", "cancelled"].includes(activeExecution.status) && (
+                <div className="card p-3 space-y-2" style={{ borderColor: activeExecution.status === "failed" ? "color-mix(in srgb, var(--red) 45%, var(--border))" : "var(--border)" }}>
+                  <div className="flex items-center gap-2 min-w-0">
+                    {(activeExecution.status === "starting" || activeExecution.status === "queued" || activeExecution.status === "running") && (
+                      <span className="inline-block w-3.5 h-3.5 rounded-full border-2 animate-spin shrink-0" style={{ borderColor: "var(--border-strong)", borderTopColor: "var(--accent)" }} />
+                    )}
+                    <p className="text-sm font-medium break-words">
+                      {activeExecution.status === "failed"
+                        ? activeExecution.mode === "preview" ? "只讀安全試跑未通過" : "正式執行失敗"
+                        : activeExecution.status === "cancelled"
+                        ? activeExecution.mode === "preview" ? "已停止只讀試跑" : "已停止"
+                        : activeExecution.mode === "preview" ? "只讀安全試跑中" : "正式執行中"}
+                    </p>
+                  </div>
+                  {activeExecution.reason && <p className="text-xs muted leading-relaxed [overflow-wrap:anywhere]">{activeExecution.reason}</p>}
+                  <div className="flex flex-wrap gap-2">
+                    {(activeExecution.status === "starting" || activeExecution.status === "queued" || activeExecution.status === "running") && (
+                      <button type="button" className="btn text-xs" style={{ background: "var(--red)", color: "#fff" }} onClick={() => stopAllChatWork(id)}>⏹ 停止</button>
+                    )}
+                    {activeExecution.status === "failed" && (
+                      <>
+                        <button type="button" className="btn btn-primary text-xs" onClick={() => startAutoTest(id, undefined, { source: "chat" })}>🛠 讓 AI 修到會跑</button>
+                        <button type="button" className="btn btn-ghost text-xs" onClick={() => retryChatExecution(id)}>
+                          {activeExecution.mode === "preview" ? "以只讀模式從失敗處再試" : "從失敗處再試"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+              {pendingApproval && (
+                <div className="card p-3 space-y-2" style={{ borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))" }}>
+                  <p className="text-sm font-medium">需要你做決定</p>
+                  <p className="text-xs muted leading-relaxed [overflow-wrap:anywhere]">{pendingApproval.message}</p>
+                  <textarea
+                    value={approvalNote}
+                    onChange={(event) => setApprovalNote(event.target.value)}
+                    className="input min-h-16 resize-y text-sm"
+                    placeholder="備註（選填）"
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" className="btn text-xs" style={{ background: "var(--green)", color: "#fff" }} onClick={() => decideChatApproval(id, "approve", approvalNote)}>✅ 核准並繼續</button>
+                    <button type="button" className="btn text-xs" style={{ background: "var(--red)", color: "#fff" }} onClick={() => decideChatApproval(id, "reject", approvalNote)}>❌ 拒絕</button>
+                  </div>
+                </div>
+              )}
               {thinking && (
                 <div className="card p-3" style={{ borderColor: "color-mix(in srgb, var(--accent) 35%, var(--border))" }}>
                   <p className="flex items-center gap-2 text-sm">
@@ -1428,6 +1996,30 @@ export default function WorkflowPage() {
                     <p className="text-[11px] faint mt-1.5 pl-6">已進行 {buildStage.seconds >= 60 ? `${Math.floor(buildStage.seconds / 60)} 分 ${buildStage.seconds % 60} 秒` : `${buildStage.seconds} 秒`}——複雜流程要多想一下,畫好會自動出現預覽。</p>
                   )}
                   {thinkingLong && !buildStage && <p className="text-xs mt-1 faint">模型服務目前不太穩定，AI 正在自動重試中，不是卡住了，可能還要再等一下…</p>}
+                </div>
+              )}
+              {pendingExecution && (
+                <div className="card p-3 space-y-2" style={{ borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))" }}>
+                  <p className="text-sm font-medium">{pendingExecution.needsImportedConfirmation ? "確認你信任這個外部流程" : "確認後才會真的寫入"}</p>
+                  <p className="text-xs muted leading-relaxed">
+                    {pendingExecution.needsImportedConfirmation
+                      ? "它是從外部檔案匯入的，可能讀取本機檔案或連線外部服務。請先確認來源可信；正式執行仍會使用上方已核對的參數。"
+                      : `上面的安全試跑已攔住 ${pendingExecution.plannedWrites} 個寫入步驟。請先核對數字；正式執行會重新抓一次最新資料並寫入外部服務。`}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="btn text-xs"
+                      style={{ background: "var(--green)", color: "#fff" }}
+                      disabled={pendingExecution.running}
+                      onClick={() => confirmPendingExecution(id, Boolean(pendingExecution.needsImportedConfirmation))}
+                    >
+                      {pendingExecution.running ? "正式執行中…" : pendingExecution.needsImportedConfirmation ? "信任來源並執行" : "確認，正式執行一次"}
+                    </button>
+                    <button type="button" className="btn btn-ghost text-xs" disabled={pendingExecution.running} onClick={() => cancelPendingExecution(id)}>
+                      取消，不寫入
+                    </button>
+                  </div>
                 </div>
               )}
               {pendingGraph && (
@@ -1464,20 +2056,46 @@ export default function WorkflowPage() {
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendChat(); }}
-                placeholder="描述需求…可拖檔案進來或 ⌘V 貼上截圖(⌘+Enter 送出)"
+                placeholder="直接說要做什麼；也可傳檔案、文件、網址或截圖。例如：測試能不能看到資料，但不要改動（⌘+Enter 送出）"
                 rows={3}
                 className="input resize-none"
               />
               {(busyHint || verifying) && (
-                <div className="flex items-center gap-2 text-xs muted">
-                  <span className="inline-block w-3.5 h-3.5 rounded-full border-2 animate-spin" style={{ borderColor: "var(--border-strong)", borderTopColor: "var(--accent)" }} />
-                  {verifying ? "正在讀你的檔案、實際算給你看(只讀，不會寫回/發送)…" : busyHint}
+                <div className="flex items-start gap-2 text-xs muted min-w-0">
+                  <span className="inline-block w-3.5 h-3.5 rounded-full border-2 animate-spin shrink-0 mt-0.5" style={{ borderColor: "var(--border-strong)", borderTopColor: "var(--accent)" }} />
+                  <div className="min-w-0 flex-1">
+                    <div>{verifying ? "正在讀你的檔案、實際算給你看(只讀，不會寫回/發送)…" : busyHint}</div>
+                    {urlReadProgress && (
+                      <div className="mt-1 faint">
+                        已等待 {urlReadProgress.seconds} 秒；一般約 5–20 秒，單一網址最慢 50 秒會自動停止，不會無限卡住。
+                      </div>
+                    )}
+                  </div>
+                  {urlReadProgress && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost text-xs shrink-0"
+                      disabled={urlReadProgress.stopping}
+                      onClick={() => {
+                        setUrlReadProgress((prev) => prev ? { ...prev, stopping: true } : null);
+                        setBusyHint("正在停止網址讀取…");
+                        urlReadAbortRef.current?.abort();
+                      }}
+                    >
+                      {urlReadProgress.stopping ? "停止中…" : "停止讀取"}
+                    </button>
+                  )}
+                  {verifying && !urlReadProgress && (
+                    <button type="button" className="btn btn-ghost text-xs shrink-0" onClick={() => stopVerification(id)}>
+                      停止試跑
+                    </button>
+                  )}
                 </div>
               )}
               <div className="flex items-center gap-2">
-                <label className={`btn btn-ghost text-xs ${busyHint ? "opacity-50 pointer-events-none" : "cursor-pointer"}`}>
+                <label className={`btn btn-ghost text-xs ${busyHint || verifying ? "opacity-50 pointer-events-none" : "cursor-pointer"}`}>
                   📎 加圖片/檔案
-                  <input ref={fileRef} type="file" multiple onChange={handleImageUpload} className="hidden" disabled={!!busyHint} />
+                  <input ref={fileRef} type="file" multiple onChange={handleImageUpload} className="hidden" disabled={!!busyHint || verifying} />
                 </label>
                 {/* 驗證看懂:給一份現在的資料檔,只讀模式實際算給你看,證明 AI 真的看懂了(不會改你的資料) */}
                 <label
@@ -1487,7 +2105,7 @@ export default function WorkflowPage() {
                   🔍 驗證看懂
                   <input type="file" onChange={handleVerifyFile} className="hidden" disabled={!!busyHint || verifying} />
                 </label>
-                <button onClick={sendChat} disabled={thinking || !!busyHint} className="btn btn-primary ml-auto">
+                <button onClick={sendChat} disabled={thinking || !!busyHint || (!chatInput.trim() && draftParts.length === 0)} className="btn btn-primary ml-auto">
                   {busyHint ? "處理中…" : "送出"}
                 </button>
               </div>
@@ -1505,6 +2123,48 @@ export default function WorkflowPage() {
           onClose={() => setShowRunForm(false)}
           onRun={(params, headed) => { setShowRunForm(false); run(params, headed); }}
         />
+      )}
+
+      {pendingConnection && pendingSourceNode && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-4"
+          style={{ background: "rgba(0,0,0,0.45)" }}
+          onClick={() => setPendingConnection(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="connection-kind-title"
+            className="card w-[480px] max-w-full max-h-[calc(100dvh-2rem)] overflow-auto p-5 space-y-4"
+            style={{ boxShadow: "var(--shadow-lg)" }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div>
+              <h2 id="connection-kind-title" className="font-semibold">什麼情況要走這條線？</h2>
+              <p className="text-sm faint mt-1 break-words">
+                從「{pendingSourceNode.label}」連到「{wf.nodes.find((n) => n.id === pendingConnection.to)?.label ?? pendingConnection.to}」
+              </p>
+            </div>
+            <div className="grid gap-2">
+              {connectionChoices(pendingSourceNode).map((choice) => (
+                <button
+                  key={choice.value ?? "normal"}
+                  type="button"
+                  className="card p-3 text-left hover:border-[var(--accent)] transition-colors"
+                  onClick={() => {
+                    const { from, to } = pendingConnection;
+                    setPendingConnection(null);
+                    saveConnection(from, to, choice.value);
+                  }}
+                >
+                  <span className="font-medium">{choice.value === "error" ? "🆘 " : ""}{choice.label}</span>
+                  <span className="block text-xs faint mt-0.5">{choice.help}</span>
+                </button>
+              ))}
+            </div>
+            <button type="button" className="btn btn-ghost w-full" onClick={() => setPendingConnection(null)}>取消，不連線</button>
+          </div>
+        </div>
       )}
     </div>
   );

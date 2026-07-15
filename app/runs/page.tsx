@@ -87,7 +87,7 @@ export default function RunsPage() {
   }, [runs, statusFilter, search]);
 
   return (
-    <div className="max-w-5xl mx-auto px-8 py-8">
+    <div className="max-w-5xl mx-auto px-4 sm:px-8 py-6 sm:py-8">
       <PageHeader title="執行紀錄" subtitle="所有流程的歷史執行一頁看完;點任一筆進流程頁看逐步細節" />
 
       <div className="flex items-center gap-2 mb-5 flex-wrap">
@@ -115,14 +115,14 @@ export default function RunsPage() {
             return (
               <Link
                 key={r.id}
-                href={`/workflows/${r.workflow_id}`}
-                className="flex items-center gap-3 pl-4 pr-4 py-3 relative transition-colors hover:bg-[var(--surface-2)]"
+                href={`/workflows/${r.workflow_id}?history=${encodeURIComponent(r.id)}`}
+                className="flex items-start sm:items-center gap-3 pl-4 pr-4 py-3 relative transition-colors hover:bg-[var(--surface-2)]"
                 style={{ borderTop: i === 0 ? "none" : "1px solid var(--border)" }}
               >
                 <span className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-full" style={{ background: railColor(r.status) }} />
                 <StatusDot status={r.status} />
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 text-sm">
+                  <div className="flex items-center gap-2 text-sm flex-wrap sm:flex-nowrap">
                     <span className="font-medium truncate">{r.workflow_name}</span>
                     <span className="badge badge-neutral shrink-0">{TRIGGER_LABEL[r.trigger_type] ?? r.trigger_type}</span>
                     <span className="shrink-0 text-xs font-medium" style={{ color: railColor(r.status) }}>
@@ -131,7 +131,7 @@ export default function RunsPage() {
                   </div>
                   {r.reason && <p className="text-xs muted mt-0.5 truncate">{r.reason}</p>}
                 </div>
-                <span className="text-xs faint shrink-0 text-right tabular-nums" title={formatDate(r.started_at)}>
+                <span className="text-xs faint shrink-0 text-right tabular-nums hidden sm:block" title={formatDate(r.started_at)}>
                   {rel || formatDate(r.started_at)}
                 </span>
               </Link>

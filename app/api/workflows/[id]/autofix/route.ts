@@ -3,7 +3,7 @@ import { getClient } from "@/lib/modelClient";
 import { getWorkflow, saveWorkflow } from "@/lib/workflow/store";
 import { getWorkflowModel } from "@/lib/settingsStore";
 import { aiRepairGraph, applyNodeConfigEdits, type RepairAttempt, type NodeEdit } from "@/lib/workflow/graphRepair";
-import { runWorkflowAndWait, isUserCancelled, getVarWarnings } from "@/lib/workflow/engine";
+import { runWorkflowAndWait, getMissingWorkflowSettings, isUserCancelled, getVarWarnings } from "@/lib/workflow/engine";
 import { checkRunSemantics } from "@/lib/workflow/resultCheck";
 import { autorunActive, loopCancelRequested, loopAbortControllers } from "@/lib/workflow/busyLocks";
 import { recordFix } from "@/lib/workflow/learnedFixes";
@@ -23,6 +23,9 @@ const OVERALL_TIME_BUDGET_MS = 4 * 60_000;
  * 必須讓 AI 修；只靠關鍵字含「驗證碼」就跳過修復，會讓真正的設定問題永遠得不到修。 */
 function isLikelyTransientFlake(error: string): boolean {
   if (/找不到|選擇器|selector|是空的/i.test(error)) return false; // 結構性問題，AI 修得動
+  // Mail2000 工作階段過期時會把已預填的帳號欄設成 disabled。新版 browser-login 會直接沿用，
+  // 舊 run 留下的這種錯誤應先用新版執行器重跑；叫 AI 換 selector 既修不到內建程式，也只會改壞設定。
+  if (/element is not enabled|<input[^>]+disabled[^>]+name=["']USERID_show/i.test(error)) return true;
   return /驗證碼|captcha|判讀/i.test(error);
 }
 
@@ -42,6 +45,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const { id } = await params;
   const wf = getWorkflow(id);
   if (!wf) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
+  const missing = getMissingWorkflowSettings(wf);
+  if (missing.length > 0) {
+    return NextResponse.json({
+      ok: false,
+      needsHuman: true,
+      code: "MISSING_REQUIRED_SETTINGS",
+      missing,
+      error: `執行前還缺少設定：${missing.map((item) => item.label).join("、")}。請先到「設定」頁補齊；這次沒有修改流程或開始重跑。`,
+    }, { status: 400 });
+  }
   // autorun 迴圈進行中不能同時改同一份 config——兩邊互相覆蓋、驗證結果對不上自己的改動。
   // 自己也要註冊進同一個鎖：不註冊的話互斥是單向的(autofix 跑到一半，autorun/第二個 autofix/
   // 對話 edits 照樣能開跑，兩條迴圈同時改 config+重跑、各自的還原邏輯互相滅掉對方的修復)。
@@ -101,13 +114,21 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
   };
 
   // 最近一次這個節點失敗的 run(拿它的錯誤/截圖/HTML 當修復依據)
-  let lastFailedRunId = (
+  const lastFailedRun = (
     db
       .prepare(
-        `SELECT run_id FROM node_runs WHERE node_id=? AND status='failed' AND run_id IN (SELECT id FROM runs WHERE workflow_id=?) ORDER BY id DESC LIMIT 1`,
+        `SELECT nr.run_id, r.dry_run
+         FROM node_runs nr
+         JOIN runs r ON r.id = nr.run_id
+         WHERE nr.node_id=? AND nr.status='failed' AND r.workflow_id=?
+         ORDER BY nr.id DESC LIMIT 1`,
       )
-      .get(nodeId, id) as { run_id: string } | undefined
-  )?.run_id;
+      .get(nodeId, id) as { run_id: string; dry_run: number } | undefined
+  );
+  let lastFailedRunId = lastFailedRun?.run_id;
+  // 自動修復的驗證必須延續使用者當時的模式。從「只讀安全試跑」點修復，就只能繼續只讀；
+  // 以前這裡漏傳 dryRun，修一個登入節點可能在後半段突然正式寫表／寄信，直接破壞安全邊界。
+  const repairDryRun = lastFailedRun ? Boolean(lastFailedRun.dry_run) : true;
 
   // lastFailedRunId 可能是 undefined(這個節點還沒有失敗紀錄，或紀錄已被清理)——
   // better-sqlite3 對 undefined 參數會直接拋錯，所以只有真的找到 run id 才查，找不到就當作沒有錯誤內容可參考
@@ -119,6 +140,13 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
   let repairTarget = nodeId; // 修復目標節點(變數警告時可能改指向產生警告的節點)
 
   const startedAt = Date.now();
+  console.info("[workflow-autofix] start", {
+    workflowId: id,
+    nodeId,
+    failedRunId: lastFailedRunId ?? null,
+    dryRun: repairDryRun,
+    error: lastError.slice(0, 180),
+  });
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     if (Date.now() - startedAt > OVERALL_TIME_BUDGET_MS) {
@@ -148,10 +176,17 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
     } else {
       // 整圖修復：看整條流程 + 實際收到的資料 + 執行紀錄 + 頁面 HTML/截圖 + 前幾輪試過什麼
       try {
+        console.info("[workflow-autofix] asking-model", { workflowId: id, attempt, repairTarget, failedRunId: lastFailedRunId ?? null });
         // apply:false = 過完震盪檢查才寫進磁碟(重複的壞改法不能無聲留在流程上)，與 autorun 同一套。
         // signal:loopSignal——這段 AI 呼叫沒有 runId 可以 cancelRun，是唯一能中斷它的辦法。
         const repair = await aiRepairGraph(client, model, id, repairTarget, lastError, lastFailedRunId, { attemptHistory, apply: false, signal: loopSignal });
         edits = repair.edits;
+        console.info("[workflow-autofix] proposal", {
+          workflowId: id,
+          attempt,
+          editNodeIds: edits.map((edit) => edit.nodeId),
+          skipped: repair.skipped.map((item) => ({ nodeId: item.nodeId, reason: item.reason.slice(0, 120) })),
+        });
         if (repair.skipped.length > 0) {
           attemptHistory.push({ action: `有修改無效：${repair.skipped.map((s) => `${s.nodeId}(${s.reason.slice(0, 60)})`).join("；")}`, outcome: "那些修改沒有被套用" });
         }
@@ -182,6 +217,7 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
           return NextResponse.json({ ok: false, cancelled: true, attempts: attempt, log });
         }
         const msg = err instanceof Error ? err.message : String(err);
+        console.warn("[workflow-autofix] model-failed", { workflowId: id, attempt, error: msg.slice(0, 240) });
         attemptHistory.push({ action: `回了無效的修復方案：${msg.slice(0, 150)}`, outcome: "沒有任何修改被套用" });
         log.push({ attempt, action: "AI 修改設定", result: `失敗：${msg}` });
         continue;
@@ -191,7 +227,19 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
     // 2) 重跑整個 workflow 驗證。把「剩餘時間預算」傳進去當這次重跑的上限——
     // 不然單次重跑最長可以掛 25 分鐘，迴圈頂的預算檢查根本擋不住。
     const remainingMs = OVERALL_TIME_BUDGET_MS - (Date.now() - startedAt);
-    const result = await runWorkflowAndWait(id, triggerParams, { headed: false, timeoutMs: remainingMs });
+    const result = await runWorkflowAndWait(id, triggerParams, {
+      headed: false,
+      timeoutMs: remainingMs,
+      dryRun: repairDryRun,
+    });
+    console.info("[workflow-autofix] verification", {
+      workflowId: id,
+      attempt,
+      runId: result.runId,
+      status: result.status,
+      failedNode: result.failedNode ?? null,
+      error: result.error?.slice(0, 180) ?? null,
+    });
 
     // 使用者按了停止 → 不是驗證失敗，別繼續修、也別把 USER_CANCELLED 當錯誤記進學習庫。
     // 但沒通過驗證的改動一樣要還原——使用者常常就是「看到 AI 改的方向不對」才按停止的，
@@ -223,7 +271,7 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
       // 3) 乾淨通過 → 先過語意驗收才記學習庫(與 autorun 同一套防污染原則：「全綠但輸出是語意垃圾」的
       // 修法記進 learned_fixes 會以「優先參考」身分誤導往後每一次修復)。驗收員可疑不擋成功——
       // 流程能跑就交還使用者，把疑點講明白請他親自看一眼。
-      const verdict = await checkRunSemantics(client, model, id, result.runId);
+      const verdict = await checkRunSemantics(client, model, id, result.runId, loopSignal);
       for (const e of edits) {
         verifiedFixes.set(e.nodeId, e.after);
         if (!verdict.suspicious && JSON.stringify(e.before) !== JSON.stringify(e.after)) {

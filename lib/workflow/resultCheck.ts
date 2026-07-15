@@ -96,6 +96,7 @@ export async function checkRunSemantics(
   model: string,
   workflowId: string,
   runId: string,
+  signal?: AbortSignal,
 ): Promise<SemanticVerdict> {
   const wf = getWorkflow(workflowId);
   if (!wf) return { suspicious: false, nodeId: null, reason: "" };
@@ -247,10 +248,11 @@ ${nodeLines.join("\n")}${fileHint}
   let raw: string;
   try {
     raw = await callAIWithRetry(
-      () => client.chat.completions.create({ model, messages: [{ role: "user", content: prompt }], max_tokens: 500 }).then((r) => r.choices[0]?.message?.content ?? ""),
-      { label: "語意驗收" },
+      () => client.chat.completions.create({ model, messages: [{ role: "user", content: prompt }], max_tokens: 500 }, { signal }).then((r) => r.choices[0]?.message?.content ?? ""),
+      { label: "語意驗收", signal },
     );
-  } catch {
+  } catch (err) {
+    if (signal?.aborted) throw err;
     // 驗收員自己連不上不能擋成功——放行
     return { suspicious: false, nodeId: null, reason: "" };
   }
@@ -277,6 +279,7 @@ export async function verifyAgainstExpected(
   workflowId: string,
   runId: string,
   expected: string,
+  signal?: AbortSignal,
 ): Promise<{ matches: boolean; nodeId: string | null; reason: string }> {
   const wf = getWorkflow(workflowId);
   if (!wf || !expected.trim()) return { matches: true, nodeId: null, reason: "" };
@@ -304,10 +307,11 @@ ${nodeLines.join("\n")}
   let raw: string;
   try {
     raw = await callAIWithRetry(
-      () => client.chat.completions.create({ model, messages: [{ role: "user", content: prompt }], max_tokens: 500 }).then((r) => r.choices[0]?.message?.content ?? ""),
-      { label: "對答案驗收" },
+      () => client.chat.completions.create({ model, messages: [{ role: "user", content: prompt }], max_tokens: 500 }, { signal }).then((r) => r.choices[0]?.message?.content ?? ""),
+      { label: "對答案驗收", signal },
     );
-  } catch {
+  } catch (err) {
+    if (signal?.aborted) throw err;
     // 驗收員連不上不能擋——當作對得上放行(它是加分網),但這種情況少見
     return { matches: true, nodeId: null, reason: "" };
   }

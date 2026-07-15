@@ -25,6 +25,7 @@ const fmtSec = (s: number) => (s >= 60 ? `${Math.floor(s / 60)}分${Math.round(s
 export function HistoryPanel({
   runs,
   nodeLabels,
+  focusRunId,
   onClose,
   onPickFailedNode,
   onResume,
@@ -32,6 +33,8 @@ export function HistoryPanel({
   runs: RunRecord[];
   /** node id → 顯示名稱(時間線用；找不到就顯示原 id) */
   nodeLabels: Record<string, string>;
+  /** 從全域執行紀錄點進來時，直接展開那一筆，而不是只落在流程首頁。 */
+  focusRunId?: string | null;
   onClose: () => void;
   onPickFailedNode: (nodeId: string, runId: string) => void;
   /** 失敗的執行「從失敗那步續跑」(前面成功的步驟沿用上次結果) */
@@ -55,6 +58,18 @@ export function HistoryPanel({
       .catch(() => {});
     return () => { alive = false; };
   }, [runs.length]);
+
+  useEffect(() => {
+    if (!focusRunId) return;
+    let alive = true;
+    queueMicrotask(() => { if (alive) { setExpanded(focusRunId); setLogsLoading(true); setLogs(null); setNodeRuns(null); } });
+    fetch(`/api/runs/${focusRunId}`)
+      .then(async (r) => r.ok ? r.json() : Promise.reject(new Error()))
+      .then((data) => { if (alive) { setLogs(data.logs ?? []); setNodeRuns(data.nodeRuns ?? []); } })
+      .catch(() => { if (alive) { setLogs([]); setNodeRuns([]); } })
+      .finally(() => { if (alive) setLogsLoading(false); });
+    return () => { alive = false; };
+  }, [focusRunId]);
 
   async function handleResume(runId: string) {
     setResuming(runId);

@@ -159,8 +159,9 @@ export function createSchedule(workflowId: string, cron: string, params: Record<
   return id;
 }
 
-export function updateSchedule(id: string, patch: { enabled?: boolean; cron?: string; params?: Record<string, unknown> }) {
+export function updateSchedule(id: string, patch: { enabled?: boolean; cron?: string; params?: Record<string, unknown> }): boolean {
   const db = getDb();
+  if (!db.prepare(`SELECT 1 FROM schedules WHERE id = ?`).get(id)) return false;
   if (patch.enabled !== undefined) {
     db.prepare(`UPDATE schedules SET enabled = ? WHERE id = ?`).run(patch.enabled ? 1 : 0, id);
   }
@@ -177,11 +178,12 @@ export function updateSchedule(id: string, patch: { enabled?: boolean; cron?: st
     const row = db.prepare(`SELECT cron FROM schedules WHERE id = ?`).get(id) as { cron: string } | undefined;
     if (row) db.prepare(`UPDATE schedules SET next_run_at = ? WHERE id = ?`).run(computeNextRun(row.cron, new Date()), id);
   }
+  return true;
 }
 
-export function deleteSchedule(id: string) {
+export function deleteSchedule(id: string): boolean {
   const db = getDb();
-  db.prepare(`DELETE FROM schedules WHERE id = ?`).run(id);
+  return db.prepare(`DELETE FROM schedules WHERE id = ?`).run(id).changes > 0;
 }
 
 let tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -206,6 +208,12 @@ function tick() {
       if (!wf) {
         // 流程已被刪除但排程還留著：不清掉的話這筆排程每分鐘都會在這裡卡住，且下面 startWorkflowRun 會直接 throw
         db.prepare(`DELETE FROM schedules WHERE id = ?`).run(sched.id);
+        continue;
+      }
+      // 草稿可以先保存排程設定，但絕不能在背景自行執行。設為正式後同一筆 enabled 排程
+      // 會自然開始生效，跟資料夾／收信監聽的產品語意一致。
+      if (wf.status !== "official") {
+        db.prepare(`UPDATE schedules SET next_run_at = ? WHERE id = ?`).run(computeNextRun(sched.cron, now), sched.id);
         continue;
       }
 

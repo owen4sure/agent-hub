@@ -6,8 +6,18 @@ import {
   safeAttachmentName,
   pickBodyText,
   envelopeFromText,
+  openImap,
   MAIL_BODY_MAX_CHARS,
 } from "./mailClient";
+
+test("openImap:呼叫前已取消就立即停止，不嘗試連線", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    openImap({ host: "192.0.2.1", port: 993, secure: true, user: "x", pass: "y" }, controller.signal),
+    /已停止執行/,
+  );
+});
 
 test("imapCredsFromSecrets:缺任一必填欄位回 null", () => {
   assert.equal(imapCredsFromSecrets({}), null);

@@ -96,7 +96,7 @@ export interface FetchedMail {
 }
 
 /** 開一條 IMAP 連線。呼叫端負責 finally client.logout()。連線/登入失敗會拋錯(措辭在呼叫端統一)。 */
-export async function openImap(creds: ImapCreds): Promise<ImapFlow> {
+export async function openImap(creds: ImapCreds, signal?: AbortSignal): Promise<ImapFlow> {
   const client = new ImapFlow({
     host: creds.host,
     port: creds.port,
@@ -105,8 +105,20 @@ export async function openImap(creds: ImapCreds): Promise<ImapFlow> {
     logger: false,
     socketTimeout: 60_000,
   });
-  await client.connect();
-  return client;
+  const onAbort = () => client.close();
+  if (signal?.aborted) throw new Error("已停止執行");
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    await client.connect();
+    if (signal?.aborted) {
+      client.close();
+      throw new Error("已停止執行");
+    }
+    return client;
+  } finally {
+    // 連線完成後由呼叫端接手整段操作的取消；這裡只負責讓「正在連線／登入」也能即時停。
+    signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 /** 是不是 IMAP 登入失敗(帳密錯)——措辭要對齊 classifyFailure 的 credentials 類 */

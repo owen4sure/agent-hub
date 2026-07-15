@@ -16,9 +16,18 @@ export function privateUrlsAllowed(): boolean {
 
 function isPrivateIp(ip: string): boolean {
   // IPv4-mapped IPv6(::ffff:10.0.0.1)先剝殼再照 IPv4 判斷
-  const v4 = ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+  let v4 = ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+  // URL/Node 可能把 ::ffff:192.168.1.1 正規化成 ::ffff:c0a8:101；先還原成 IPv4 再套同一份規則。
+  if (ip.toLowerCase().startsWith("::ffff:") && !net.isIPv4(v4)) {
+    const groups = v4.split(":");
+    if (groups.length === 2 && groups.every((group) => /^[0-9a-f]{1,4}$/i.test(group))) {
+      const high = Number.parseInt(groups[0], 16);
+      const low = Number.parseInt(groups[1], 16);
+      v4 = `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+    }
+  }
   if (net.isIPv4(v4)) {
-    const [a, b] = v4.split(".").map(Number);
+    const [a, b, c] = v4.split(".").map(Number);
     return (
       a === 0 || // 0.0.0.0/8
       a === 10 || // 10/8
@@ -26,7 +35,13 @@ function isPrivateIp(ip: string): boolean {
       (a === 100 && b >= 64 && b <= 127) || // 100.64/10 CGNAT(含部分雲內部服務)
       (a === 169 && b === 254) || // link-local(雲端 metadata 169.254.169.254 就在這段)
       (a === 172 && b >= 16 && b <= 31) || // 172.16/12
-      (a === 192 && b === 168) // 192.168/16
+      (a === 192 && b === 168) || // 192.168/16
+      (a === 192 && b === 0) || // 192.0.0/24 IETF protocol assignments + TEST-NET-1
+      (a === 192 && b === 88 && c === 99) || // 6to4 relay anycast（已廢止）
+      (a === 198 && (b === 18 || b === 19)) || // benchmark networks
+      (a === 198 && b === 51 && c === 100) || // TEST-NET-2
+      (a === 203 && b === 0 && c === 113) || // TEST-NET-3
+      a >= 224 // multicast + reserved + limited broadcast
     );
   }
   if (net.isIPv6(ip)) {
@@ -35,17 +50,19 @@ function isPrivateIp(ip: string): boolean {
       low === "::" ||
       low === "::1" || // loopback
       low.startsWith("fc") || low.startsWith("fd") || // fc00::/7 ULA
-      low.startsWith("fe8") || low.startsWith("fe9") || low.startsWith("fea") || low.startsWith("feb") // fe80::/10 link-local
+      low.startsWith("fe8") || low.startsWith("fe9") || low.startsWith("fea") || low.startsWith("feb") || // fe80::/10 link-local
+      low.startsWith("ff") || // multicast
+      low.startsWith("2001:db8:") || // 文件用網段，不該成為服務目的地
+      low.startsWith("2001:0:") || // Teredo transition（可封裝 IPv4）
+      low.startsWith("2002:") // 6to4 transition（可封裝 IPv4）
     );
   }
   // 不是合法 IP 字面值(這函式只該收 IP)——保守當內部擋掉
   return true;
 }
 
-// TTL(不是永久快取)：DNS-rebinding 攻擊的手法正是「第一次解析到公開 IP 通過檢查，
-// 之後把同一個網域改指到內部位址」——快取若沒有過期時間，第一次查到的「安全」判定會被
-// 永遠信任，之後 DNS 換了也不會重查，SSRF 防護形同虛設(踩過的安全漏洞)。60 秒短 TTL：
-// 一般網頁請求的時間跨度內仍有省查詢的效果，但攻擊者改 DNS 後最多 60 秒就會被重新驗證到。
+// 只快取「要擋」的結果，不快取公開 IP。安全結果即使只快取 60 秒，DNS rebinding 仍可在這 60 秒內
+// 把同一網域改指到 127.0.0.1/metadata；擋截結果短暫留著最多只是安全的 false positive。
 const DNS_CACHE_TTL_MS = 60_000;
 const lookupCache = new Map<string, { result: boolean; at: number }>();
 
@@ -64,7 +81,47 @@ export async function isPrivateHost(hostname: string): Promise<boolean> {
   } catch {
     result = true;
   }
-  lookupCache.set(host, { result, at: Date.now() });
+  if (result) lookupCache.set(host, { result, at: Date.now() });
+  else lookupCache.delete(host);
   if (lookupCache.size > 500) lookupCache.clear(); // 粗略防無限長大
   return result;
+}
+
+/**
+ * Node fetch 的 redirect:"follow" 會在背後直接跟 30x，呼叫方沒機會檢查下一跳是否進入內網。
+ * 這個共用函式強制每一跳都重新驗主機，節點不得自己寫「只驗第一跳」的半套版本。
+ */
+export async function fetchWithUrlGuard(rawUrl: string, init: RequestInit = {}, maxRedirects = 5): Promise<Response> {
+  let current: URL;
+  try { current = new URL(rawUrl); } catch { throw new Error(`網址格式不正確：${rawUrl}`); }
+  let requestInit = { ...init, redirect: "manual" as const };
+  for (let hop = 0; ; hop++) {
+    if (!/^https?:$/.test(current.protocol)) throw new Error(`只允許 http/https 網址：${current.href}`);
+    if (!privateUrlsAllowed() && (await isPrivateHost(current.hostname))) {
+      throw new Error(`不允許連線內部網路位址(${current.hostname})`);
+    }
+    const response = await fetch(current.href, requestInit);
+    if (response.status < 300 || response.status >= 400) return response;
+    const location = response.headers.get("location");
+    if (!location) return response;
+    if (hop >= maxRedirects) throw new Error(`轉址次數超過 ${maxRedirects} 次`);
+    const next = new URL(location, current);
+    await response.body?.cancel().catch(() => {});
+    // 原生 fetch 在跨站轉址時不會把帳密標頭送到新站；手動跟轉址也必須維持同樣保護。
+    // 否則使用者打有 Authorization 的 API，只要對方回 302 就能把憑證導去第三方網站。
+    if (next.origin !== current.origin) {
+      const headers = new Headers(requestInit.headers);
+      for (const key of ["authorization", "proxy-authorization", "cookie", "host"]) headers.delete(key);
+      requestInit = { ...requestInit, headers };
+    }
+    current = next;
+    // 跟瀏覽器/fetch 語意一致：303，以及 POST 的 301/302，下一跳改成 GET。
+    const method = String(requestInit.method ?? "GET").toUpperCase();
+    if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === "POST")) {
+      const headers = new Headers(requestInit.headers);
+      headers.delete("content-length");
+      headers.delete("content-type");
+      requestInit = { ...requestInit, method: "GET", body: undefined, headers };
+    }
+  }
 }

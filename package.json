@@ -42,7 +42,7 @@
     "nodemailer": "^9.0.3",
     "openai": "^6.45.0",
     "pdf-parse": "^1.1.4",
-    "pdfjs-dist": "^3.11.174",
+    "pdfjs-dist": "^6.1.200",
     "playwright": "^1.61.1",
     "react": "19.2.4",
     "react-dom": "19.2.4",
@@ -67,6 +67,10 @@
     "typescript": "^5"
   },
   "overrides": {
-    "tar": "^7.5.16"
+    "tar": "^7.5.16",
+    "postcss": "8.5.17",
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
   }
 }

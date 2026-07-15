@@ -75,7 +75,7 @@ export default function DraftsPage() {
   const drafts = workflows?.filter((w) => w.status === "draft") ?? [];
 
   return (
-    <div className="max-w-6xl mx-auto px-8 py-8">
+    <div className="max-w-6xl mx-auto px-4 sm:px-8 py-6 sm:py-8">
       <PageHeader
         title="草稿"
         subtitle="草稿執行時用有頭瀏覽器，方便看到卡在哪一步；做好後在 workflow 裡按「設為正式」"

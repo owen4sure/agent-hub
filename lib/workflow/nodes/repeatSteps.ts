@@ -3,6 +3,7 @@ import { PermanentError } from "../types";
 import { getWorkflow, saveWorkflow } from "../store";
 import { generateCustomCode, isPlaceholderCode } from "../codegen";
 import { DATE_TOKENS, resolveValue } from "../../relativeDate";
+import { dryRunSkipKind, DRY_RUN_SKIPPED_WRITES_KEY, type DryRunSkippedWrite } from "../dryRun";
 // ⚠️ 不能在頂層 import registry：registry 的節點清單 import 這個檔案，形成循環——哪個先被載入，
 // 另一個就會拿到「初始化到一半」的模組(實測：直接載入本檔會 TDZ 炸掉)。getNodeDef 只在執行期用得到，
 // 改成 execute 裡動態 import，把循環徹底切斷。
@@ -152,6 +153,7 @@ export const repeatStepsNode: NodeDefinition = {
 
     const now = new Date();
     const results: unknown[] = [];
+    const dryRunSkippedWrites: DryRunSkippedWrite[] = [];
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       const itemLabel = item && typeof item === "object" && "label" in (item as object) ? String((item as Record<string, unknown>).label) : String(i + 1);
@@ -161,6 +163,34 @@ export const repeatStepsNode: NodeDefinition = {
         const step = steps[j];
         const def = getNodeDef(step.type)!;
         const stepLabel = step.label || def.label;
+
+        // repeat-steps 是容器，外層 engine 看不到裡面的節點；只在 engine 檢查外層會讓內嵌的
+        // 寄信／寫試算表／POST API 在「只讀」試跑中真的送出去。每一小步都必須套同一套守衛。
+        if (ctx.dryRun) {
+          const providedFile = ["filePath", "attachmentPath", "savedPath", "inputFile"]
+            .some((key) => typeof stepInput[key] === "string" && String(stepInput[key]).length > 0);
+          const skipKind = dryRunSkipKind({
+            id: `${ctx.nodeId}-i${i}-s${j}`,
+            type: step.type,
+            label: stepLabel,
+            config: step.config ?? {},
+            position: { x: 0, y: 0 },
+          }, providedFile);
+          if (skipKind) {
+            ctx.log(skipKind === "write"
+              ? `[第${i + 1}項:${itemLabel}／${stepLabel}] 🔒 只讀驗證：略過這步，不會真的寫回／發送`
+              : `[第${i + 1}項:${itemLabel}／${stepLabel}] 🔒 已有直接提供的檔案，略過重新抓取`);
+            if (skipKind === "write") {
+              dryRunSkippedWrites.push({
+                nodeLabel: `第 ${i + 1} 項／${stepLabel}`,
+                type: step.type,
+                config: { ...(step.config ?? {}) },
+                input: { ...stepInput },
+              });
+            }
+            continue;
+          }
+        }
 
         // custom-code 步驟還是空殼 → 在這裡「產一次、存回節點、所有迭代共用」。
         // 不能交給 customCode.execute 自己處理：它存回時找的是合成的臨時 nodeId(找不到→不存)，
@@ -202,6 +232,25 @@ export const repeatStepsNode: NodeDefinition = {
           step.config = { ...(step.config ?? {}), code }; // 本次執行的所有後續迭代直接用
           persistStepCode(ctx.workflowId, ctx.nodeId, j, code); // 未來的執行直接用
           ctx.log(`「${stepLabel}」程式碼已產生並存回節點`);
+
+          // 跟頂層 custom-code 一樣，空殼生成後要再做一次只讀檢查；生成前的 intent 無法保證
+          // 模型實際產出的 code 沒有 fetch／寫檔／瀏覽器 click。
+          if (ctx.dryRun && dryRunSkipKind({
+            id: `${ctx.nodeId}-i${i}-s${j}`,
+            type: step.type,
+            label: stepLabel,
+            config: step.config,
+            position: { x: 0, y: 0 },
+          }, false) === "write") {
+            ctx.log(`[第${i + 1}項:${itemLabel}／${stepLabel}] 🔒 新產生的程式碼含外部操作，這次已攔住`);
+            dryRunSkippedWrites.push({
+              nodeLabel: `第 ${i + 1} 項／${stepLabel}`,
+              type: step.type,
+              config: { intent: step.config.intent ?? "", code: "" },
+              input: { ...stepInput },
+            });
+            continue;
+          }
         }
 
         const stepCtx: NodeContext = {
@@ -247,6 +296,14 @@ export const repeatStepsNode: NodeDefinition = {
       ctx.log(`── 第 ${i + 1}/${items.length} 項(${itemLabel})完成 ──`);
     }
 
-    return { output: { ...ctx.input, [outputKey]: results } };
+    return {
+      output: {
+        ...ctx.input,
+        [outputKey]: results,
+        ...(ctx.dryRun && dryRunSkippedWrites.length
+          ? { [DRY_RUN_SKIPPED_WRITES_KEY]: dryRunSkippedWrites }
+          : {}),
+      },
+    };
   },
 };

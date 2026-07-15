@@ -11,6 +11,7 @@ import os from "node:os";
 
 const ROOT = path.join(__dirname, "..");
 let hasError = false;
+let agentHubAlreadyRunning = false;
 
 function ok(label: string) { console.log(`✅ ${label}`); }
 function warn(label: string, fix: string) { console.log(`⚠️  ${label}\n   → ${fix}`); }
@@ -42,6 +43,9 @@ try {
 // 4. .env 是否存在(沒有也不是致命，設定頁可以填，但沒有的話第一次開網頁金鑰會是空的)
 const envPath = path.join(ROOT, ".env");
 if (fs.existsSync(envPath)) {
+  if (process.platform !== "win32") {
+    try { fs.chmodSync(envPath, 0o600); } catch { /* 下面的權限檢查會報出來 */ }
+  }
   ok(".env 已建立");
 } else {
   warn("還沒有 .env", "可用「cp .env.example .env」建立一份，再打開網頁的「設定」頁填入你的模型 API Key(或跟同事要那份 .env)");
@@ -51,6 +55,7 @@ if (fs.existsSync(envPath)) {
 const dataDir = path.join(ROOT, "data");
 try {
   fs.mkdirSync(dataDir, { recursive: true });
+  if (process.platform !== "win32") fs.chmodSync(dataDir, 0o700);
   const testFile = path.join(dataDir, ".doctor-write-test");
   fs.writeFileSync(testFile, "ok");
   fs.rmSync(testFile);
@@ -59,15 +64,48 @@ try {
   fail("data/ 目錄無法寫入", `請確認 ${dataDir} 的權限，錯誤：${err instanceof Error ? err.message : String(err)}`);
 }
 
-// 6. port 3000 有沒有被佔用
+// 6. 本機帳密檔案權限：同一台電腦的其他 OS 帳號不應能讀 API key、workflow 輸入輸出與 DB。
+if (process.platform !== "win32") {
+  const unsafe: string[] = [];
+  const verifyPrivate = (file: string) => {
+    if (!fs.existsSync(file)) return;
+    try {
+      if ((fs.statSync(file).mode & 0o077) !== 0) unsafe.push(path.relative(ROOT, file));
+    } catch { unsafe.push(path.relative(ROOT, file)); }
+  };
+  verifyPrivate(dataDir);
+  verifyPrivate(envPath);
+  for (const name of ["agent-hub.db", "agent-hub.db-wal", "agent-hub.db-shm"]) {
+    const file = path.join(dataDir, name);
+    if (fs.existsSync(file)) {
+      try { fs.chmodSync(file, 0o600); } catch { /* verifyPrivate 會報 */ }
+      verifyPrivate(file);
+    }
+  }
+  if (unsafe.length === 0) ok("本機帳密與執行資料權限已鎖定(只有目前 OS 帳號可讀)");
+  else fail(`敏感檔案權限過寬：${unsafe.join("、")}`, "請執行 chmod 700 data && chmod 600 .env data/agent-hub.db*");
+}
+
+// 7. port 3000 有沒有被佔用。若佔用者正是健康的 Agent Hub，這是成功而不是警告。
 try {
   execSync("lsof -i :3000 -sTCP:LISTEN", { stdio: "ignore" });
-  warn("port 3000 目前被佔用", "如果等一下要用 npm run dev/start，得先關掉佔用 3000 的程式(可用「lsof -i :3000」查是誰)");
+  try {
+    const raw = execSync("curl --silent --show-error --fail --max-time 2 http://127.0.0.1:3000/api/health", { encoding: "utf8" });
+    const health = JSON.parse(raw) as { ok?: boolean; process?: { pid?: number } };
+    if (health.ok === true && typeof health.process?.pid === "number") {
+      agentHubAlreadyRunning = true;
+      ok(`Agent Hub 已在 http://127.0.0.1:3000 正常運作(PID ${health.process.pid})`);
+    } else {
+      warn("port 3000 被其他或不健康的服務佔用", "請先打開 http://127.0.0.1:3000 確認；若不是 Agent Hub，用「lsof -i :3000」找出並關閉佔用程式");
+    }
+  } catch {
+    warn("port 3000 被其他或沒有回應的服務佔用", "請用「lsof -i :3000」找出佔用程式；確認不需要後再關閉它");
+  }
 } catch {
   ok("port 3000 目前是空的");
 }
 
-// 7. 本機 Claude Code CLI(選用，非必要)：裝了+登入過的話，模型可以選「claude-code(本機訂閱)」，
+// 8. 本機 Claude Code CLI(選用，非必要)：裝了+登入過的話，模型可以選「claude-code(本機訂閱)」，
 // 不用另外申請 API key、通常也比免費/共用的 API 服務穩定
 try {
   execSync("claude --version", { stdio: "ignore" });
@@ -76,5 +114,9 @@ try {
   warn("沒偵測到 Claude Code CLI(非必要)", "有 Claude 訂閱的話可以裝 Claude Code 並登入一次，之後模型選單就能選「claude-code(本機訂閱)」，不用另外申請 API key");
 }
 
-console.log(hasError ? "\n有項目需要處理，請照上面的建議修復後再跑一次。" : "\n🎉 一切就緒！可以執行 npm run dev 開始使用。");
+console.log(hasError
+  ? "\n有項目需要處理，請照上面的建議修復後再跑一次。"
+  : agentHubAlreadyRunning
+    ? "\n🎉 一切正常！Agent Hub 已經可以使用。"
+    : "\n🎉 一切就緒！可以執行 npm run dev 開始使用。");
 process.exit(hasError ? 1 : 0);

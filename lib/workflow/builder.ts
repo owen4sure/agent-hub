@@ -16,35 +16,138 @@ import { communityRefsSection } from "../communityIndex";
 import { checkRequirements, unmetFeedback, checklistText } from "./requirementCheck";
 import { getSharedSecrets } from "../settingsStore";
 import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
+import { materializeChatAttachment } from "../chatAttachments";
+import { KNOWN_WORKING_MODELS, MODELS, VISION_MODELS, supportsVision } from "../models";
+import { plainLanguage } from "./plainLanguage";
+import { parseCron } from "../cron";
 
 export type MessagePart =
   | { kind: "text"; text: string }
-  | { kind: "image"; b64: string; name?: string }
-  | { kind: "file"; name: string; content: string };
+  | { kind: "image"; b64: string; name?: string; mime?: string; assetId?: string }
+  | { kind: "file"; name: string; content: string; assetId?: string };
 
 export interface ChatMessage {
   role: "user" | "assistant";
   parts: MessagePart[];
+  /** 執行狀態／安全提示等產品訊息，不是模型的反問，也不該污染下一輪建圖。 */
+  isControl?: boolean;
 }
 
 export type BuildResult =
   | { phase: "clarify"; message: string }
+  | { phase: "answer"; message: string }
   | { phase: "ready"; message: string; nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[]; schedule?: SuggestedSchedule; autoWebhook?: boolean; onFailureWorkflow?: string }
-  | { phase: "edits"; message: string; edits: { nodeId: string; stepIndex?: number; config: Record<string, unknown> }[] };
+  | { phase: "edits"; message: string; edits: { nodeId: string; stepIndex?: number; config: Record<string, unknown> }[]; triggerParams?: ParamField[] };
 
 export interface SuggestedSchedule {
   cron: string;
   params?: Record<string, unknown>;
 }
 
-/** 上次執行的失敗現場——讓「對話修流程」也看得到「哪一步、為什麼壞、實際收到什麼資料」，跟「點節點修」同一個頻道 */
-export interface RuntimeContext {
-  failedNodeId: string;
-  failedNodeLabel: string;
-  error: string;
-  actualInput: Record<string, unknown> | null;
-  htmlElements: string | null;
+export const BUILDER_MAX_OUTPUT_TOKENS = 12_000;
+
+/** 排程在對話裡只講人話；無法對應簡易表單的進階排程也不把 cron 語法露給使用者。 */
+export function describeSuggestedSchedule(cron: string): string {
+  const parsed = parseCron(cron);
+  if (!parsed) return "自訂的固定時間";
+  const [hourText, minuteText] = parsed.time.split(":");
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const mm = String(minute).padStart(2, "0");
+  const time = hour === 0 ? `凌晨 12:${mm}`
+    : hour < 6 ? `凌晨 ${hour}:${mm}`
+      : hour < 12 ? `早上 ${hour}:${mm}`
+        : hour === 12 ? `中午 12:${mm}`
+          : hour < 18 ? `下午 ${hour - 12}:${mm}`
+            : `晚上 ${hour - 12}:${mm}`;
+  if (parsed.mode === "daily") return `每天 ${time}`;
+  if (parsed.mode === "weekly") return `每週${["日", "一", "二", "三", "四", "五", "六"][Number(parsed.weekday)] ?? ""} ${time}`;
+  if (parsed.mode === "monthly") return `每月 ${parsed.day} 號 ${time}`;
+  if (parsed.mode === "bimonth") return `每兩個月 ${parsed.day} 號 ${time}`;
+  if (parsed.mode === "quarter") return `每季首月 ${parsed.day} 號 ${time}`;
+  return "自訂的固定時間";
 }
+
+/**
+ * 使用者只丟一份 SOP／需求文件、沒有另外打字時，文件本身就是需求。
+ * 有文字時，只有文字明確說「照附件／需求文件」才把檔案內容併入，避免一般資料表裡剛好出現
+ * 「通知、每月」等字樣而被誤判成使用者要求。
+ */
+export function userRequirementText(history: ChatMessage[]): string {
+  const chunks: string[] = [];
+  for (const message of history) {
+    if (message.role !== "user") continue;
+    const text = message.parts.filter((part): part is Extract<MessagePart, { kind: "text" }> => part.kind === "text")
+      .map((part) => part.text).join("\n").trim();
+    if (text) chunks.push(text);
+    const files = message.parts.filter((part): part is Extract<MessagePart, { kind: "file" }> => part.kind === "file");
+    const fileIsTheRequest = !text || /(?:照(?:著|這份)?|依(?:照)?|根據|參考).{0,8}(?:附件|文件|需求|規格|sop|流程)|(?:這份|附件(?:裡|中)?的?)(?:需求|規格|sop|流程|文件)|(?:需求|規格|sop|流程)文件/i.test(text);
+    if (fileIsTheRequest) {
+      for (const file of files) chunks.push(`【附件 ${file.name}】\n${file.content.slice(0, 40_000)}`);
+    }
+  }
+  return chunks.join("\n\n").slice(0, 120_000);
+}
+
+/** 已知不會看圖的內建模型不得拿來理解截圖；自訂模型能力未知，尊重使用者設定並照常嘗試。 */
+export function builderModelForHistory(model: string, history: ChatMessage[]): string {
+  const hasImage = history.some((message) => message.parts.some((part) => part.kind === "image"));
+  const isKnownBuiltIn = (MODELS as readonly string[]).includes(model);
+  return hasImage && isKnownBuiltIn && !supportsVision(model) ? VISION_MODELS[0] : model;
+}
+
+/**
+ * Webhook／外部工具的 JSON schema 不一定會變成 RunForm 欄位，但使用者常會直接說
+ * 「欄位 message」「欄位 subject/body」。把這些明講的 key 交給變數 lint，避免正確的
+ * {{message}} 被當成憑空發明；沒有明講的拼錯字仍會照常警告。
+ */
+export function explicitTriggerInputKeys(text: string): string[] {
+  const keys = new Set<string>();
+  const key = "[A-Za-z_][A-Za-z0-9_.-]{0,99}";
+  const list = `${key}(?:\\s*[/、,，]\\s*${key})*`;
+  const pattern = new RegExp(`(?:欄位|字段)(?:為|是)?\\s*[:：]?\\s*(${list})`, "gi");
+  for (const match of text.matchAll(pattern)) {
+    for (const item of match[1].split(/\s*[/、,，]\s*/)) if (/^[A-Za-z_][A-Za-z0-9_.-]{0,99}$/.test(item)) keys.add(item);
+  }
+  return [...keys];
+}
+
+/** 對話改流程時可用的真實執行現場。成功與失敗都要接得上，不能只在報錯後才看得到資料。 */
+export type RuntimeContext =
+  | {
+      kind: "failure";
+      failedNodeId: string;
+      failedNodeLabel: string;
+      error: string;
+      actualInput: Record<string, unknown> | null;
+      htmlElements: string | null;
+    }
+  | {
+      kind: "success";
+      runId: string;
+      startedAt: string;
+      evidence: string;
+    };
+
+const triggerParamSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  type: z.enum(["text", "number", "date-or-token", "select", "boolean", "secret", "code", "textarea"]),
+  default: z.string().optional(),
+  help: z.string().optional(),
+  options: z.array(z.string()).optional(),
+  derived: z.boolean().optional(),
+});
+const triggerParamsSchema = z.array(triggerParamSchema).max(100).superRefine((fields, ctx) => {
+  const seen = new Set<string>();
+  fields.forEach((field, index) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_.-]{0,99}$/.test(field.key)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index, "key"], message: "參數 key 只能用英數、底線、點或連字號，且不能以數字開頭" });
+    }
+    if (seen.has(field.key)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index, "key"], message: `參數 key「${field.key}」重複` });
+    seen.add(field.key);
+  });
+});
 
 const graphSchema = z.object({
   nodes: z.array(
@@ -61,19 +164,7 @@ const graphSchema = z.object({
   // 選填：這條流程「每次執行前」要讓使用者挑的參數(最典型是「抓哪一期的資料」)。
   // 沒有這個的話，週期性抓資料的流程只能把「上一季/這一季」寫死成相對日期 token，執行時永遠是
   // 對照「現在」算出來的那一期，使用者沒有地方能臨時選別期(例如平常抓上一季，這次想回填第一季)。
-  triggerParams: z
-    .array(
-      z.object({
-        key: z.string(),
-        label: z.string(),
-        type: z.enum(["text", "number", "date-or-token", "select", "boolean", "secret", "code", "textarea"]),
-        default: z.string().optional(),
-        help: z.string().optional(),
-        options: z.array(z.string()).optional(),
-        derived: z.boolean().optional(),
-      }),
-    )
-    .optional(),
+  triggerParams: triggerParamsSchema.optional(),
   schedule: z.object({
     cron: z.string(),
     params: z.record(z.string(), z.unknown()).optional(),
@@ -81,6 +172,29 @@ const graphSchema = z.object({
   // 使用者說「失敗時執行 X 流程」→ 模型帶回那條流程的名稱,套用時自動建立關聯(不用進面板設定)
   onFailureWorkflow: z.string().optional(),
 });
+
+/** 模型常把表單欄位型別寫成通用 UI 名稱(file/string/integer/date)，但 Agent Hub 只有固定型別。
+ * 這些是一對一、沒有語意歧義的別名，直接正規化；不為了把 file 改成 text 再跑一次完整模型呼叫。 */
+export function normalizeBuilderGraphObject(obj: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(obj.triggerParams)) return obj;
+  const aliases: Record<string, ParamField["type"]> = {
+    file: "text",
+    path: "text",
+    string: "text",
+    integer: "number",
+    bool: "boolean",
+    date: "date-or-token",
+  };
+  return {
+    ...obj,
+    triggerParams: obj.triggerParams.map((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+      const p = raw as Record<string, unknown>;
+      const type = typeof p.type === "string" ? aliases[p.type.trim().toLowerCase()] : undefined;
+      return type ? { ...p, type } : p;
+    }),
+  };
+}
 
 /**
  * 建好圖之後的「可執行性提示」:告訴使用者這條流程是「馬上能測」還是「還缺什麼」——
@@ -194,26 +308,35 @@ function compactGraphJson(graph: { nodes: WorkflowNode[]; edges: WorkflowEdge[] 
 
 /**
  * 精簡對話歷史：①去掉連續重複的同一句使用者訊息(重試時常見，會一直往提示裡堆同一段長文字)；
- * ②只保留最近 12 則；③【最重要】只有「最新一則使用者訊息」保留完整圖片與檔案內容——
- * 更早訊息裡的圖片(如 Excel 渲染圖，幾百 KB)換成一行文字標記、長檔案內容截短。
- * 不做③的話，拖過一次範本檔之後，每講一句話都把所有大圖整包重送，模型(尤其本機 Claude 要逐張讀檔)
- * 每輪都要重新消化一次，一句小微調跑 100 多秒(踩過的真實回歸)。模型在先前輪次已經看過那些圖，
- * 對話裡留著「曾附過什麼」的標記就夠它銜接上下文。
+ * ②保留第一則、最近 11 則，以及所有含附件的訊息；③附件每輪完整保留。
+ * 模型 API 和每次 `claude -p` 都是全新的 stateless 呼叫，絕不能假設「上一輪已看過」；過去把舊附件
+ * 截成 1,200 字/一句圖片標記，正是複雜需求在澄清一輪後突然失去檔案邏輯的根因。
+ * 大附件改由 assetId 在伺服器補回，Claude Code 則用 Read 工具按需讀取，兼顧正確性與提示大小。
  */
-function trimHistory(history: ChatMessage[]): ChatMessage[] {
+export function trimHistoryForBuilder(history: ChatMessage[]): ChatMessage[] {
   const textOf = (m: ChatMessage) => (m.parts ?? []).map((p) => (p.kind === "text" ? p.text : "")).join("");
+  const signatureOf = (m: ChatMessage) => (m.parts ?? []).map((p) => {
+    if (p.kind === "text") return `text:${p.text}`;
+    if (p.kind === "image") return `image:${p.assetId ?? ""}:${p.name ?? ""}:${p.b64.length}`;
+    return `file:${p.assetId ?? ""}:${p.name}:${p.content.length}:${p.content.slice(0, 80)}`;
+  }).join("|");
   const deduped: ChatMessage[] = [];
   for (const m of history) {
     const prev = deduped[deduped.length - 1];
-    if (prev && prev.role === m.role && m.role === "user" && textOf(prev) === textOf(m) && textOf(m).length > 0) continue;
+    if (prev && prev.role === m.role && m.role === "user" && signatureOf(prev) === signatureOf(m) && textOf(m).length > 0) continue;
     deduped.push(m);
   }
-  // 滑動窗最多 12 則，但「第一則使用者訊息」永遠釘住——那是原始需求的錨點。
-  // 對話拖長(反覆問答)時原始需求滑出視窗，弱模型會忘記整件事是要幹嘛、開始重複問過的問題。
-  const recent = deduped.length > 12 ? [deduped[0], ...deduped.slice(-11)] : deduped;
+  // 模型 API/Claude CLI 每一次呼叫都是全新的 stateless session。「上一輪看過附件」不代表這一輪還記得。
+  // 因此除了第一則需求與最近 11 則，所有含附件的訊息也永久釘住，不能滑出視窗或只留摘要。
+  const keep = new Set<number>();
+  if (deduped.length) keep.add(0);
+  deduped.forEach((m, i) => { if ((m.parts ?? []).some((p) => p.kind === "file" || p.kind === "image")) keep.add(i); });
+  for (let i = Math.max(0, deduped.length - 11); i < deduped.length; i++) keep.add(i);
+  const recent = [...keep].sort((a, b) => a - b).map((i) => deduped[i]);
   const lastUserIdx = recent.map((m) => m.role).lastIndexOf("user");
   return recent.map((m, i) => {
-    if (i === lastUserIdx) return m; // 最新一則使用者訊息：完整保留(圖片/檔案都給模型看)
+    const hasAttachment = (m.parts ?? []).some((p) => p.kind === "file" || p.kind === "image");
+    if (i === lastUserIdx || hasAttachment) return m; // 附件每一輪都完整重送，不能假設模型有跨請求記憶
     const parts: MessagePart[] = (m.parts ?? []).map((p) => {
       if (p.kind === "image") return { kind: "text" as const, text: `(先前附過圖片：${p.name ?? "圖"}，內容已看過)` };
       if (p.kind === "file" && p.content.length > 1200) return { ...p, content: p.content.slice(0, 1200) + "…(先前附過的完整內容已看過，此處截短)" };
@@ -226,6 +349,20 @@ function trimHistory(history: ChatMessage[]): ChatMessage[] {
 
 function runtimeSection(rc: RuntimeContext | undefined): string {
   if (!rc) return "";
+  if (rc.kind === "success") {
+    return `
+
+【這條流程最近一次成功執行的真實資料——不是範例，也不是模型猜測】
+- 執行編號：${rc.runId}
+- 執行時間：${rc.startedAt}
+${rc.evidence.slice(0, 24_000)}
+
+使用者若叫你「先去檔案／試算表看、找欄位、對照儲存格」，上面的內容就是系統已替你實際讀到的現場。
+請直接依欄名、列名與 A1 儲存格位址判斷並完成修改；禁止再回答「我無法打開檔案／只能依你描述」、
+禁止把欄列對照工作丟回給使用者。目標 Google Sheet 現有數字可能是舊日期留下的值，不是本次來源欄位的驗證答案；
+當「列名＋語意欄名」已可對上（例如同一通路的上月↔前月、本月↔本月），就要用本次下載檔案的值完成對照，不得只因目標舊值不相等就再反問使用者。
+只有證據裡真的沒有目標分頁、資料列，或同時有兩個語意同樣合理的來源時，才具體說缺哪一份資料。`;
+  }
   const inputStr = rc.actualInput ? JSON.stringify(rc.actualInput, null, 2).slice(0, 800) : "(沒有記錄到)";
   const html = rc.htmlElements ? `\n這一步失敗當下頁面實際的元素(濃縮)：\n${rc.htmlElements.slice(0, 1000)}` : "";
   return `
@@ -331,6 +468,7 @@ ${triggerParamsSection(triggerParams)}
 ${runtimeSection(rc)}
 
 【判斷這一輪該做什麼：修現有流程，還是建/改流程】
+- 如果使用者只是在問「目前怎麼運作／會抓哪個區間／能不能做到／剛才設定代表什麼」，要直接根據目前節點圖與執行參數回答，回 {"phase":"answer","message":"具體答案"}。**問問題不等於授權修改**，不要擅自動圖，也不要反過來叫使用者去某個設定頁自己研究。
 - 如果目前已經有一張流程圖，而使用者是在「回報這條流程哪裡不對／某一步失敗」(尤其上面有『失敗現場』時)，
   你的工作是**精準修好真正壞掉的那個節點**，而不是把整張圖重畫。這時回 {"phase":"edits",...}(見下)，只改需要改的節點。
   真正的原因常常不在報錯的那一步，而在它上游某個沒把資料準備好的節點——請依『失敗現場』的實際 input 判斷，該改哪個就改哪個。
@@ -408,8 +546,14 @@ ${runtimeSection(rc)}
   - 系統會依 periodUnit/periodWhich 算出 period.*、解析出這些衍生欄位的實際值，且執行前會跳出表單讓使用者精準選「2026 第一季」這種實際期間(不只是「上一期/這一期」二選一)，這正是解決「有時候想抓別期」的機制。
   - 不是週期性的需求(單次抓資料、一次性報表)就不需要 triggerParams，不要為了不需要的東西硬加。
 
+【使用者要「執行時自己選／輸入」任何條件時——對話直接把介面與資料流一起做好】
+- 只要使用者說「每次執行讓我選日期／區間／分頁／部門／門檻／收件人…」，就把它宣告成 triggerParams；前端會自動依型別長出日期、選單或輸入介面。**不要回叫使用者去節點或設定頁自己改**。
+- 任意起訖區間用兩個可見參數，例如 rangeStart / rangeEnd，type 都用 date-or-token；每月/每季這種固定週期才用上面的 periodUnit / periodWhich。
+- 只新增表單欄位還不算完成：所有真正用到該條件的節點 config、custom-code intent/code 都要改成引用 {{參數key}}。否則畫面能選、執行卻仍用寫死值，是嚴重假功能。
+- 現有流程只需改設定與執行參數時，回 phase:"edits"，除了 edits 之外帶上**完整的新 triggerParams 陣列**；不要為此重畫整張流程。
+
 【觸發方式：排程/資料夾監聽/Webhook/收信/Telegram/LINE】
-- 使用者說「每天/每週/每月/每季幾點自動跑」：排程不是節點，不要為它畫節點；請在 phase:"ready" 根層加 schedule:{"cron":"五欄 cron","params":{}}。系統會在使用者按「套用」時一併建立並啟用排程，不要再叫使用者自己去觸發面板設定。時區固定 Asia/Taipei。例：每天 09:00 = "0 9 * * *"；每週一 09:00 = "0 9 * * 1"；每月 1 日 09:00 = "0 9 1 * *"；每季首月 1 日 09:00 = "0 9 1 1,4,7,10 *"。
+- 使用者說「每天/每週/每月/每季幾點自動跑」：排程不是節點，不要為它畫節點；請在 phase:"ready" 根層加 schedule:{"cron":"五欄 cron","params":{}}。系統會在使用者按「套用」時建立排程；草稿只保存設定、不會背景執行，設為正式後才生效。不要再叫使用者自己去觸發面板設定。時區固定 Asia/Taipei。例：每天 09:00 = "0 9 * * *"；每週一 09:00 = "0 9 * * 1"；每月 1 日 09:00 = "0 9 1 * *"；每季首月 1 日 09:00 = "0 9 1 1,4,7,10 *"。
 - 使用者說「把檔案丟進某個資料夾就自動處理」：在 trigger 節點的 config 填 watchPath(那個資料夾的絕對路徑；使用者沒講清楚路徑就先 clarify 問)，需要過濾檔名就填 watchPattern。下游節點用 {{filePath}} 拿到新檔案的完整路徑(例如 read-file 的 path 填 {{filePath}})、{{fileName}} 拿檔名。記得在 message 提醒「設為正式後才會開始監聽」。
 - 使用者說「讓別的程式/捷徑/工具能觸發這個流程」：這是 Webhook——流程圖照建;系統會在套用時**自動啟用 Webhook 並把網址顯示給使用者**,你不用叫他去面板設定。外部 POST 的 JSON 欄位會直接變成下游可用的 {{欄位}}；如果需求裡講明外部會送哪些欄位(如 title、amount)，下游節點就直接引用那些欄位名。
 - 使用者說「收到某種 email 就自動處理」：在 trigger 節點的 config 設 mailWatch:"on"，要篩選就填 mailSubjectFilter(主旨包含)/mailFromFilter(寄件人包含)。下游用 {{from}}/{{subject}}/{{date}}/{{body}} 拿信的欄位，信有附件時 {{filePath}}/{{fileName}} 是第一個附件(read-file/excel-process/pdf-read 都吃 {{filePath}})、{{attachmentCount}} 是附件數。記得在 message 提醒「設為正式後才會開始收信；IMAP 帳密要在設定頁填(有測試連線)」。注意：「收到信就跑」用收信觸發；「流程中途去信箱抓某封信」用 email-read 節點；「寄信出去」用 send-email——三件事別搞混。
@@ -433,10 +577,16 @@ ${runtimeSection(rc)}
   所以你現在看不到內容是正常的、不影響建圖。使用者只要把試算表設成「知道連結的任何人可檢視」就讀得到(免 OAuth、免任何額外設定);
   真的沒開權限時節點執行才會回可行動的提示,不用你在聊天時先擋。
   讀表節點輸出:{{rows}}(每列一個 {欄位名:值})、{{rowCount}}、{{headers}}、{{sheetText}}(前 30 列的文字表格)。
+  使用者有講分頁名稱時直接填 google-sheet-read.sheetName，不要叫他另外找 gid。
   **只要任務需要「理解/計算/挑選」表裡的資料**(算 KPI/比率、彙整成一句話、找出符合條件的列、跟門檻比…),
   就在讀表後面接一個 llm-decide 節點、把 {{sheetText}} 餵給它,由它自己看懂表格結構再算/抽——
   **不要反問使用者「哪一欄是數值」「要看哪一列」,自己讀整張表判斷**(這正是「使用者不用想怎麼做」的意思)。
-  只有當使用者明確說「讀第 N 個/另一個分頁」時才需要連結帶 #gid=;沒說就讀第一個分頁。
+  **寫入要按目的選專用節點，絕對不要用一般 http-request 假裝已經會寫 Google 試算表**：
+  · 在底下新增一筆紀錄 → google-sheet-append。
+  · 把數字填回既有報表的指定欄/列（例如每週 KPI、MTD、YTD）→ google-sheet-update；sheetName 填分頁，targetColumn 填畫面上的欄名或 A/B/C，rows 每行用「列名=值」。
+  兩種寫入都把 Apps Script /exec 網址放在各自節點的 scriptUrl；這不是帳密，不准再放進 requiresSecrets 或叫使用者去設定頁填。
+  使用者若貼了 script.google.com/macros/…/exec，直接填進所有指向同一份試算表的寫入節點；沒提供就留空，回覆白話提醒「點開寫入步驟貼在第一欄」。程式碼範本收在節點內的「第一次設定」折疊教學，不要塞進 workflow 說明或聊天回覆。
+  只有當使用者明確說「讀第 N 個/另一個分頁」時才需要指定分頁;沒說就讀網址目前指定的分頁。
 【熱門服務的免 OAuth 接法——使用者提到這些服務時,用 http-request 節點+這些配方直接建,不要說做不到】
 - **Notion**:整合 token(notion.so/my-integrations 建立,secret 欄名 notionToken)。寫入資料庫=POST https://api.notion.com/v1/pages,headers {"Authorization":"Bearer {{notionToken}}","Notion-Version":"2022-06-28","Content-Type":"application/json"}。**讀取資料庫=POST https://api.notion.com/v1/databases/{資料庫id}/query(同一組 headers),回來的 {{body}} 餵 llm-decide/custom-code 抽你要的欄位**。提醒使用者:資料庫要「加入連接」給那個整合。
 - **Airtable**:個人存取權杖(airtable.com/create/tokens,secret 欄名 airtableToken)。新增列=POST https://api.airtable.com/v0/{baseId}/{tableName},Authorization Bearer。**讀取=GET 同一個網址,{{body}} 餵 AI 抽**。
@@ -448,9 +598,10 @@ ${runtimeSection(rc)}
 - 使用者說「給同事一個網頁表單填,填完就跑」：這是表單觸發——系統會在套用時**自動啟用並把表單網址顯示給使用者**。**表單的欄位=這條流程的 triggerParams**:把要填的欄位宣告成 triggerParams(key/label/type/select 選項),下游用 {{key}} 引用;沒宣告參數時表單只有一個通用「備註」欄({{note}})。
 
 【回覆格式】一律回一個 JSON 物件(不要加程式碼框以外的文字說明放在 message 欄)：
+- 只回答使用者關於現況／能力的問題（不修改）：{"phase":"answer","message":"根據目前流程的具體答案"}
 - 還需要問問題：{"phase":"clarify","message":"你要問使用者的話(可條列)"}
 - 修現有流程的某幾個節點(最常用，直接套用不用使用者再按套用)：
-  {"phase":"edits","message":"用白話說你判斷的真正原因、改了哪個節點的什麼","edits":[{"nodeId":"要改的節點id","config":{ 那個節點改好後的完整 config }}]}
+  {"phase":"edits","message":"用白話說你判斷的真正原因、改了哪個節點的什麼","edits":[{"nodeId":"要改的節點id","config":{ 那個節點改好後的完整 config }}],"triggerParams":[只有要新增或修改執行時選項才帶，且要放完整清單]}
   - edits 可以一個或多個節點。config 是那個節點「改好後的完整設定」。
   - custom-code 節點可直接改 config.code(一段 async 函式主體，用 ...ctx.input 把上游資料往下傳；要用套件就 await import("exceljs"))。
   - **要改的是 repeat-steps(重複執行)節點「裡面的某一步」時，一定用定點修改**：edits 元素帶 "stepIndex"(第幾步，從 0 起，對照上面「步驟編號對照」裡的 stepIndex)，config 只放「那一步」改好後的設定——**絕對不要整包重寫外層的 steps JSON**(幾千字的 JSON 重新輸出幾乎必錯，複述時很容易弄壞其他步驟)。例如：{"nodeId":"repeat-steps節點id","stepIndex":1,"config":{ 那一步改好後的 config }}
@@ -469,6 +620,7 @@ ${runtimeSection(rc)}
 async function callViaClaudeCode(system: string, history: ChatMessage[], signal?: AbortSignal): Promise<string> {
   const tmpDir = path.join(os.tmpdir(), `agenthub-cc-${randomUUID()}`);
   const imagePaths: string[] = [];
+  const readPaths: string[] = [];
   try {
     const turns: string[] = [];
     for (const m of history) {
@@ -477,10 +629,25 @@ async function callViaClaudeCode(system: string, history: ChatMessage[], signal?
       const pieces: string[] = [];
       for (const p of parts) {
         if (p.kind === "text") pieces.push(p.text);
-        else if (p.kind === "file") pieces.push(`(附上檔案「${p.name}」的內容)\n${p.content}`);
+        else if (p.kind === "file") {
+          fs.mkdirSync(tmpDir, { recursive: true });
+          const paths = p.assetId
+            ? materializeChatAttachment(p.assetId, path.join(tmpDir, `asset-${readPaths.length}`))
+            : (() => {
+                const filePath = path.join(tmpDir, `file-${readPaths.length}-${path.basename(p.name).replace(/[^a-zA-Z0-9._-]/g, "_")}.txt`);
+                fs.writeFileSync(filePath, p.content);
+                return [filePath];
+              })();
+          readPaths.push(...paths);
+          pieces.push(paths.length
+            ? `(附上檔案「${p.name}」。請先 Read 主要檔案；若同目錄有展開的專案內容，再用 Glob/Grep 找與需求相關的檔案，不要盲目全讀：\n${paths.map((v) => `- ${v}`).join("\n")})`
+            : `(附上檔案「${p.name}」的內容)\n${p.content}`);
+        }
         else if (p.kind === "image") {
           fs.mkdirSync(tmpDir, { recursive: true });
-          const imgPath = path.join(tmpDir, `${p.name || "image"}-${imagePaths.length}.png`);
+          const extByMime: Record<string, string> = { "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif", "image/bmp": ".bmp" };
+          const ext = extByMime[p.mime ?? ""] ?? (path.extname(p.name ?? "") || ".png");
+          const imgPath = path.join(tmpDir, `image-${imagePaths.length}${ext}`);
           fs.writeFileSync(imgPath, Buffer.from(p.b64, "base64"));
           imagePaths.push(imgPath);
           pieces.push(`(附上一張圖片：${imgPath})`);
@@ -489,7 +656,15 @@ async function callViaClaudeCode(system: string, history: ChatMessage[], signal?
       turns.push(`${label}：${pieces.join("\n")}`);
     }
     const prompt = `${system}\n\n---對話紀錄---\n${turns.join("\n\n")}`;
-    return await callClaudeCode({ prompt, imagePaths: imagePaths.length ? imagePaths : undefined, signal });
+    return await callClaudeCode({
+      prompt,
+      imagePaths: imagePaths.length ? imagePaths : undefined,
+      readPaths: readPaths.length ? readPaths : undefined,
+      signal,
+      // 建圖有 lint + 需求核對 + 最多三輪自我修正，低 effort 可大幅縮短備援延遲，
+      // 確定性驗證仍會攔住缺節點、壞連線、錯型別與漏需求，不拿正確性換速度。
+      effort: "low",
+    });
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -505,17 +680,31 @@ export async function buildWorkflow(
   /** 建圖進度回報(理解需求→畫圖→驗證→修正第N輪)——前端輪詢顯示,使用者才知道慢在哪一步 */
   onStage?: (stage: string) => void,
 ): Promise<BuildResult> {
+  const requestedModel = model;
+  model = builderModelForHistory(model, history);
   // 使用者最新訊息裡引號點名的字串——出現在哪個節點的程式碼裡，那個節點的 code 就不截斷(讓模型
   // 做針對性修改時看得到內文；其餘節點照常截斷控制提示大小)
   const lastUserMsg = [...history].reverse().find((m) => m.role === "user");
   const keepPatterns = quotedStrings((lastUserMsg?.parts ?? []).map((p) => (p.kind === "text" ? p.text : "")).join("\n"));
   const graphStr = compactGraphJson(currentGraph, keepPatterns);
   const fullHistory = history;
-  history = trimHistory(history);
+  history = trimHistoryForBuilder(history);
+  const inputStats = history.reduce(
+    (acc, m) => {
+      for (const p of m.parts ?? []) {
+        if (p.kind === "text") acc.textChars += p.text.length;
+        else if (p.kind === "file") { acc.files++; acc.fileChars += p.content.length; }
+        else { acc.images++; acc.imageBytesApprox += Math.round(p.b64.length * 0.75); }
+      }
+      return acc;
+    },
+    { textChars: 0, files: 0, fileChars: 0, images: 0, imageBytesApprox: 0 },
+  );
+  console.info("[workflow-builder] input", { model, requestedModel, visionRerouted: model !== requestedModel, turns: history.length, ...inputStats, graphChars: graphStr.length });
   // clarify 護欄：AI 已經連問好幾輪、圖上還什麼都沒有 → 強制它轉為「先出一版草稿圖」。
   // 弱模型很容易每輪都覺得「資訊還不夠」無限反問(尤其滑動窗讓它忘記使用者早答過)，
   // 沒有這個確定性上限的話，對話永遠不會收斂成一張圖。
-  const assistantTurns = fullHistory.filter((m) => m.role === "assistant").length;
+  const assistantTurns = fullHistory.filter((m) => m.role === "assistant" && !m.isControl).length;
   const nothingBuiltYet = currentGraph.nodes.length <= 1;
   const clarifyCapNote =
     assistantTurns >= 3 && nothingBuiltYet
@@ -524,10 +713,16 @@ export async function buildWorkflow(
   // 社群藍圖檢索:用最新一則使用者需求對 community/index.json(n8n 社群庫 2000+ 條的 metadata)
   // 做關鍵字檢索,把最相近的幾條當「同型流程參考」注入——使用者問到任何常見自動化,
   // 模型手上都有真實世界的結構藍圖可對照,不用憑空想步驟拆法。索引缺檔時回空字串,功能靜默停用。
-  const lastUserText = (lastUserMsg?.parts ?? []).map((p) => (p.kind === "text" ? p.text : "")).join("\n");
+  const lastUserText = lastUserMsg ? userRequirementText([lastUserMsg]) : "";
   const communityRefs = communityRefsSection(lastUserText);
+  const fullSystemPrompt = systemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph) + communityRefs + clarifyCapNote;
+  console.info("[workflow-builder] context", {
+    systemChars: fullSystemPrompt.length,
+    communityChars: communityRefs.length,
+    historyChars: inputStats.textChars + inputStats.fileChars,
+  });
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: "system", content: systemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph) + communityRefs + clarifyCapNote },
+    { role: "system", content: fullSystemPrompt },
   ];
   for (const m of history) {
     const parts = m.parts ?? [];
@@ -536,7 +731,7 @@ export async function buildWorkflow(
       // 依使用者提供的「順序」組成多模態內容，AI 才能照順序理解(文字→圖→文字→檔案…)
       const content: OpenAI.Chat.ChatCompletionContentPart[] = parts.map((p) =>
         p.kind === "image"
-          ? { type: "image_url" as const, image_url: { url: `data:image/png;base64,${p.b64}` } }
+          ? { type: "image_url" as const, image_url: { url: `data:${p.mime || "image/png"};base64,${p.b64}` } }
           : p.kind === "file"
             ? { type: "text" as const, text: `(附上檔案「${p.name}」的內容)\n${p.content}` }
             : { type: "text" as const, text: p.text },
@@ -554,14 +749,75 @@ export async function buildWorkflow(
   // 模型網關偶爾會有暫時性問題(如 503/DEGRADED)，這裡自動重試到成功，不要一次失敗就把技術錯誤丟給使用者看。
   // 主力永遠是使用者選的(通常是免費/共用API)模型；只有主力重試到底還是不行、且這台機器有裝 Claude Code，
   // 才自動切換到本機 Claude Code 頂一次——不是預設就走 Claude Code，是它徹底不行時的最後一道備援。
+  // 主力單一模型壞掉不代表整個免費 gateway 都壞。先換一個實測可用的免費模型，最後才動用
+  // 本機 Claude Code；同一個建圖請求後續的 lint／需求修正輪沿用已成功路徑，不重新等待壞掉的主力。
+  const backupPreference = inputStats.images > 0
+    ? [...VISION_MODELS]
+    : ["Qwen--3.5-max", "Kimi-k2.6", "glm-5.2", ...KNOWN_WORKING_MODELS];
+  const backupModel = [...new Set(backupPreference)].find((candidate) => candidate !== model && (KNOWN_WORKING_MODELS as readonly string[]).includes(candidate));
+  let preferredRouteForThisBuild: "backup-model" | "claude-code" | null = null;
   const callOnce = async (extra: OpenAI.Chat.ChatCompletionMessageParam[], extraCC: ChatMessage[]): Promise<string> => {
     const claudeCodeFallback = () =>
-      callViaClaudeCode(systemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph) + clarifyCapNote, [...history, ...extraCC], signal);
-    if (isClaudeCodeModel(model)) return callAIWithRetry(claudeCodeFallback, { label: "建立流程圖(Claude Code)", signal });
-    const fallback = (await isClaudeCodeAvailable()) ? claudeCodeFallback : undefined;
+      callViaClaudeCode(fullSystemPrompt, [...history, ...extraCC], signal);
+    if (isClaudeCodeModel(model)) return callAIWithRetry(claudeCodeFallback, { label: "建立流程圖(Claude Code)", signal, maxAttempts: 2 });
+    const claudeAvailable = await isClaudeCodeAvailable();
+    const callGatewayModel = (targetModel: string) =>
+      client.chat.completions.create({ model: targetModel, messages: [...messages, ...extra], max_tokens: BUILDER_MAX_OUTPUT_TOKENS }, { signal, timeout: 60_000 }).then((res) => {
+        const choice = res.choices[0];
+        const content = choice?.message?.content ?? "";
+        console.info("[workflow-builder] model-response", {
+          model: targetModel,
+          chars: content.length,
+          finishReason: choice?.finish_reason ?? null,
+          promptTokens: res.usage?.prompt_tokens,
+          completionTokens: res.usage?.completion_tokens,
+        });
+        if (choice?.finish_reason === "length") {
+          throw new Error(`模型輸出達到 ${BUILDER_MAX_OUTPUT_TOKENS} tokens 上限，完整流程圖被截斷`);
+        }
+        return content;
+      });
+    const runBackupModel = async (): Promise<string> => {
+      if (!backupModel) throw new Error("沒有可用的免費備援模型");
+      let switchedToClaude = false;
+      const result = await callAIWithRetry(
+        () => callGatewayModel(backupModel),
+        {
+          label: `建立流程圖(${backupModel})`,
+          maxAttempts: 1,
+          signal,
+          fallback: claudeAvailable ? claudeCodeFallback : undefined,
+          onFallback: () => {
+            switchedToClaude = true;
+            preferredRouteForThisBuild = "claude-code";
+            onStage?.("🛟 免費備援模型也暫時沒有回應，改用本機備援繼續畫圖…");
+          },
+        },
+      );
+      if (!switchedToClaude) preferredRouteForThisBuild = "backup-model";
+      return result;
+    };
+    if (preferredRouteForThisBuild === "backup-model" && backupModel) return runBackupModel();
+    if (preferredRouteForThisBuild === "claude-code" && claudeAvailable) {
+      return callAIWithRetry(claudeCodeFallback, { label: "修正流程圖(沿用本機備援)", signal, maxAttempts: 1 });
+    }
+    const fallback = backupModel ? runBackupModel : claudeAvailable ? async () => {
+      preferredRouteForThisBuild = "claude-code";
+      return claudeCodeFallback();
+    } : undefined;
     return callAIWithRetry(
-      () => client.chat.completions.create({ model, messages: [...messages, ...extra], max_tokens: 3000 }, { signal }).then((res) => res.choices[0]?.message?.content ?? ""),
-      { label: "建立流程圖", fallback, signal },
+      () => callGatewayModel(model),
+      {
+        label: "建立流程圖",
+        fallback,
+        signal,
+        // 建圖 prompt 大、一次 timeout 後重送同一包通常只會再等滿一次；已有本機備援時立刻切換。
+        // 沒有備援仍保留共用層的四次重試，免費 API 的瞬斷不會直接丟給使用者。
+        maxAttempts: fallback ? 1 : undefined,
+        onFallback: () => onStage?.(backupModel
+          ? `🔄 主力模型暫時沒有回應，改用 ${backupModel} 繼續畫圖…`
+          : "🛟 主力模型暫時沒有回應，改用本機備援繼續畫圖…"),
+      },
     );
   };
 
@@ -570,18 +826,20 @@ export async function buildWorkflow(
   // number 欄填文字…這些「內容格式錯」以前一次失敗就丟給使用者一句「格式有點問題」——收斂機率
   // 被模型的單次正確率死死卡住。現在：確定性驗證(zod + lintGraph)抓到具體錯誤 → 原文+錯誤清單
   // 餵回模型要求修正 → 最多兩輪。傳輸層錯誤(503/逾時)由 callAIWithRetry 管，這裡管「內容」。
-  const KNOWN_PHASES = new Set(["clarify", "ready", "edits"]);
+  const KNOWN_PHASES = new Set(["clarify", "answer", "ready", "edits"]);
   const feedback: OpenAI.Chat.ChatCompletionMessageParam[] = [];
   const feedbackCC: ChatMessage[] = [];
   let lastProblems: string[] = [];
-  const MAX_CORRECTIONS = 2;
-  let reqFeedbackGiven = false; // 需求完整性補齊只餵回一輪(見 ready 路徑)
+  const MAX_CORRECTIONS = 3;
+  let requirementFeedbackRounds = 0;
+  const MAX_REQUIREMENT_FEEDBACK_ROUNDS = 2;
+  let varFeedbackGiven = false;
 
   for (let attempt = 0; attempt <= MAX_CORRECTIONS; attempt++) {
     onStage?.(
       attempt === 0
         ? "🧠 理解需求、對照社群藍圖,正在畫流程圖…"
-        : reqFeedbackGiven
+        : requirementFeedbackRounds > 0 || varFeedbackGiven
           ? `🧩 補齊漏掉的需求(第 ${attempt} 輪修正)…`
           : `🔧 修正圖形問題(第 ${attempt} 輪)…`,
     );
@@ -597,9 +855,13 @@ export async function buildWorkflow(
     if (!obj) {
       // 沒有可用的 JSON = 模型在用白話回覆(追問/說明)。顯示給使用者前把程式碼框拿掉。
       const text = stripCodeFences(raw);
-      return { phase: "clarify", message: text || "我需要更多資訊，可以再描述一下嗎？" };
+      return { phase: "clarify", message: plainLanguage(text || "我需要更多資訊，可以再描述一下嗎？") };
     }
     const phase = String(obj.phase ?? "").trim().toLowerCase(); // 弱模型偶爾大小寫/空白不乾淨，正規化後再判斷
+
+    if (phase === "answer") {
+      return { phase: "answer", message: plainLanguage(String(obj.message ?? "目前沒有足夠資訊回答這個問題")) };
+    }
 
     // ── 修現有節點(edits)──先確定性驗證 nodeId 與型別，錯了餵回去修，不能靜默吞。
     // 弱模型偶爾 phase:"ready" 卻順手多附一個 edits 陣列——明確說 ready 就走 ready(整張新圖優先)，
@@ -611,7 +873,17 @@ export async function buildWorkflow(
           ((e as Record<string, unknown>).stepIndex === undefined || typeof (e as Record<string, unknown>).stepIndex === "number"),
       );
       const problems: string[] = [];
-      if (rawEdits.length === 0) {
+      let editedTriggerParams: ParamField[] | undefined;
+      if (obj.triggerParams !== undefined) {
+        const normalized = normalizeBuilderGraphObject({ triggerParams: obj.triggerParams });
+        const validatedParams = triggerParamsSchema.safeParse(normalized.triggerParams);
+        if (!validatedParams.success) {
+          problems.push(...validatedParams.error.issues.slice(0, 8).map((issue) => `執行參數 ${issue.path.join(".") || "(根層)"}：${issue.message}`));
+        } else {
+          editedTriggerParams = validatedParams.data as ParamField[];
+        }
+      }
+      if (rawEdits.length === 0 && editedTriggerParams === undefined) {
         problems.push(`edits 陣列是空的或元素格式不對——每個元素要是 {"nodeId":"節點id","config":{...}}`);
       }
       for (const e of rawEdits) {
@@ -645,14 +917,44 @@ export async function buildWorkflow(
         const def = getNodeDef(node.type);
         if (def) problems.push(...validateConfigTypes(node.id, e.config, def.configSchema));
       }
+      if (editedTriggerParams && problems.length === 0) {
+        const candidateNodes = currentGraph.nodes.map((node) => ({ ...node, config: { ...node.config } }));
+        for (const edit of rawEdits) {
+          let index = candidateNodes.findIndex((node) => node.id === edit.nodeId);
+          if (index < 0) {
+            const matches = candidateNodes.map((node, i) => node.label === edit.nodeId ? i : -1).filter((i) => i >= 0);
+            if (matches.length === 1) index = matches[0];
+          }
+          if (index < 0) continue;
+          const node = candidateNodes[index];
+          if (node.type === "repeat-steps" && typeof edit.stepIndex === "number") {
+            try {
+              const steps = JSON.parse(String(node.config.steps ?? "[]")) as { config?: Record<string, unknown> }[];
+              if (Array.isArray(steps) && steps[edit.stepIndex]) {
+                steps[edit.stepIndex] = { ...steps[edit.stepIndex], config: { ...(steps[edit.stepIndex].config ?? {}), ...edit.config } };
+                candidateNodes[index] = { ...node, config: { ...node.config, steps: JSON.stringify(steps) } };
+              }
+            } catch { /* 前面的驗證會回報壞 steps */ }
+          } else {
+            candidateNodes[index] = { ...node, config: { ...node.config, ...edit.config } };
+          }
+        }
+        const graphConfigText = JSON.stringify(candidateNodes.map((node) => node.config));
+        const previousKeys = new Set((currentGraph.triggerParams ?? []).map((field) => field.key));
+        const newVisible = editedTriggerParams.filter((field) => !field.derived && !previousKeys.has(field.key) && !["periodUnit", "periodWhich"].includes(field.key));
+        const unused = newVisible.filter((field) => !graphConfigText.includes(field.key));
+        if (unused.length > 0) {
+          problems.push(`新增的執行選項 ${unused.map((field) => `「${field.label}」(${field.key})`).join("、")} 沒有被任何節點設定或程式引用。不能只長出表單；請把真正使用這些值的節點一併改好。`);
+        }
+      }
       if (problems.length === 0) {
-        return { phase: "edits", message: String(obj.message ?? "已調整流程設定"), edits: rawEdits };
+        return { phase: "edits", message: plainLanguage(String(obj.message ?? "已調整流程設定")), edits: rawEdits, triggerParams: editedTriggerParams };
       }
       lastProblems = problems;
     }
     // ── 建整張圖(ready)──zod 驗形狀 + lintGraph 驗語意，錯誤具體餵回
     else if (phase === "ready" || (Array.isArray(obj.nodes) && Array.isArray(obj.edges))) {
-      const validated = graphSchema.safeParse(obj);
+      const validated = graphSchema.safeParse(normalizeBuilderGraphObject(obj));
       if (!validated.success) {
         lastProblems = validated.error.issues.slice(0, 8).map((i) => `欄位 ${i.path.join(".") || "(根層)"}：${i.message}`);
       } else {
@@ -672,39 +974,48 @@ export async function buildWorkflow(
           const edges = normalizeIfConditionPorts(nodes, validated.data.edges);
           const triggerParams = validated.data.triggerParams as ParamField[] | undefined;
           const schedule = validated.data.schedule as SuggestedSchedule | undefined;
+          const onFailureWorkflow = typeof validated.data.onFailureWorkflow === "string" && validated.data.onFailureWorkflow.trim()
+            ? validated.data.onFailureWorkflow.trim()
+            : undefined;
 
           // ── 需求完整性驗收(GPT 體檢 #2):lint 保證「圖合法」,這裡保證「需求有做到」。
           //    確定性規則從使用者原話抽契約(簽核/門檻/通知/存檔/排程…),沒對應到的餵回模型補一次;
           //    補完(或補不動)都把 ✓/✗ 清單附在回覆——沒做到的事要明講,不能默默當建好。 ──
-          const allUserText = fullHistory
-            .filter((m) => m.role === "user")
-            .map((m) => (m.parts ?? []).map((p) => (p.kind === "text" ? p.text : "")).join("\n"))
-            .join("\n");
-          const reqItems = checkRequirements(allUserText, { nodes, edges, triggerParams, schedule });
+          const allUserText = userRequirementText(fullHistory);
+          const reqItems = checkRequirements(allUserText, { nodes, edges, triggerParams, schedule, onFailureWorkflow });
           const unmet = reqItems.filter((i) => !i.met);
-          if (unmet.length > 0 && !reqFeedbackGiven && attempt < MAX_CORRECTIONS) {
-            reqFeedbackGiven = true; // 只補一輪:補不動就老實標 ⚠️ 交給使用者,不無限燒修正次數
+          if (unmet.length > 0 && requirementFeedbackRounds < MAX_REQUIREMENT_FEEDBACK_ROUNDS && attempt < MAX_CORRECTIONS) {
+            // 弱模型常在第一次補齊時只補其中一項；還有修正預算就把「剩下哪項」再餵一次。
+            // 最多兩輪，仍保留明確止損，不讓同一需求無限燒模型。
+            requirementFeedbackRounds++;
             lastProblems = [unmetFeedback(reqItems)];
           } else {
             // {{變數}} 引用查核是軟提醒(合法字面 {{}} 存在，不能硬擋)，附在訊息裡讓使用者/後續修復留意
-            const varWarnings = lintVarRefWarnings(nodes, edges, triggerParams);
-            const warnNote = varWarnings.length ? `\n\n⚠️ 提醒：\n${varWarnings.slice(0, 3).map((w) => `- ${w}`).join("\n")}` : "";
-            const periodNote = triggerParams?.some((p) => p.key === "periodUnit")
-              ? "\n\n📅 這條流程可以在每次執行前選擇要抓哪一期的資料(執行時會跳出選擇表單)。"
-              : "";
-            const scheduleNote = schedule ? `\n\n⏰ 套用流程時會一併建立並啟用排程（${schedule.cron}，台北時間）。` : "";
-            // 觸發全自動套用(GPT 體檢 #5):白話提到 webhook/捷徑/表單 → 套用時自動啟用並回網址,
-            // 不再叫使用者自己進 ⚡ 面板按啟用
-            const autoWebhook = /webhook|捷徑|表單|外部(工具|程式|系統|服務).{0,8}(觸發|打進|串接)/i.test(allUserText);
-            const onFailureWorkflow = typeof validated.data.onFailureWorkflow === "string" && validated.data.onFailureWorkflow.trim()
-              ? validated.data.onFailureWorkflow.trim()
-              : undefined;
-            const webhookNote = autoWebhook ? "\n\n🔗 套用時會自動啟用 Webhook/表單網址(套用後顯示在對話裡,⚡ 面板也看得到)。" : "";
-            return {
-              phase: "ready",
-              message: String(obj.message ?? "流程已建好") + checklistText(reqItems) + readinessNotes(nodes) + warnNote + periodNote + scheduleNote + webhookNote,
-              nodes, edges, triggerParams, schedule, autoWebhook, onFailureWorkflow,
-            };
+            const varWarnings = lintVarRefWarnings(nodes, edges, triggerParams, explicitTriggerInputKeys(allUserText));
+            if (varWarnings.length > 0 && !varFeedbackGiven && attempt < MAX_CORRECTIONS) {
+              // builder 產生的圖如果把 {{json}} 接到沒有 json 的上游，使用者不該第一次執行才發現。
+              // 先把具體接線問題餵回一次；只修一輪，因為 prompt/template 也可能合法要求字面 {{佔位符}}。
+              varFeedbackGiven = true;
+              lastProblems = [
+                "變數引用檢查發現下列問題。若是要引用上游資料，請改用上游真正會輸出的欄位或補上讀取/轉換步驟；不要憑空發明欄位名：",
+                ...varWarnings,
+              ];
+            } else {
+              const warnNote = varWarnings.length ? `\n\n⚠️ 提醒：\n${varWarnings.slice(0, 3).map((w) => `- ${w}`).join("\n")}` : "";
+              const periodNote = triggerParams?.some((p) => p.key === "periodUnit")
+                ? "\n\n📅 這條流程可以在每次執行前選擇要抓哪一期的資料(執行時會跳出選擇表單)。"
+                : "";
+              const scheduleNote = schedule ? `\n\n⏰ 套用流程時會一併建立排程（${describeSuggestedSchedule(schedule.cron)}，台北時間）；草稿不會背景執行，設為正式後才生效。` : "";
+              // 觸發全自動套用(GPT 體檢 #5):白話提到 webhook/捷徑/表單 → 套用時自動啟用並回網址,
+              // 不再叫使用者自己進 ⚡ 面板按啟用
+              const autoWebhook = /webhook|捷徑|表單|外部(工具|程式|系統|服務).{0,8}(觸發|打進|串接)/i.test(allUserText);
+              const webhookNote = autoWebhook ? "\n\n🔗 套用時會自動啟用 Webhook/表單網址(套用後顯示在對話裡,⚡ 面板也看得到)。" : "";
+              return {
+                phase: "ready",
+                message: plainLanguage(String(obj.message ?? "流程已建好") + checklistText(reqItems) + readinessNotes(nodes) + warnNote + periodNote + scheduleNote + webhookNote),
+                nodes, edges, triggerParams, schedule, autoWebhook, onFailureWorkflow,
+              };
+            }
           }
         } else {
           lastProblems = lintErrors;
@@ -713,15 +1024,16 @@ export async function buildWorkflow(
     }
     // ── 純 clarify(合法的反問)──直接回給使用者
     else {
-      return { phase: "clarify", message: String(obj.message ?? stripCodeFences(raw)) };
+      return { phase: "clarify", message: plainLanguage(String(obj.message ?? stripCodeFences(raw))) };
     }
 
     // 走到這裡 = 這一輪的輸出有具體問題。把「原文 + 錯在哪」餵回去要求修正(下一圈重打)。
     if (attempt < MAX_CORRECTIONS) {
       const fbText = `你剛剛輸出的內容有以下具體問題，請全部修正後重新輸出「完整的」JSON(同樣格式；不要解釋、不要只回有改的部分)：\n${lastProblems.map((p) => `- ${p}`).join("\n")}`;
-      feedback.push({ role: "assistant", content: raw.slice(0, 4000) }, { role: "user", content: fbText });
+      console.warn("[workflow-builder] validation-failed", { attempt, problems: lastProblems.slice(0, 8) });
+      feedback.push({ role: "assistant", content: raw.slice(0, 30_000) }, { role: "user", content: fbText });
       feedbackCC.push(
-        { role: "assistant", parts: [{ kind: "text", text: raw.slice(0, 4000) }] },
+        { role: "assistant", parts: [{ kind: "text", text: raw.slice(0, 30_000) }] },
         { role: "user", parts: [{ kind: "text", text: fbText }] },
       );
     }
@@ -731,6 +1043,6 @@ export async function buildWorkflow(
   // 使用者換個說法或指正後，這些上下文會讓下一輪更容易成功。
   return {
     phase: "clarify",
-    message: `我試著畫了流程圖，但有幾個地方自己修不好：\n${lastProblems.slice(0, 5).map((p) => `- ${p}`).join("\n")}\n可以換個說法描述需求、或針對上面幾點給我指示嗎？`,
+    message: "我已經自動修正了幾輪，但這次產生的流程仍沒通過完整檢查，所以沒有套用不完整的內容。請把原本的需求再送一次；如果還是不成功，可以補一句最重要的完成結果，我會從那裡重新建立。",
   };
 }

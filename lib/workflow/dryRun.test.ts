@@ -27,6 +27,17 @@ test("只讀驗證:custom-code 看意圖/程式碼——會寫回試算表的略
   assert.equal(dryRunSkipKind(node("custom-code", { code: "await sheets.spreadsheets.values.update(...)" }), false), "write");
   assert.equal(dryRunSkipKind(node("custom-code", { intent: "把算好的數字寫回月報試算表" }), false), "write");
   assert.equal(dryRunSkipKind(node("custom-code", { code: "await workbook.xlsx.writeFile(out)" }), false), "write");
+  assert.equal(dryRunSkipKind(node("custom-code", { code: "await axios.post(url, payload)" }), false), "write");
+  assert.equal(dryRunSkipKind(node("custom-code", { code: "await fs.unlink(filePath)" }), false), "write");
+  assert.equal(dryRunSkipKind(node("custom-code", { code: "await execFile('some-command', args)" }), false), "write");
+  assert.equal(dryRunSkipKind(node("custom-code", { code: "await db.run('UPDATE reports SET done=1')" }), false), "write");
+  assert.equal(dryRunSkipKind(node("custom-code", { code: "await fs.promises.writeFile(out, data)" }), false), "write");
+  assert.equal(dryRunSkipKind(node("custom-code", { code: "await fs['writeFile'](out, data)" }), false), "write");
+  assert.equal(dryRunSkipKind(node("custom-code", { code: "await fetch(url, { method: 'P' + 'OST', body })" }), false), "write");
+  assert.equal(dryRunSkipKind(node("custom-code", { code: "const page = await ctx.session.getPage(); await page.click('#save')" }), false), "write");
+  assert.equal(dryRunSkipKind(node("custom-code", { code: "const { writeFile } = await import('node:fs/promises'); await writeFile(out, data)" }), false), "write");
+  assert.equal(dryRunSkipKind(node("custom-code", { code: "const sdk = await import(packageName); await sdk.send(data)" }), false), "write");
+  assert.equal(dryRunSkipKind(node("custom-code", { code: "await import('exceljs'); const sdk = await import(packageName); await sdk.send(data)" }), false), "write");
   // 純讀檔+抽數字+回傳 → 照跑(不略過),這樣才驗得出「他抽對了沒」
   assert.equal(
     dryRunSkipKind(node("custom-code", { code: "const wb = await workbook.xlsx.readFile(p); return { ...ctx.input, total }" }), false),

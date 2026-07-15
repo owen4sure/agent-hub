@@ -2,19 +2,22 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { PageHeader, EmptyState, formatDate, humanizeCron } from "@/components/ui";
 import { SCHEDULE_MODES, WEEKDAY_NAMES, buildCron, parseCron, timeValid, type ScheduleForm } from "@/lib/cron";
 
 interface ScheduleRow { id: string; workflowId: string; workflowName: string; enabled: number; cron: string; nextRunAt: string | null; orphan: boolean }
-interface WorkflowRow { id: string; name: string; status: string; nodeCount: number; triggers?: { schedule: boolean; watch: boolean; webhook: boolean } }
+interface WorkflowRow { id: string; name: string; status: string; nodeCount: number; needsRunInput?: boolean; triggers?: { schedule: boolean; watch: boolean; webhook: boolean } }
 
 export default function SchedulesPage() {
+  const router = useRouter();
   const [schedules, setSchedules] = useState<ScheduleRow[] | null>(null);
   const [workflows, setWorkflows] = useState<WorkflowRow[]>([]);
   const [maxConcurrent, setMaxConcurrent] = useState(1);
   const [editing, setEditing] = useState<string | null>(null);
   const [running, setRunning] = useState<Record<string, boolean>>({});
   const [runningAll, setRunningAll] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   async function load() {
     const [s, w, settings] = await Promise.all([
@@ -33,22 +36,50 @@ export default function SchedulesPage() {
   }, []);
 
   async function setConcurrency(n: number) {
+    const previous = maxConcurrent;
     setMaxConcurrent(n);
-    await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ maxConcurrent: n }) });
+    const response = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ maxConcurrent: n }) });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      setMaxConcurrent(previous);
+      setActionError((data as { error?: string }).error ?? "執行模式儲存失敗");
+    } else setActionError(null);
   }
   async function toggle(s: ScheduleRow) {
-    await fetch(`/api/schedules/${s.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: !s.enabled }) });
+    const response = await fetch(`/api/schedules/${s.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: !s.enabled }) });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      setActionError((data as { error?: string }).error ?? "排程狀態更新失敗");
+      return;
+    }
+    setActionError(null);
     load();
   }
   async function remove(sid: string) {
     if (!confirm("確定刪除這個排程嗎？")) return;
-    await fetch(`/api/schedules/${sid}`, { method: "DELETE" });
+    const response = await fetch(`/api/schedules/${sid}`, { method: "DELETE" });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      setActionError((data as { error?: string }).error ?? "刪除排程失敗");
+      return;
+    }
+    setActionError(null);
     load();
   }
   async function runNow(workflowId: string) {
+    const workflow = workflows.find((item) => item.id === workflowId);
+    if (workflow?.needsRunInput) {
+      router.push(`/workflows/${workflowId}?run=1`);
+      return;
+    }
     setRunning((r) => ({ ...r, [workflowId]: true }));
     try {
-      await fetch(`/api/workflows/${workflowId}/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ params: {} }) });
+      const response = await fetch(`/api/workflows/${workflowId}/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ params: {} }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) setActionError((data as { error?: string }).error ?? "流程啟動失敗");
+      else setActionError(null);
+    } catch {
+      setActionError("連不上伺服器，流程沒有啟動");
     } finally {
       setTimeout(() => setRunning((r) => ({ ...r, [workflowId]: false })), 1200);
     }
@@ -57,9 +88,17 @@ export default function SchedulesPage() {
     setRunningAll(true);
     try {
       // 一次把所有正式流程丟進佇列；實際同時跑幾個由上面的「順序/併行」設定決定
-      for (const w of officialWorkflows) {
-        await fetch(`/api/workflows/${w.id}/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ params: {} }) });
+      const failures: string[] = [];
+      for (const w of officialWorkflows.filter((item) => !item.needsRunInput)) {
+        const response = await fetch(`/api/workflows/${w.id}/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ params: {} }) });
+        if (!response.ok) failures.push(w.name);
       }
+      const skipped = officialWorkflows.filter((item) => item.needsRunInput).length;
+      setActionError(failures.length > 0
+        ? `${failures.join("、")} 啟動失敗；其他可執行流程已排入`
+        : skipped > 0 ? `已排入可直接執行的流程；另有 ${skipped} 條需要先填資料，未自動執行` : null);
+    } catch {
+      setActionError("排入流程時連線中斷；請到執行紀錄確認哪些已啟動，再重試其餘流程");
     } finally {
       setTimeout(() => setRunningAll(false), 1500);
     }
@@ -69,14 +108,15 @@ export default function SchedulesPage() {
   const sequential = maxConcurrent <= 1;
 
   return (
-    <div className="max-w-3xl mx-auto px-8 py-8 space-y-8">
+    <div className="max-w-3xl mx-auto px-4 sm:px-8 py-6 sm:py-8 space-y-8">
       <PageHeader title="排程 & 執行" subtitle="集中管理所有排程、一鍵執行任何流程，不用一個一個點進去" />
+      {actionError && <div className="card px-4 py-3 text-sm" style={{ borderColor: "var(--amber)", color: "var(--text)" }}>{actionError}</div>}
 
       {/* 併發模式 */}
       <section className="card p-5">
         <h2 className="font-medium">同時觸發時怎麼跑？</h2>
         <p className="text-sm muted mt-0.5 mb-3">多個排程剛好同時到、或按「全部執行」時，要一個一個依序跑、還是同時併行。</p>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <button onClick={() => setConcurrency(1)} className="btn btn-ghost"
             style={sequential ? { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" } : undefined}>依序（一次一個）</button>
           <button onClick={() => setConcurrency(3)} className="btn btn-ghost"
@@ -94,7 +134,7 @@ export default function SchedulesPage() {
         )}
         {schedules?.map((s) => (
           <div key={s.id} className="card p-4 space-y-3">
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
               <button onClick={() => toggle(s)} aria-label={s.enabled ? "暫停" : "啟用"} title={s.enabled ? "執行中，點一下暫停" : "已暫停，點一下啟用"} className="text-lg shrink-0">{s.enabled ? "🟢" : "⏸"}</button>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
@@ -105,7 +145,7 @@ export default function SchedulesPage() {
                 <div className="text-xs muted mt-0.5">{humanizeCron(s.cron)}{s.nextRunAt && s.enabled && <span className="faint"> · 下次 {formatDate(s.nextRunAt)}</span>}</div>
               </div>
               {!s.orphan && (
-                <button onClick={() => runNow(s.workflowId)} disabled={running[s.workflowId]} className="btn btn-ghost text-xs shrink-0" title="用預設參數立即執行(若這個流程有可調參數如季別，會用預設值；要指定請到流程頁按執行)">{running[s.workflowId] ? "已開始" : "▶ 立即執行"}</button>
+                <button onClick={() => runNow(s.workflowId)} disabled={running[s.workflowId]} className="btn btn-ghost text-xs shrink-0" title="需要填資料時會先帶你到執行設定">{running[s.workflowId] ? "已開始" : workflows.find((w) => w.id === s.workflowId)?.needsRunInput ? "填資料執行" : "▶ 立即執行"}</button>
               )}
               <button onClick={() => setEditing(editing === s.id ? null : s.id)} className="btn btn-ghost text-xs shrink-0">編輯</button>
               <button onClick={() => remove(s.id)} className="btn btn-ghost text-xs shrink-0" style={{ color: "var(--red)" }}>刪除</button>
@@ -135,7 +175,7 @@ export default function SchedulesPage() {
         <div className="flex items-center gap-2">
           <h2 className="font-medium">一鍵執行</h2>
           {officialWorkflows.length > 0 && (
-            <button onClick={runAll} disabled={runningAll} className="btn btn-ghost text-xs ml-auto" title="每個流程都用預設參數執行">{runningAll ? "全部已排入…" : `▶ 全部執行（${sequential ? "依序" : "併行"}）`}</button>
+            <button onClick={runAll} disabled={runningAll} className="btn btn-ghost text-xs ml-auto" title="只執行已有完整預設值的流程；需要填資料的會跳過">{runningAll ? "正在排入…" : `▶ 執行可直接跑的流程（${sequential ? "依序" : "併行"}）`}</button>
           )}
         </div>
         {officialWorkflows.length === 0 && <p className="text-sm muted">目前沒有正式流程。草稿請到流程頁測試。</p>}
@@ -143,7 +183,7 @@ export default function SchedulesPage() {
           <div key={w.id} className="card p-3 flex items-center gap-3">
             <Link href={`/workflows/${w.id}`} className="text-sm font-medium hover:underline truncate flex-1">{w.name}</Link>
             <span className="text-xs faint shrink-0">{w.nodeCount} 節點</span>
-            <button onClick={() => runNow(w.id)} disabled={running[w.id]} className="btn btn-primary text-xs shrink-0" title="用預設參數立即執行(若這個流程有可調參數如季別，會用預設值；要指定請到流程頁按執行)">{running[w.id] ? "已開始" : "▶ 立即執行"}</button>
+            <button onClick={() => runNow(w.id)} disabled={running[w.id]} className="btn btn-primary text-xs shrink-0" title={w.needsRunInput ? "先填這次要用的資料再執行" : "用完整預設值立即執行"}>{running[w.id] ? "已開始" : w.needsRunInput ? "填資料執行" : "▶ 立即執行"}</button>
           </div>
         ))}
       </section>

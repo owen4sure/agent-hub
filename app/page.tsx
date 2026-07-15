@@ -12,6 +12,7 @@ interface WorkflowSummary {
   builtin: boolean;
   description: string;
   nodeCount: number;
+  needsRunInput?: boolean;
   group?: string;
   lastRun?: { status: string; started_at: string } | null;
   triggers?: { schedule: boolean; watch: boolean; webhook: boolean; email?: boolean; telegram?: boolean; line?: boolean };
@@ -23,6 +24,15 @@ interface Overview {
   running: { id: string; workflow_id: string; name: string }[];
   recentScheduleFailures: { id: string; workflow_id: string; name: string; reason: string | null; started_at: string }[];
   pendingApprovals?: { id: string; workflow_id: string; workflow_name: string; message: string; token: string; created_at: string; expires_at: string }[];
+}
+interface SystemHealth {
+  ok: boolean;
+  failedComponents?: string[];
+  invalidWorkflows?: { id: string; name: string; errorCount: number }[];
+  workflowFileIssues?: { file: string }[];
+  missingSecretKeys?: string[];
+  modelApiConfigured?: boolean;
+  dataPermissionsPrivate?: boolean;
 }
 interface FixProposal {
   id: string;
@@ -38,6 +48,7 @@ export default function HomePage() {
   const router = useRouter();
   const [workflows, setWorkflows] = useState<WorkflowSummary[] | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
+  const [health, setHealth] = useState<SystemHealth | null>(null);
 
   const [loadError, setLoadError] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -53,10 +64,11 @@ export default function HomePage() {
 
   async function load() {
     try {
-      const [w, o] = await Promise.all([fetch("/api/workflows"), fetch("/api/overview")]);
+      const [w, o, h] = await Promise.all([fetch("/api/workflows"), fetch("/api/overview"), fetch("/api/health")]);
       if (!w.ok || !o.ok) throw new Error();
       setWorkflows((await w.json()).workflows);
       setOverview(await o.json());
+      if (h.ok || h.status === 503) setHealth(await h.json());
       setLoadError(false);
     } catch {
       setLoadError(true);
@@ -68,7 +80,13 @@ export default function HomePage() {
     load();
     loadProposals();
     try { setDismissedFailures(JSON.parse(localStorage.getItem("agenthub_dismissed_failures") ?? "[]")); } catch {}
-    const t = setInterval(async () => { try { setOverview(await (await fetch("/api/overview")).json()); } catch {} }, 5000);
+    const t = setInterval(async () => {
+      try {
+        const [o, h] = await Promise.all([fetch("/api/overview"), fetch("/api/health")]);
+        if (o.ok) setOverview(await o.json());
+        if (h.ok || h.status === 503) setHealth(await h.json());
+      } catch {}
+    }, 5000);
     return () => clearInterval(t);
   }, []);
 
@@ -137,13 +155,24 @@ export default function HomePage() {
   }
 
   const [running, setRunning] = useState<Record<string, boolean>>({});
+  const [runErrors, setRunErrors] = useState<Record<string, string>>({});
   // 卡片上直接一鍵執行，不用點進去。按了不導頁(擋掉 Link)。
-  async function runNow(e: React.MouseEvent, wfId: string) {
+  async function runNow(e: React.MouseEvent, workflow: WorkflowSummary) {
     e.preventDefault();
     e.stopPropagation();
+    if (workflow.needsRunInput) {
+      router.push(`/workflows/${workflow.id}?run=1`);
+      return;
+    }
+    const wfId = workflow.id;
     setRunning((r) => ({ ...r, [wfId]: true }));
+    setRunErrors((r) => ({ ...r, [wfId]: "" }));
     try {
-      await fetch(`/api/workflows/${wfId}/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ params: {} }) });
+      const res = await fetch(`/api/workflows/${wfId}/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ params: {} }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) setRunErrors((r) => ({ ...r, [wfId]: (data as { error?: string }).error ?? "無法啟動，請點進流程查看" }));
+    } catch {
+      setRunErrors((r) => ({ ...r, [wfId]: "連不上伺服器，請重試" }));
     } finally {
       setTimeout(() => { setRunning((r) => ({ ...r, [wfId]: false })); load(); }, 1200);
     }
@@ -156,6 +185,7 @@ export default function HomePage() {
   const [groupFilter, setGroupFilter] = useState<string | null>(null);
   const [groupMenuFor, setGroupMenuFor] = useState<string | null>(null);
   const [newGroupName, setNewGroupName] = useState("");
+  const [groupError, setGroupError] = useState<string | null>(null);
   // 群組區塊可收合(Owen:「一多就看著砸」)——收合狀態存 localStorage,重整/下次來還記得
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   useEffect(() => {
@@ -206,17 +236,22 @@ export default function HomePage() {
     setGroupMenuFor(null);
     setNewGroupName("");
     try {
-      await fetch(`/api/workflows/${wfId}`, {
+      const response = await fetch(`/api/workflows/${wfId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ group }),
       });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error((data as { error?: string }).error ?? "移動群組失敗");
+      setGroupError(null);
       load();
-    } catch { /* 下一輪 load 會對回真實狀態 */ }
+    } catch (error) {
+      setGroupError(error instanceof Error ? error.message : "移動群組失敗");
+    }
   }
 
   return (
-    <div className="max-w-6xl mx-auto px-8 py-8">
+    <div className="max-w-6xl mx-auto px-4 sm:px-8 py-6 sm:py-8">
       <PageHeader
         title="Workflows"
         subtitle="用白話跟 AI 建立自動化流程，一鍵執行與監控"
@@ -224,6 +259,19 @@ export default function HomePage() {
       />
       {loadError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>載入失敗，請確認伺服器是否正常，<button onClick={load} className="underline">重試</button>。</div>}
       {createError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>建立失敗，請確認伺服器是否正常後再試一次。</div>}
+      {groupError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>{groupError}</div>}
+
+      {health && (!health.ok || (health.missingSecretKeys?.length ?? 0) > 0 || !health.modelApiConfigured) && (
+        <div className="card px-4 py-3 mb-5 text-sm space-y-1.5" style={{ borderColor: health.ok ? "var(--amber)" : "var(--red)" }}>
+          <p className="font-medium" style={{ color: health.ok ? "var(--amber)" : "var(--red)" }}>🩺 上線準備檢查</p>
+          {(health.failedComponents?.length ?? 0) > 0 && <p>有 {health.failedComponents!.length} 個背景服務沒有正常啟動；排程或監聽可能不會觸發。請重新啟動 Agent Hub，仍出現就查看終端機錯誤。</p>}
+          {(health.invalidWorkflows?.length ?? 0) > 0 && <p>有 {health.invalidWorkflows!.length} 條流程結構不完整，已禁止執行以避免做錯事；請打開流程讓 AI 修正。</p>}
+          {(health.workflowFileIssues?.length ?? 0) > 0 && <p>有 {health.workflowFileIssues!.length} 份流程檔案損毀或格式不完整，系統已隔離以免整站故障；請從該流程的版本備份還原。</p>}
+          {health.dataPermissionsPrivate === false && <p>本機資料權限過寬，其他 OS 帳號可能讀到執行資料；請執行 <code>npm run doctor</code> 自動修正。</p>}
+          {!health.modelApiConfigured && <p>尚未設定模型 API Key；若流程沒有選用本機 Claude Code，建圖與 AI 節點會無法使用。 <Link href="/settings" className="underline">前往設定</Link></p>}
+          {(health.missingSecretKeys?.length ?? 0) > 0 && <p>正式流程仍缺 {health.missingSecretKeys!.length} 個需要的帳密欄位。 <Link href="/settings" className="underline">補齊帳密</Link></p>}
+        </div>
+      )}
 
       {overview && (
         <div className="flex flex-wrap gap-3 mb-6 rise-in">
@@ -239,7 +287,7 @@ export default function HomePage() {
           <div className="text-sm font-medium" style={{ color: "var(--amber)" }}>🙋 有流程停下來等你簽核</div>
           {overview!.pendingApprovals!.map((a) => (
             <div key={a.id} className="space-y-1.5">
-              <div className="flex items-start gap-2 text-sm">
+              <div className="flex items-start gap-2 text-sm flex-wrap sm:flex-nowrap">
                 <div className="min-w-0 flex-1">
                   <Link href={`/workflows/${a.workflow_id}`} className="font-medium hover:underline">{a.workflow_name}</Link>
                   <span className="faint"> · {formatDate(a.created_at)}</span>
@@ -262,7 +310,7 @@ export default function HomePage() {
           <div className="text-sm font-medium" style={{ color: "var(--accent)" }}>🤖 AI 已經想好怎麼修，一鍵套用+重跑驗證</div>
           {proposals.map((p) => (
             <div key={p.id} className="space-y-1.5">
-              <div className="flex items-start gap-2 text-sm">
+              <div className="flex items-start gap-2 text-sm flex-wrap sm:flex-nowrap">
                 <div className="min-w-0 flex-1">
                   <Link href={`/workflows/${p.workflowId}`} className="font-medium hover:underline">{p.workflowName}</Link>
                   <span className="faint"> · 「{p.nodeLabel}」這步 · {formatDate(p.createdAt)}</span>
@@ -352,7 +400,7 @@ export default function HomePage() {
           {showHeader && (
             <button
               onClick={() => toggleGroupCollapsed(title)}
-              className="text-sm font-semibold mb-3 flex items-center gap-2 hover:text-[var(--text)]"
+              className="min-h-8 px-1 -ml-1 rounded-md text-sm font-semibold mb-3 flex items-center gap-2 hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2"
               style={{ color: "var(--text-muted)" }}
               aria-expanded={!collapsed}
             >
@@ -390,7 +438,7 @@ export default function HomePage() {
               {!w.builtin && (
                 <button
                   onClick={(e) => { e.stopPropagation(); setGroupMenuFor((cur) => (cur === w.id ? null : w.id)); }}
-                  className="faint hover:text-[var(--text)] text-sm shrink-0 px-1 pointer-events-auto relative z-10"
+                  className="faint hover:text-[var(--text)] text-sm shrink-0 w-8 h-8 grid place-items-center rounded-lg pointer-events-auto relative z-10 focus-visible:outline-2 focus-visible:outline-offset-2"
                   title="移到群組(工作/私人…)"
                   aria-label="移到群組"
                 >
@@ -439,8 +487,9 @@ export default function HomePage() {
               ) : (
                 <span className="faint">還沒執行過</span>
               )}
-              <button onClick={(e) => runNow(e, w.id)} disabled={running[w.id]} title="用預設參數立即執行(有可調參數的流程會用預設值；要指定請點進流程頁按執行)" className="btn btn-ghost text-xs ml-auto shrink-0 pointer-events-auto relative z-10">{running[w.id] ? "已開始" : "▶ 執行"}</button>
+              <button onClick={(e) => runNow(e, w)} disabled={running[w.id]} title={w.needsRunInput ? "先填這次執行需要的資料" : "用預設參數立即執行"} className="btn btn-ghost text-xs ml-auto shrink-0 pointer-events-auto relative z-10">{running[w.id] ? "啟動中…" : w.needsRunInput ? "填資料執行" : "▶ 執行"}</button>
             </div>
+            {runErrors[w.id] && <p className="text-xs mt-2 relative z-[1]" style={{ color: "var(--red)" }}>{runErrors[w.id]}</p>}
           </article>
             ))}
           </div>

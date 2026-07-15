@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import { ICONS } from "./nodeVisuals";
 import { fetchNodeDefs, type NodeDefLite, type ParamFieldLite } from "./AddNodePanel";
 import type { WFNode, NodeRun } from "./types";
+import { plainLanguage } from "@/lib/workflow/plainLanguage";
+import { GOOGLE_SHEET_SCRIPT_TEMPLATE } from "@/lib/googleSheetScriptTemplate";
 
 /** select 選項支援 "value=顯示文字";只有「=」前後都有內容才切(跟 graphLint 同一套規則,別把 == 切壞) */
 function parseOption(o: string): { value: string; label: string } {
@@ -25,6 +27,19 @@ export function configDiff(before: Record<string, unknown>, after: Record<string
   return out;
 }
 
+// 欄位名(periodStart/anchorDate 這類程式變數名)一律過白話說明用的同一套過濾;
+// 值(使用者要驗證的實際計算結果，例如筆數/金額)完全原樣顯示,不能被 plainLanguage 的替換規則動到。
+function formatOutput(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return Object.entries(parsed)
+      .map(([key, value]) => `${plainLanguage(key)}：${typeof value === "string" ? value : JSON.stringify(value)}`)
+      .join("\n");
+  } catch {
+    return raw;
+  }
+}
+
 export function NodePanel({
   workflowId,
   node,
@@ -35,6 +50,7 @@ export function NodePanel({
   onChanged,
   onToast,
   onRename,
+  onDraftChange,
 }: {
   workflowId: string;
   node: WFNode;
@@ -46,6 +62,8 @@ export function NodePanel({
   onChanged: () => void;
   onToast: (text: string) => void;
   onRename: (name: string) => void;
+  /** 讓父頁在執行／自動測試前先把仍在畫面上的草稿存好，不能拿舊磁碟值去跑。 */
+  onDraftChange: (nodeId: string, config: Record<string, string | boolean> | null) => void;
 }) {
   const [instruction, setInstruction] = useState("");
   // 區分是哪個動作在忙——只有 repair(自動修復) 是可以中途停止的多輪迴圈，tweak(單次 AI 微調)沒有
@@ -66,6 +84,8 @@ export function NodePanel({
   const [draftCfg, setDraftCfg] = useState<Record<string, string | boolean>>({});
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [sheetScriptCopied, setSheetScriptCopied] = useState(false);
+  const [sheetProbe, setSheetProbe] = useState<{ busy: boolean; ok?: boolean; text?: string }>({ busy: false });
   useEffect(() => { fetchNodeDefs().then(setDefs).catch(() => {}); }, []);
   // 切換節點時的草稿重置不用 effect——父層用 key={node.id} 強制重建整個面板,state 天生就是乾淨的
   const schema = defs?.find((d) => d.type === node.type)?.configSchema ?? [];
@@ -83,6 +103,9 @@ export function NodePanel({
     const cur = node.config?.[k];
     return String(v) !== String(cur ?? "");
   });
+  useEffect(() => {
+    onDraftChange(node.id, dirty ? draftCfg : null);
+  }, [dirty, draftCfg, node.id, onDraftChange]);
 
   async function saveConfig() {
     setSaving(true);
@@ -103,6 +126,58 @@ export function NodePanel({
       setSaveMsg("連不上伺服器,請再試一次");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function copySheetScript() {
+    try {
+      await navigator.clipboard.writeText(GOOGLE_SHEET_SCRIPT_TEMPLATE);
+      setSheetScriptCopied(true);
+      setTimeout(() => setSheetScriptCopied(false), 2500);
+    } catch {
+      setSheetProbe({ busy: false, ok: false, text: "無法自動複製，請手動全選下方程式碼。" });
+    }
+  }
+
+  async function probeScriptUrl() {
+    const scriptUrl = String(draftCfg.scriptUrl ?? node.config?.scriptUrl ?? "").trim();
+    setSheetProbe({ busy: true });
+    try {
+      const res = await fetch("/api/notify-test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "sheet-script-probe", scriptUrl }),
+      });
+      const data = await res.json().catch(() => ({})) as { ok?: boolean; message?: string };
+      if (!data.ok) {
+        setSheetProbe({ busy: false, ok: false, text: data.message ?? "檢查失敗，請再試一次" });
+        return;
+      }
+      // 以前只檢查 draftCfg、沒有存檔：畫面說成功，正式執行卻仍讀磁碟舊網址。
+      // 檢查成功後立即原子套用到本流程所有 Sheet 寫入節點，兩個狀態不再分裂。
+      const saveRes = await fetch(`/api/workflows/${workflowId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nodeConfig: { id: node.id, config: { scriptUrl } },
+          applySheetScriptUrlToAll: true,
+        }),
+      });
+      const saveData = await saveRes.json().catch(() => ({})) as { error?: string };
+      if (!saveRes.ok) {
+        setSheetProbe({ busy: false, ok: false, text: `網址檢查通過，但存檔失敗：${saveData.error ?? "請再試一次"}` });
+        return;
+      }
+      setDraftCfg((current) => {
+        const next = { ...current };
+        delete next.scriptUrl;
+        return next;
+      });
+      setSheetProbe({ busy: false, ok: true, text: "✅ 網址、權限與版本都正確，且已儲存到這條流程的所有 Google Sheet 寫入步驟。沒有寫入任何資料。" });
+      onChanged();
+      onToast("已檢查並更新所有 Google Sheet 寫入步驟");
+    } catch {
+      setSheetProbe({ busy: false, ok: false, text: "連不上伺服器，請再試一次" });
     }
   }
 
@@ -234,8 +309,11 @@ export function NodePanel({
           )}
         </div>
         {!readonlyWf && editableFields.length > 0 && (
-          <div className="card p-3 space-y-2.5">
-            <p className="text-xs font-medium" style={{ color: "var(--accent)" }}>✏️ 直接改設定</p>
+          <div className="card p-4 space-y-4">
+            <div>
+              <p className="text-sm font-medium" style={{ color: "var(--accent)" }}>✏️ 直接改設定</p>
+              <p className="text-xs faint mt-1">小修改可以直接在這裡改；欄位會跟著右側面板一起拉寬。</p>
+            </div>
             {editableFields.map((f) => {
               const v = fieldValue(f);
               const set = (val: string | boolean) => setDraftCfg((d) => ({ ...d, [f.key]: val }));
@@ -246,7 +324,7 @@ export function NodePanel({
                     {f.help ? <span className="opacity-70">（{f.help}）</span> : null}
                   </label>
                   {f.type === "select" && f.options?.length ? (
-                    <select value={String(v)} onChange={(e) => set(e.target.value)} className="input text-sm">
+                    <select value={String(v)} onChange={(e) => set(e.target.value)} className="input text-sm min-h-11">
                       {String(v) === "" && <option value="">（用預設值）</option>}
                       {f.options.map((o) => {
                         const p = parseOption(o);
@@ -259,15 +337,39 @@ export function NodePanel({
                       <span className="muted">開啟</span>
                     </label>
                   ) : f.type === "textarea" ? (
-                    <textarea value={String(v)} onChange={(e) => set(e.target.value)} rows={3} className="input text-sm resize-y font-mono" placeholder={f.default ? `預設:${f.default}` : "留空=用預設值"} />
+                    <textarea value={String(v)} onChange={(e) => set(e.target.value)} rows={6} className="input text-sm resize-y leading-relaxed min-h-32" placeholder={f.default ? `預設：${f.default}` : "留空會使用預設值"} />
                   ) : (
                     <input
                       value={String(v)}
                       onChange={(e) => set(e.target.value)}
                       inputMode={f.type === "number" ? "numeric" : undefined}
-                      className="input text-sm"
-                      placeholder={f.default ? `預設:${f.default}` : "留空=用預設值"}
+                      className="input text-sm min-h-11"
+                      placeholder={f.default ? `預設：${f.default}` : "留空會使用預設值"}
                     />
+                  )}
+                  {f.key === "scriptUrl" && (
+                    <div className="mt-2 space-y-2">
+                      <button type="button" onClick={probeScriptUrl} disabled={sheetProbe.busy || !String(v).trim()} className="btn btn-ghost text-xs">
+                        {sheetProbe.busy ? "檢查並儲存中…" : "🔎 檢查並套用到本流程所有寫入步驟（不寫資料）"}
+                      </button>
+                      {sheetProbe.text && <p className="text-xs" style={{ color: sheetProbe.ok ? "var(--green)" : "var(--red)" }}>{sheetProbe.text}</p>}
+                      <details className="rounded-lg border p-3 text-xs">
+                        <summary className="cursor-pointer font-medium">第一次設定 Apps Script 寫入網址</summary>
+                        <ol className="list-decimal ml-4 mt-2 space-y-1.5 muted">
+                          <li>打開要寫入的試算表 →「擴充功能」→「Apps Script」。</li>
+                          <li>複製下方 v2 程式碼，完整取代編輯器內容後儲存。</li>
+                          <li>「部署」→「新增部署作業」→「網頁應用程式」→ 存取權選「任何人」。</li>
+                          <li>把 Google 給的 <code>https://script.google.com/macros/…/exec</code> 網址貼回上方欄位。</li>
+                        </ol>
+                        <button type="button" className="btn btn-ghost text-xs mt-2" onClick={copySheetScript}>
+                          {sheetScriptCopied ? "✅ 已複製 v2 程式碼" : "📋 複製 v2 程式碼"}
+                        </button>
+                        <details className="mt-2">
+                          <summary className="cursor-pointer faint">需要手動複製時才展開程式碼</summary>
+                          <pre className="mt-2 p-2 rounded-md overflow-x-auto whitespace-pre text-[11px]" style={{ background: "var(--surface-2)" }}>{GOOGLE_SHEET_SCRIPT_TEMPLATE}</pre>
+                        </details>
+                      </details>
+                    </div>
                   )}
                 </div>
               );
@@ -296,27 +398,23 @@ export function NodePanel({
             )}
           </div>
         )}
-        <div>
-          <button onClick={() => setShowTechnical((v) => !v)} className="text-xs faint hover:text-[var(--text)]">
-            {showTechnical ? "▾" : "▸"} 技術細節(除錯用，一般不需要看)
-          </button>
-          {showTechnical && (
+        {run?.output_json && (
+          <div>
+            <button onClick={() => setShowTechnical((v) => !v)} className="text-xs faint hover:text-[var(--text)]">
+              {showTechnical ? "▾" : "▸"} 看這一步上次做出的結果
+            </button>
+            {showTechnical && (
             <div className="mt-2 space-y-3">
-              {run?.output_json && (
-                <div>
-                  <p className="text-xs faint mb-1.5">這一步流出的資料</p>
-                  <pre className="text-xs rounded-lg p-3 overflow-auto max-h-44 font-mono" style={{ background: "var(--surface-2)" }}>{JSON.stringify(JSON.parse(run.output_json), null, 2)}</pre>
-                </div>
-              )}
               <div>
-                <p className="text-xs faint mb-1.5">原始設定</p>
-                {/* 連除錯區也不把 AI 產生的程式碼(code)/內嵌步驟(steps)攤出來給使用者看——那是給 AI 讀的,
-                    使用者永遠只看白話。程式碼留在節點裡讓 AI 用,只是不顯示在畫面上。 */}
-                <pre className="text-xs rounded-lg p-3 overflow-auto max-h-44 font-mono" style={{ background: "var(--surface-2)" }}>{JSON.stringify(Object.fromEntries(Object.entries(node.config).filter(([k]) => k !== "code" && k !== "steps")), null, 2)}</pre>
+                <p className="text-xs faint mb-1.5">實際結果</p>
+                <div className="text-xs rounded-lg p-3 overflow-auto max-h-44 whitespace-pre-wrap break-all" style={{ background: "var(--surface-2)" }}>
+                  {formatOutput(run.output_json)}
+                </div>
               </div>
             </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
       <div className="border-t p-4 space-y-2">
         <p className="text-xs faint">用白話叫 AI 微調這個節點</p>

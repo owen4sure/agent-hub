@@ -44,6 +44,8 @@ export function nodeSummary(type: string, config: Record<string, unknown> | unde
       return s("sheetUrl");
     case "google-sheet-append":
       return s("cells");
+    case "google-sheet-update":
+      return [s("sheetName"), s("targetColumn")].filter(Boolean).join(" · ");
     case "http-request":
       return s("url") ? `${s("method") || "GET"} ${s("url")}` : "";
     case "template-text":

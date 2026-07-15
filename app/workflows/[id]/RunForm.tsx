@@ -4,6 +4,14 @@ import { useEffect, useId, useRef, useState } from "react";
 import { resolveParams, computePeriod, type PeriodUnit } from "@/lib/relativeDate";
 import type { ParamField } from "./types";
 
+function isFileParam(field: ParamField): boolean {
+  const key = field.key.toLowerCase();
+  const description = `${field.label} ${field.help ?? ""}`.toLowerCase();
+  return ["filepath", "attachmentpath", "inputfile", "inputfilepath", "sourcefile", "documentpath"].includes(key)
+    || /(?:檔案|附件|文件).*(?:路徑|位置)/.test(description)
+    || /(?:file|attachment|document).*(?:path|location)/.test(description);
+}
+
 export function RunForm({
   triggerParams,
   isDraft,
@@ -26,7 +34,10 @@ export function RunForm({
     Object.fromEntries(triggerParams.map((f) => [f.key, f.default ?? ""])),
   );
   const [headed, setHeaded] = useState(isDraft);
-  const [testFile, setTestFile] = useState("");
+  const [testFile, setTestFile] = useState<File | null>(null);
+  const [paramFiles, setParamFiles] = useState<Record<string, File | null>>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
   const [testSubject, setTestSubject] = useState("測試信件");
   const [testFrom, setTestFrom] = useState("test@example.com");
   const [testBody, setTestBody] = useState("");
@@ -41,33 +52,68 @@ export function RunForm({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  function submit() {
+  async function uploadRunInput(file: File): Promise<{ path: string; filename: string }> {
+    const dataBase64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? "").split(",")[1] ?? "");
+      reader.onerror = () => reject(new Error("讀取測試檔案失敗"));
+      reader.readAsDataURL(file);
+    });
+    const response = await fetch("/api/run-input", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: file.name, dataBase64 }),
+    });
+    const uploaded = await response.json() as { path?: string; filename?: string; error?: string };
+    if (!response.ok || !uploaded.path) throw new Error(uploaded.error ?? "上傳測試檔案失敗");
+    return { path: uploaded.path, filename: uploaded.filename ?? file.name };
+  }
+
+  async function submit() {
+    if (submitting) return;
+    setSubmitting(true);
+    setSubmitError("");
     const params = { ...values };
-    if ((watchMode || messageMode === "mail") && testFile.trim()) {
-      // 手動測試時模擬觸發：把選的檔案當成「剛丟進資料夾的新檔案/信的附件」餵給下游的 {{filePath}}/{{fileName}}
-      params.filePath = testFile.trim();
-      params.fileName = testFile.trim().split("/").pop() ?? testFile.trim();
-    }
-    if (messageMode === "mail") {
+    try {
+      if ((watchMode || messageMode === "mail") && testFile) {
+        // 瀏覽器不會把本機絕對路徑交給網頁；把使用者選的檔案安全暫存到 server，再把真實路徑餵給 workflow。
+        const uploaded = await uploadRunInput(testFile);
+        params.filePath = uploaded.path;
+        params.fileName = uploaded.filename;
+      }
+      // AI 建出的手動流程也可能把檔案宣告成一般 triggerParam。這些欄位同樣必須讓人「選檔案」，
+      // 不能露出伺服器絕對路徑輸入框；上傳完成後才把安全暫存路徑交給引擎。
+      for (const field of visible.filter(isFileParam)) {
+        const file = paramFiles[field.key];
+        if (!file) continue;
+        const uploaded = await uploadRunInput(file);
+        params[field.key] = uploaded.path;
+        if (field.key.toLowerCase() === "filepath" || !("fileName" in params)) params.fileName = uploaded.filename;
+      }
+      if (messageMode === "mail") {
       // 模擬收信觸發：測試值代替「剛收到的信」，欄位跟 mailWatcher 注入的一致
       params.subject = testSubject.trim();
       params.from = testFrom.trim();
       params.body = testBody;
       params.date = new Date().toISOString();
-      if (!("attachmentCount" in params)) params.attachmentCount = testFile.trim() ? "1" : "0";
-    }
-    if (messageMode === "telegram") {
+        if (!("attachmentCount" in params)) params.attachmentCount = testFile ? "1" : "0";
+      }
+      if (messageMode === "telegram") {
       params.message = testMessage;
       params.fromName = "測試";
       params.chatId = "";
       params.messageId = "0";
-    }
-    if (messageMode === "line") {
+      }
+      if (messageMode === "line") {
       params.message = testMessage;
       params.userId = "";
       params.replyToken = "";
+      }
+      onRun(params, headed);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "準備執行資料失敗");
+      setSubmitting(false);
     }
-    onRun(params, headed);
   }
 
   function parseOption(o: string): { value: string; label: string } {
@@ -113,9 +159,9 @@ export function RunForm({
         <h2 id={titleId} className="font-semibold">執行設定</h2>
         {watchMode && (
           <label className="block text-sm">
-            <span className="muted">測試用檔案(完整路徑)</span>
-            <input value={testFile} onChange={(e) => setTestFile(e.target.value)} className="input mt-1 font-mono text-xs" placeholder="/Users/你的名字/Desktop/測試檔.txt" />
-            <span className="text-xs faint">這條流程平常由「資料夾監聽」觸發——手動測試時，選一個檔案代替「剛丟進資料夾的新檔案」。留空的話，用到 {"{{filePath}}"} 的步驟會失敗。</span>
+            <span className="muted">選一個測試檔案</span>
+            <input type="file" onChange={(e) => setTestFile(e.target.files?.[0] ?? null)} className="input mt-1 text-xs" />
+            <span className="text-xs faint">這條流程平常由「資料夾監聽」觸發；這裡選一份檔案，系統會代替你模擬「剛收到新檔案」，不用查完整路徑。</span>
           </label>
         )}
         {messageMode === "mail" && (
@@ -135,8 +181,8 @@ export function RunForm({
             </label>
             {!watchMode && (
               <label className="block text-sm">
-                <span className="muted">測試附件檔案(完整路徑，留空=沒附件)</span>
-                <input value={testFile} onChange={(e) => setTestFile(e.target.value)} className="input mt-1 font-mono text-xs" placeholder="/Users/你的名字/Desktop/測試檔.xlsx" />
+                <span className="muted">測試附件(留空＝這封信沒有附件)</span>
+                <input type="file" onChange={(e) => setTestFile(e.target.files?.[0] ?? null)} className="input mt-1 text-xs" />
               </label>
             )}
           </div>
@@ -152,14 +198,43 @@ export function RunForm({
           {visible.map((f) => (
             <label key={f.key} className="block text-sm">
               <span className="muted">{f.label}</span>
-              {f.type === "select" && f.options ? (
+              {isFileParam(f) ? (
+                <>
+                  <input
+                    type="file"
+                    onChange={(e) => setParamFiles((files) => ({ ...files, [f.key]: e.target.files?.[0] ?? null }))}
+                    className="input mt-1 text-xs"
+                  />
+                  <span className="text-xs faint">直接選檔案即可，不用知道或貼上電腦路徑。</span>
+                </>
+              ) : f.type === "select" && f.options ? (
                 <select value={values[f.key] ?? ""} onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))} className="input mt-1">
                   {optionsFor(f).map(({ value, label }) => (
                     <option key={value} value={value}>{label}</option>
                   ))}
                 </select>
+              ) : f.type === "boolean" ? (
+                <select value={values[f.key] ?? ""} onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))} className="input mt-1">
+                  <option value="">請選擇</option>
+                  <option value="true">是</option>
+                  <option value="false">否</option>
+                </select>
+              ) : f.type === "textarea" ? (
+                <textarea value={values[f.key] ?? ""} onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))} className="input mt-1 min-h-24 resize-y" />
+              ) : f.type === "date-or-token" ? (
+                <>
+                  <input
+                    type="date"
+                    value={/^\d{4}-\d{2}-\d{2}$/.test(values[f.key] ?? "") ? values[f.key] : ""}
+                    onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+                    className="input mt-1"
+                  />
+                  {values[f.key] && !/^\d{4}-\d{2}-\d{2}$/.test(values[f.key]) && (
+                    <span className="text-xs faint">未另外選擇時會使用流程預設日期。</span>
+                  )}
+                </>
               ) : (
-                <input value={values[f.key] ?? ""} onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))} className="input mt-1" />
+                <input type={f.type === "number" ? "number" : "text"} value={values[f.key] ?? ""} onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))} className="input mt-1" />
               )}
               {f.help && <span className="text-xs faint">{f.help}</span>}
             </label>
@@ -183,9 +258,10 @@ export function RunForm({
           這次看畫面(有頭瀏覽器，方便觀察/除錯)
         </label>
 
+        {submitError && <p role="alert" className="text-sm" style={{ color: "var(--danger)" }}>{submitError}</p>}
         <div className="flex gap-2 justify-end">
-          <button ref={cancelRef} onClick={onClose} className="btn btn-ghost">取消</button>
-          <button onClick={submit} className="btn btn-primary">▶ 執行</button>
+          <button ref={cancelRef} onClick={onClose} className="btn btn-ghost" disabled={submitting}>取消</button>
+          <button onClick={submit} className="btn btn-primary" disabled={submitting}>{submitting ? "準備檔案中…" : "▶ 執行"}</button>
         </div>
       </div>
     </div>

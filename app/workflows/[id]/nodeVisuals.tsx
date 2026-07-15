@@ -9,7 +9,7 @@ export const ICONS: Record<string, string> = {
   "if-condition": "🔀", "llm-decide": "🧠", "custom-code": "⚙️", "repeat-steps": "🔁",
   "telegram-notify": "✈️", "line-notify": "💬",
   "write-file": "💾", "read-file": "📂", "web-page": "🕸️", "desktop-notify": "🔔", "send-email": "✉️",
-  "slack-notify": "📣", "google-sheet-read": "📗", "google-sheet-append": "📘", "read-image": "🖼️", wait: "⏳", "run-workflow": "🧩", "rss-read": "📰",
+  "slack-notify": "📣", "google-sheet-read": "📗", "google-sheet-append": "📘", "google-sheet-update": "📝", "read-image": "🖼️", wait: "⏳", "run-workflow": "🧩", "rss-read": "📰",
   switch: "🧭", "wait-approval": "✋", "email-read": "📨",
 };
 
@@ -39,6 +39,7 @@ const TYPE_META: Record<string, { cat: string; label: string }> = {
   "slack-notify": { cat: "integration", label: "Slack 通知" },
   "google-sheet-read": { cat: "integration", label: "讀 Google 試算表" },
   "google-sheet-append": { cat: "integration", label: "寫入 Google 試算表" },
+  "google-sheet-update": { cat: "integration", label: "更新 Google 試算表指定位置" },
   "read-image": { cat: "ai", label: "AI 看圖片" },
   wait: { cat: "logic", label: "等待" },
   "run-workflow": { cat: "logic", label: "執行子流程" },
@@ -63,6 +64,7 @@ export function WFNodeCard({ data, selected }: NodeProps) {
     label: string;
     type: string;
     status?: string;
+    stepNumber?: number;
     summary?: string;
     onClick: () => void;
     onRename: (name: string) => void;
@@ -95,6 +97,7 @@ export function WFNodeCard({ data, selected }: NodeProps) {
       className={`wf-node${d.status === "running" ? " wf-node-running" : ""}`}
       title="拖動可移動位置 · 雙擊可改名"
     >
+      {d.stepNumber && <span className="wf-node-step" aria-label={`第 ${d.stepNumber} 步`}>{d.stepNumber}</span>}
       <Handle type="target" position={Position.Left} />
       <div className="flex items-center gap-3">
         <span
@@ -119,9 +122,9 @@ export function WFNodeCard({ data, selected }: NodeProps) {
               style={{ borderColor: "var(--accent)", color: "var(--text)" }}
             />
           ) : (
-            <p className="text-[15px] font-semibold leading-tight truncate" style={{ color: "var(--text)", letterSpacing: "0.012em" }}>{d.label}</p>
+            <p className="text-[15.5px] font-semibold leading-tight truncate" style={{ color: "var(--text)", letterSpacing: "0.012em" }}>{d.label}</p>
           )}
-          <p className="text-[11.5px] leading-tight mt-1 truncate" style={{ color: active ? statusColor(d.status) : "var(--text-faint)" }}>
+          <p className="text-[12px] leading-tight mt-1 truncate" style={{ color: active ? statusColor(d.status) : "var(--text-faint)" }}>
             {active ? STATUS_TEXT[d.status!] ?? d.status : meta?.label ?? d.type}
           </p>
         </div>

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { listWorkflows, saveWorkflow } from "@/lib/workflow/store";
 import { DEFAULT_MODEL } from "@/lib/models";
+import { lintGraph } from "@/lib/workflow/graphLint";
 import type { Workflow, WorkflowNode, WorkflowEdge, ParamField } from "@/lib/workflow/types";
 
 function bad() {
@@ -55,6 +56,8 @@ export async function POST(req: Request) {
   if (!body || typeof body !== "object" || !Array.isArray(body.nodes)) {
     return bad();
   }
+  if (body.nodes.length === 0) return bad();
+  if (body.nodes.length > 1_000) return NextResponse.json({ error: "匯入的流程超過 1,000 個節點" }, { status: 413 });
 
   // 不整包 spread：外來 JSON 什麼型別都可能塞進來(例如 requiresSecrets 給字串)，
   // 存進去之後詳情頁一 .map() 就炸掉、永遠打不開。白名單逐欄位取值並驗證型別。
@@ -62,19 +65,23 @@ export async function POST(req: Request) {
   const requiresSecrets = arrayOrDefault(body.requiresSecrets);
   const triggerParams = arrayOrDefault(body.triggerParams);
   if (!edges || !requiresSecrets || !triggerParams) return bad();
+  if (edges.length > 5_000 || requiresSecrets.length > 100 || triggerParams.length > 100) {
+    return NextResponse.json({ error: "匯入的流程內容數量超過安全上限" }, { status: 413 });
+  }
 
   // 只驗「是陣列」還不夠——元素型別錯(例如 requiresSecrets 塞字串陣列)會讓詳情頁 .map(f=>[f.key,...])
   // 讀到 undefined key、整頁打不開。逐元素深驗必要的 string 欄位。
   // requiresSecrets 每個要有 string key/label；triggerParams 每個要有 string key；edges 每個要有 string from/to。
-  if (!requiresSecrets.every((f) => isObj(f) && strField(f, "key") && strField(f, "label"))) return bad();
-  if (!triggerParams.every((p) => isObj(p) && strField(p, "key"))) return bad();
-  if (!edges.every((e) => isObj(e) && strField(e, "from") && strField(e, "to"))) return bad();
+  if (!requiresSecrets.every((f) => isObj(f) && strField(f, "key") && strField(f, "label") && (f.type === "text" || f.type === "password"))) return bad();
+  const paramTypes = new Set(["text", "number", "date-or-token", "select", "boolean", "secret", "code", "textarea"]);
+  if (!triggerParams.every((p) => isObj(p) && strField(p, "key") && typeof p.type === "string" && paramTypes.has(p.type))) return bad();
+  if (!edges.every((e) => isObj(e) && strField(e, "from") && strField(e, "to") && (e.fromPort === undefined || typeof e.fromPort === "string"))) return bad();
 
   const nodes: WorkflowNode[] = [];
   for (const raw of body.nodes as unknown[]) {
     if (!raw || typeof raw !== "object") return bad();
     const n = raw as Record<string, unknown>;
-    if (typeof n.id !== "string" || !n.id || typeof n.type !== "string" || !n.type) return bad();
+    if (typeof n.id !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(n.id) || typeof n.type !== "string" || !n.type || n.type.length > 100) return bad();
     const pos = (n.position ?? {}) as Record<string, unknown>;
     let config = n.config && typeof n.config === "object" && !Array.isArray(n.config) ? (n.config as Record<string, unknown>) : {};
     // 安全關鍵：custom-code 的 code 是「執行時直接在本機以完整權限跑」的程式碼，而且 ctx.secrets
@@ -85,13 +92,20 @@ export async function POST(req: Request) {
     nodes.push({
       id: n.id,
       type: n.type,
-      label: typeof n.label === "string" ? n.label : n.id,
+      label: typeof n.label === "string" && n.label.trim() ? n.label.trim().slice(0, 120) : n.id,
       config,
       position: {
-        x: typeof pos.x === "number" && Number.isFinite(pos.x) ? pos.x : 0,
-        y: typeof pos.y === "number" && Number.isFinite(pos.y) ? pos.y : 0,
+        x: typeof pos.x === "number" && Number.isFinite(pos.x) && Math.abs(pos.x) <= 1_000_000 ? pos.x : 0,
+        y: typeof pos.y === "number" && Number.isFinite(pos.y) && Math.abs(pos.y) <= 1_000_000 ? pos.y : 0,
       },
     });
+  }
+
+  // 匯入跟 AI 建圖走同一套確定性結構驗證：未知節點、缺失連線、環、非法 config
+  // 必須在保存前擋掉，不能顯示「匯入成功」後才讓使用者在畫面或執行期踩雷。
+  const graphErrors = lintGraph(nodes, edges as WorkflowEdge[]);
+  if (graphErrors.length > 0) {
+    return NextResponse.json({ error: "匯入的流程結構有問題", details: graphErrors }, { status: 400 });
   }
 
   const existing = new Set(listWorkflows().map((w) => w.id));
@@ -101,14 +115,15 @@ export async function POST(req: Request) {
 
   const wf: Workflow = {
     id: newId,
-    name: String(body.name ?? newId),
+    name: String(body.name ?? newId).trim().slice(0, 120) || newId,
     status: "draft",
     builtin: false,
-    description: body.description !== undefined ? String(body.description) : "",
-    longDescription: body.longDescription !== undefined ? String(body.longDescription) : undefined,
-    defaultModel: typeof body.defaultModel === "string" && body.defaultModel ? body.defaultModel : DEFAULT_MODEL,
+    description: body.description !== undefined ? String(body.description).slice(0, 2_000) : "",
+    longDescription: body.longDescription !== undefined ? String(body.longDescription).slice(0, 20_000) : undefined,
+    defaultModel: typeof body.defaultModel === "string" && body.defaultModel ? body.defaultModel.slice(0, 160) : DEFAULT_MODEL,
     requiresSecrets: requiresSecrets as Workflow["requiresSecrets"],
     triggerParams: triggerParams as ParamField[],
+    importedUntrusted: true,
     // onFailureWorkflow 刻意不從匯入檔帶入：外來檔案不能指定「失敗時自動執行本機的哪條流程」
     // (惡意檔案可以故意放一個必炸節點，串起本機任意流程)。要用的話匯入後自己到觸發面板設定。
     nodes,

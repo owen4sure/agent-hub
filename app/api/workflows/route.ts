@@ -22,6 +22,8 @@ export async function GET() {
       description: wf.description,
       group: wf.group ?? "",
       nodeCount: wf.nodes.length,
+      // 首頁不能對「沒有預設值的必填參數」直接送空物件執行——那會讓流程拿空字串真的做副作用。
+      needsRunInput: (wf.triggerParams ?? []).some((p) => !p.derived && (p.default === undefined || p.default === "")),
       model: getWorkflowModel(wf.id, wf.defaultModel),
       lastRun: runs[0] ?? null,
       // 首頁卡片的觸發徽章：一眼看出這條流程「會自己跑」還是純手動
@@ -39,8 +41,15 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const body = await req.json().catch(() => ({}));
-  const name = body.name?.trim() || "新的 Workflow";
+  const body = await req.json().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ error: "請求內容必須是 JSON 物件" }, { status: 400 });
+  }
+  if (body.name !== undefined && typeof body.name !== "string") {
+    return NextResponse.json({ error: "流程名稱必須是文字" }, { status: 400 });
+  }
+  const name = (typeof body.name === "string" ? body.name.trim() : "") || "新的 Workflow";
+  if (name.length > 120) return NextResponse.json({ error: "流程名稱最多 120 個字" }, { status: 400 });
   const wf = createWorkflow(name);
   // 確保 settings 有 seed（getGlobalSettings 觸發 init）
   getGlobalSettings();

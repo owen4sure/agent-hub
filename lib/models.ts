@@ -51,11 +51,17 @@ export const KNOWN_WORKING_MODELS = [
  * - step-3.5/3.7-flash：推理模型，token 常常都拿去「思考」，真正的答案反而是空字串。
  * - Kimi-k2.6：多數時候能正確讀圖，但共用資源池偶爾會給出答非所問的亂碼回應。
  * - minimax-m3、Qwen--3.5-max：多次實測都正確讀出圖片內容，目前最可信賴。
- * 依序排列，選用的模型讀不出來(或看起來像看不懂圖)時，會依序換下一個候選重讀，最後才輪到 Claude Code。
+ * 依序排列，選用的模型讀不出來(或看起來像看不懂圖)時，只會換一個這份清單裡的候選重讀。
+ * Claude Code 雖能看一般圖片，但會基於安全政策拒絕 CAPTCHA，絕不能算驗證碼候選。
  */
 export const VISION_MODELS = ["minimax-m3", "Qwen--3.5-max", "Kimi-k2.6"] as const;
 
 /** 這個模型能不能看圖(給 UI 標示用)。Claude Code 本機也能看圖(用檔案路徑而非 image_url)，一併算能看圖。 */
 export function supportsVision(model: string): boolean {
   return (VISION_MODELS as readonly string[]).includes(model) || isClaudeCodeModel(model);
+}
+
+/** 驗證碼是更窄的能力：Claude Code 會明確拒絕，只有實測可靠的 gateway 視覺模型算通過。 */
+export function supportsCaptchaVision(model: string): boolean {
+  return (VISION_MODELS as readonly string[]).includes(model);
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lintGraph, lintVarRefWarnings, validateConfigTypes, withSchemaDefaults } from "./graphLint";
+import { assertRunnableGraph, lintGraph, lintVarRefWarnings, validateConfigTypes, withSchemaDefaults } from "./graphLint";
 import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
 
 function node(id: string, type: string, config: Record<string, unknown> = {}): WorkflowNode {
@@ -42,6 +42,30 @@ test("lintGraph：圖裡有環要報錯", () => {
   const edges: WorkflowEdge[] = [{ from: "n1", to: "n2" }, { from: "n2", to: "n3" }, { from: "n3", to: "n2" }];
   const errors = lintGraph(nodes, edges);
   assert.ok(errors.some((e) => e.includes("環")));
+});
+
+test("lintGraph：只能有一個 trigger，重複連線也要拒絕", () => {
+  const nodes = [node("t1", "trigger"), node("t2", "trigger"), node("n", "custom-code", { intent: "x" })];
+  const edge = { from: "t1", to: "n" };
+  const errors = lintGraph(nodes, [edge, edge]);
+  assert.ok(errors.some((e) => e.includes("2 個觸發節點")), JSON.stringify(errors));
+  assert.ok(errors.some((e) => e.includes("重複了")), JSON.stringify(errors));
+});
+
+test("lintGraph：if-condition 出線必須標 true/false/error，一般節點不能發明分支 port", () => {
+  const nodes = [
+    node("t", "trigger"),
+    node("if", "if-condition", { left: "1", op: "==", right: "1" }),
+    node("a", "custom-code", { intent: "x" }),
+  ];
+  const missing = lintGraph(nodes, [{ from: "t", to: "if" }, { from: "if", to: "a" }]);
+  assert.ok(missing.some((e) => e.includes("必須標") && e.includes("true")), JSON.stringify(missing));
+  assert.deepEqual(lintGraph(nodes, [{ from: "t", to: "if" }, { from: "if", to: "a", fromPort: "true" }]), []);
+  const invented = lintGraph(
+    [node("t", "trigger"), node("a", "custom-code", { intent: "x" }), node("b", "custom-code", { intent: "y" })],
+    [{ from: "t", to: "a" }, { from: "a", to: "b", fromPort: "maybe" }],
+  );
+  assert.ok(invented.some((e) => e.includes("不是分支節點")), JSON.stringify(invented));
 });
 
 const numberField: ParamField[] = [{ key: "col", label: "欄位位置", type: "number" }];
@@ -126,8 +150,8 @@ test("lintGraph：非 trigger 節點從 trigger 走不到 → 錯誤(孤兒節�
 });
 
 // {{節點id.欄位}} 是模型發明的假語法(資料模型是扁平的)——執行期靜默解析失敗,建圖時就要攔。
-// {{period.start}}/{{item.x}} 合法(period/item 不是節點 id)。
-test("lintGraph：{{節點id.欄位}} 引用 → 錯誤;period/item 前綴不受影響", () => {
+// {{period.start}} 只能放 triggerParams derived default；節點 config 直接用不會解析。{{item.x}} 才是合法例外。
+test("lintGraph：攔截節點id.欄位與節點內的 period.*；item 前綴保留", () => {
   const nodes: WorkflowNode[] = [
     { id: "t", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
     { id: "parse", type: "llm-decide", label: "解析", config: { prompt: "x", outputKey: "result" }, position: { x: 0, y: 0 } },
@@ -141,7 +165,8 @@ test("lintGraph：{{節點id.欄位}} 引用 → 錯誤;period/item 前綴不受
   ];
   const errs = lintGraph(nodes, edges);
   assert.ok(errs.some((e) => e.includes("{{parse.result}}") && e.includes("{{result}}")), JSON.stringify(errs));
-  assert.ok(!errs.some((e) => e.includes("period") || e.includes("item")), "period/item 前綴不能被誤殺");
+  assert.ok(errs.some((e) => e.includes("period.*") && e.includes("filterStart")), JSON.stringify(errs));
+  assert.ok(!errs.some((e) => e.includes("item")), "repeat-steps 的 item 前綴不能被誤殺");
 });
 
 /* ---------- 多路分流(switch)/等人簽核/失敗分支的連線規則 ---------- */
@@ -191,6 +216,20 @@ test("lintGraph：repeat-steps 的內嵌步驟裡放 wait-approval 要報錯", (
   assert.ok(errors.some((e) => e.includes("迴圈") && e.includes("簽核")));
 });
 
+test("lintGraph：repeat-steps 會拒絕壞 JSON、未知內嵌型別與非法內嵌 config", () => {
+  const trigger = node("t", "trigger");
+  const badJson = { ...node("r", "repeat-steps"), config: { items: "[1]", steps: "not-json", outputKey: "results" } };
+  assert.ok(lintGraph([trigger, badJson], [{ from: "t", to: "r" }]).some((e) => e.includes("合法 JSON")));
+
+  const badSteps = {
+    ...node("r", "repeat-steps"),
+    config: { items: "[1]", steps: JSON.stringify([{ type: "not-real", config: {} }, { type: "wait", config: { seconds: "很多" } }]), outputKey: "results" },
+  };
+  const errors = lintGraph([trigger, badSteps], [{ from: "t", to: "r" }]);
+  assert.ok(errors.some((e) => e.includes("not-real")));
+  assert.ok(errors.some((e) => e.includes("型別是 number")));
+});
+
 test("lintVarRefWarnings:收信觸發有開 → {{body}}/{{subject}} 是合法上游欄位;沒開就警告", () => {
   const edges: WorkflowEdge[] = [{ from: "n1", to: "n2" }];
   const refBody = [node("n1", "trigger", { mailWatch: "on" }), node("n2", "write-file", { content: "{{body}}", filename: "{{subject}}.txt" })];
@@ -207,4 +246,22 @@ test("lintVarRefWarnings:Telegram/LINE 觸發有開 → {{message}} 合法;沒�
   assert.deepEqual(lintVarRefWarnings(line, edges, []), []);
   const off = [node("n1", "trigger"), node("n2", "write-file", { content: "{{message}}", filename: "a.txt" })];
   assert.ok(lintVarRefWarnings(off, edges, []).length > 0);
+});
+
+test("lintVarRefWarnings:Webhook 明講的外部 JSON 欄位可引用，未宣告拼錯字仍警告", () => {
+  const nodes = [node("t", "trigger"), node("ai", "llm-decide", { prompt: "分類 {{message}}" })];
+  const edges: WorkflowEdge[] = [{ from: "t", to: "ai" }];
+  assert.deepEqual(lintVarRefWarnings(nodes, edges, [], ["message"]), []);
+  assert.ok(lintVarRefWarnings(nodes, edges, [], ["massage"]).length > 0);
+});
+
+test("執行前安全閘門：合法圖放行，有環或孤兒節點就拒絕而不是硬跑", () => {
+  const valid = [node("t", "trigger"), node("n", "custom-code", { intent: "整理輸入資料" })];
+  assert.doesNotThrow(() => assertRunnableGraph(valid, [{ from: "t", to: "n" }]));
+
+  const invalid = [...valid, node("orphan", "custom-code", { intent: "不應被執行" })];
+  assert.throws(
+    () => assertRunnableGraph(invalid, [{ from: "t", to: "n" }, { from: "n", to: "t" }]),
+    /不能安全執行[\s\S]*(有環|沒有從觸發節點)/,
+  );
 });
