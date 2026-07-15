@@ -49,7 +49,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ token: 
     `等你簽核｜${wfName}`,
     `<h1>🙋 等你簽核</h1><p class="sub">流程「${esc(wfName)}」暫停中，等你決定後才會繼續。</p>
      <div class="msg">${esc(a.message)}</div>
-     <form method="POST"><label>備註(選填，會傳回流程的 {{decisionNote}})</label><textarea name="note" maxlength="500"></textarea>
+     <form method="POST"><label>備註(選填，會一併記錄在這次簽核決定裡)</label><textarea name="note" maxlength="500"></textarea>
      <div class="row"><button class="approve" name="action" value="approve">✅ 核准</button><button class="reject" name="action" value="reject">❌ 拒絕</button></div></form>
      <p class="hint">時限：${esc(a.expires_at)}(UTC) 前有效，逾時流程會自動停止。</p>`,
   );
