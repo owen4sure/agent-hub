@@ -22,7 +22,7 @@ import "@xyflow/react/dist/style.css";
 import { autoLayout, compactLegacyLongChain, separateOverlappingNodes, simpleChainSequence } from "@/lib/workflow/layout";
 import {
   useWFChat, sendChatToAI, stopChatToAI, stopVerification, startAutoTest, stopAutoTest,
-  clearPendingGraph, closeAutoTest, clearChat, discardWorkflowChat, appendAssistantNote,
+  clearPendingGraph, closeAutoTest, clearChat, discardWorkflowChat, appendAssistantNote, announceSheetSetupIfNeeded,
   verifyUnderstanding, confirmPendingExecution, cancelPendingExecution, submitChatInputs,
   cancelChatInput, stopAllChatWork, retryChatExecution, decideChatApproval,
   trustImportedAndContinue, cancelPendingTrust, recoverChatRuntime,
@@ -38,6 +38,7 @@ import { plainChatMessage, plainLanguage } from "@/lib/workflow/plainLanguage";
 import { latestLiveRunDetail, type PublicRunLog } from "@/lib/workflow/liveProgress";
 import { RunForm } from "./RunForm";
 import { ChatInputCard } from "./ChatInputCard";
+import { SheetScriptCard } from "./SheetScriptCard";
 import { NodePanel } from "./NodePanel";
 import { HistoryPanel } from "./HistoryPanel";
 import { ExplainPanel } from "./ExplainPanel";
@@ -1299,6 +1300,7 @@ export default function WorkflowPage() {
       applied.onFailureMissing ? `\n⚠️ 找不到叫「${applied.onFailureMissing}」的流程,失敗備援沒有建立——確認名稱後跟我說一聲。` : "",
     ].join("");
     appendAssistantNote(id, `✅ 已套用到畫布，共 ${count} 個節點。${extras}`);
+    announceSheetSetupIfNeeded(id, pendingGraph.nodes);
     // 「以使用者擺好的位置為準」：已經存在的節點(同 id)保留它目前的座標，只有全新的節點才自動排版。
     // 之前不管三七二十一對整張圖重跑 autoLayout，會把使用者辛苦拖好的排列整個洗掉、還可能擠成一團(踩過)。
     // (要整張重新自動對齊是「排列」按鈕的事，套用/修改流程不該偷改使用者的手動位置)
@@ -1898,6 +1900,8 @@ export default function WorkflowPage() {
                         <img key={j} src={`data:${p.mime || "image/png"};base64,${p.b64}`} alt={p.name ?? "已附上的圖片"} className="rounded-lg max-h-32 border" />
                       ) : p.kind === "image" ? (
                         <p key={j} className="text-xs faint break-all">🖼 {p.name ?? "圖片"}（送出時會重新載入）</p>
+                      ) : p.kind === "sheet-script" ? (
+                        <SheetScriptCard key={j} nodeLabels={p.nodeLabels} />
                       ) : (
                         // 附上的常是長網址：break-all 讓它一定斷得掉，不跟著撐爆氣泡
                         <p key={j} className="text-xs faint break-all">📄 {p.name}</p>
@@ -2044,7 +2048,7 @@ export default function WorkflowPage() {
                     // max-w-full + 內層 truncate:附件是長網址/長檔名時,不加會變成一個超寬的膠囊撐爆整欄(跑版)
                     <span key={i} className="badge badge-neutral gap-1 pr-1 max-w-full" title={p.kind === "file" ? p.name : undefined}>
                       <span className="truncate min-w-0">
-                        {p.kind === "text" ? `「${p.text.slice(0, 12)}${p.text.length > 12 ? "…" : ""}」` : p.kind === "image" ? "🖼 圖片" : `📄 ${p.name}`}
+                        {p.kind === "text" ? `「${p.text.slice(0, 12)}${p.text.length > 12 ? "…" : ""}」` : p.kind === "image" ? "🖼 圖片" : p.kind === "file" ? `📄 ${p.name}` : ""}
                       </span>
                       <button onClick={() => setDraftParts((prev) => prev.filter((_, j) => j !== i))} className="faint hover:text-[var(--text)] shrink-0">✕</button>
                     </span>

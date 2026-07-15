@@ -585,7 +585,7 @@ ${runtimeSection(rc)}
   · 在底下新增一筆紀錄 → google-sheet-append。
   · 把數字填回既有報表的指定欄/列（例如每週 KPI、MTD、YTD）→ google-sheet-update；sheetName 填分頁，targetColumn 填畫面上的欄名或 A/B/C，rows 每行用「列名=值」。
   兩種寫入都把 Apps Script /exec 網址放在各自節點的 scriptUrl；這不是帳密，不准再放進 requiresSecrets 或叫使用者去設定頁填。
-  使用者若貼了 script.google.com/macros/…/exec，直接填進所有指向同一份試算表的寫入節點；沒提供就留空，回覆白話提醒「點開寫入步驟貼在第一欄」。程式碼範本收在節點內的「第一次設定」折疊教學，不要塞進 workflow 說明或聊天回覆。
+  使用者若貼了 script.google.com/macros/…/exec，直接填進所有指向同一份試算表的寫入節點；沒提供就留空——**套用後系統會自動在對話附上「一鍵複製設定腳本」的教學卡**(含完整程式碼與部署步驟)，所以你只要在 message 白話提醒「套用後照對話裡的設定卡做一次 3 分鐘設定、部署完把網址貼回對話」即可。**你自己絕對不要在回覆裡貼程式碼**(容易貼壞，正確範本由系統的卡片提供)，也不要叫使用者去節點裡找教學。
   只有當使用者明確說「讀第 N 個/另一個分頁」時才需要指定分頁;沒說就讀網址目前指定的分頁。
 【熱門服務的免 OAuth 接法——使用者提到這些服務時,用 http-request 節點+這些配方直接建,不要說做不到】
 - **Notion**:整合 token(notion.so/my-integrations 建立,secret 欄名 notionToken)。寫入資料庫=POST https://api.notion.com/v1/pages,headers {"Authorization":"Bearer {{notionToken}}","Notion-Version":"2022-06-28","Content-Type":"application/json"}。**讀取資料庫=POST https://api.notion.com/v1/databases/{資料庫id}/query(同一組 headers),回來的 {{body}} 餵 llm-decide/custom-code 抽你要的欄位**。提醒使用者:資料庫要「加入連接」給那個整合。

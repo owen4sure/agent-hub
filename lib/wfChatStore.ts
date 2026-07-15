@@ -4,6 +4,7 @@ import { useSyncExternalStore } from "react";
 import type { WorkflowNode, WorkflowEdge, ParamField } from "@/lib/workflow/types";
 import type { SuggestedSchedule } from "@/lib/workflow/builder";
 import { classifyChatCommand } from "@/lib/workflow/chatCommand";
+import { sheetWriteNodesNeedingSetup } from "@/lib/googleSheetScriptTemplate";
 import { formatPlannedWriteLines, humanizePreviewPair } from "@/lib/workflow/plainLanguage";
 import { compactHistoryForPersistence, compactHistoryForRequest, historyHasReusablePreviewFile } from "@/lib/chatHistory";
 import { extractChatRunParams, schemaAcceptsDateRange, type DateRange } from "@/lib/workflow/chatRunParams";
@@ -16,7 +17,10 @@ import { extractChatRunParams, schemaAcceptsDateRange, type DateRange } from "@/
 export type Part =
   | { kind: "text"; text: string }
   | { kind: "image"; b64: string; name?: string; mime?: string; assetId?: string }
-  | { kind: "file"; name: string; content: string; assetId?: string };
+  | { kind: "file"; name: string; content: string; assetId?: string }
+  // 「Google 試算表寫入腳本」設定卡的標記:實際腳本內容由 UI 從 GOOGLE_SHEET_SCRIPT_TEMPLATE 讀,
+  // 不存進對話(不佔 localStorage、也不會被白話過濾層改壞)。只出現在 isControl 訊息,永遠不送模型。
+  | { kind: "sheet-script"; nodeLabels: string[] };
 
 /** isError=true 的訊息是「系統錯誤提示」(連線失敗之類)，只給人看——送給模型的歷史一定要濾掉它們，
  * 不然模型會把它們當成「AI 之前說過的話」有樣學樣，開始自己回覆「連線失敗」(真實踩過的雷)。 */
@@ -247,7 +251,28 @@ async function applyPendingGraphFromChat(id: string, history: ChatMsg[], announc
   const nextToken = (get(id).reloadToken ?? 0) + 1;
   set(id, { chat: history, pendingGraph: null, reloadToken: nextToken });
   if (announce) appendAssistantNote(id, `✅ 已把剛才的 ${graph.nodes.length} 個步驟存進草稿畫布；這只是流程設定，尚未正式執行或寫入外部資料。`);
+  announceSheetSetupIfNeeded(id, graph.nodes);
   return true;
+}
+
+/**
+ * 套用的流程裡有「還沒設定寫入網址」的試算表寫入步驟時，主動在對話附上一鍵複製的設定腳本卡。
+ * 確定性偵測(看實際節點設定)，不靠模型記得提醒；使用者不用自己想到要去節點裡找教學。
+ */
+export function announceSheetSetupIfNeeded(id: string, nodes: PendingGraph["nodes"]) {
+  const labels = sheetWriteNodesNeedingSetup(nodes);
+  if (labels.length === 0) return;
+  const s = get(id);
+  set(id, {
+    chat: [...s.chat, {
+      role: "assistant",
+      isControl: true,
+      parts: [
+        { kind: "text", text: `這條流程的「${labels.join("」「")}」會寫入你的 Google 試算表，第一次使用要做一個 3 分鐘的設定(讓試算表授權接收資料)。照下面的卡片做就好；部署完把 Google 給的網址直接貼回這裡，我會自動填進所有寫入步驟。` },
+        { kind: "sheet-script", nodeLabels: labels },
+      ],
+    }],
+  });
 }
 
 /**
