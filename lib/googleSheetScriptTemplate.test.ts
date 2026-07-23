@@ -55,7 +55,11 @@ function harness(initial: unknown[][]): Harness {
     getLastRow: () => data.length,
   };
   const SpreadsheetApp = {
-    getActiveSpreadsheet: () => ({ getSheetByName: (name: string) => name === "彙整表" ? sheet : null, getSheets: () => [sheet] }),
+    getActiveSpreadsheet: () => ({
+      getName: () => "彙整表測試表",
+      getSheetByName: (name: string) => name === "彙整表" ? sheet : null,
+      getSheets: () => [sheet],
+    }),
     flush() {},
   };
   const ContentService = {
@@ -109,5 +113,78 @@ describe("Google 試算表 Apps Script 官方範本", () => {
     const h = harness([["A", "B"]]);
     assert.deepEqual(h.call({ sheet: "彙整表", cells: ["x", 1] }), { ok: true, row: 2 });
     assert.deepEqual(h.data[1], ["x", 1]);
+  });
+
+  // 真實踩過的 bug：「🔎 檢查並套用」的 capabilities 探測必須要能分辨「腳本專案沒有正確綁定在
+  // 試算表上」這種最常見的部署錯誤——這正是使用者實際遇到、真正執行 updateTable 時炸出
+  // "Cannot read properties of null (reading 'getSheetByName')" 的成因。舊版範本的 capabilities
+  // 分支在 doPost 最前面就直接回 { ok: true }，完全沒有先呼叫 SpreadsheetApp.getActiveSpreadsheet()，
+  // 所以就算腳本專案沒綁對試算表(getActiveSpreadsheet() 會回 null)，「檢查並套用」仍然回報成功——
+  // 使用者看到綠燈以為部署好了，一去真的寫資料才發現照樣壞掉，白白重新部署好幾次都修不好。
+  it("腳本專案沒有正確綁定在試算表上時，capabilities 探測也要老實回報失敗，不能給假的綠燈", () => {
+    const unboundSpreadsheetApp = {
+      getActiveSpreadsheet: () => null,
+      flush() {},
+    };
+    const ContentService = {
+      MimeType: { JSON: "json" },
+      createTextOutput: (text: string) => ({ text, setMimeType() { return this; } }),
+    };
+    const factory = new Function(
+      "SpreadsheetApp",
+      "ContentService",
+      `${GOOGLE_SHEET_SCRIPT_TEMPLATE}\nreturn { doPost: doPost };`,
+    );
+    const api = factory(unboundSpreadsheetApp, ContentService) as { doPost(event: unknown): { text: string } };
+    const result = JSON.parse(
+      api.doPost({ postData: { contents: JSON.stringify({ action: "capabilities" }) } }).text,
+    ) as Record<string, unknown>;
+    assert.equal(result.ok, false, `capabilities 探測應該要偵測到腳本沒綁定試算表，實際回應：${JSON.stringify(result)}`);
+  });
+
+  // 真實踩過的事故：capabilities 探測只驗得出「有沒有綁定某份試算表」，驗不出「綁定的是不是
+  // 正確的那份」——使用者的腳本專案剛好綁在一份空白的「Untitled spreadsheet」上(不是他真正
+  // 要寫入的那份表)，這個檢查照樣回 ok:true，使用者看到「檢查並套用」顯示成功以為部署好了，
+  // 真的執行才發現寫錯地方，反覆重新部署了 5 次都沒解決同一個誤綁問題。capabilities 回應要
+  // 附上目前綁定的試算表名稱，讓呼叫端能把它顯示給使用者核對，不用等到真的寫入失敗才發現。
+  it("capabilities 探測要附上目前綁定的試算表名稱，讓使用者能核對是不是綁錯了", () => {
+    const h = harness([["A", "B"]]);
+    const result = h.call({ action: "capabilities" });
+    assert.equal(result.spreadsheetName, "彙整表測試表", `capabilities 回應要帶 spreadsheetName，實際：${JSON.stringify(result)}`);
+  });
+
+  // 真實踩過的案例：使用者堅持分頁名稱一直都對、沒改過，「找不到分頁: X」這句話本身完全沒有
+  // 線索能判斷到底是分頁被改名了，還是這支 Apps Script 根本綁到了另一份試算表(例如複製過一次
+  // 試算表、或不小心從錯的那份試算表開 Apps Script)。這兩種情況使用者要採取的行動完全不同，
+  // 必須讓錯誤訊息本身列出「目前綁定的試算表叫什麼名字＋裡面實際有哪些分頁」，使用者一比對
+  // 就知道是哪一種，不用再靠猜。
+  it("找不到指定分頁時，錯誤要列出目前綁定的試算表名稱與實際存在的分頁清單，讓使用者能判斷是分頁改名了還是綁錯試算表", () => {
+    const sheetA = { getName: () => "工作表1" };
+    const sheetB = { getName: () => "彙整表" };
+    const SpreadsheetApp = {
+      getActiveSpreadsheet: () => ({
+        getName: () => "業務週報彙整(2026)",
+        getSheetByName: (name: string) => [sheetA, sheetB].find((s) => s.getName() === name) ?? null,
+        getSheets: () => [sheetA, sheetB],
+      }),
+      flush() {},
+    };
+    const ContentService = {
+      MimeType: { JSON: "json" },
+      createTextOutput: (text: string) => ({ text, setMimeType() { return this; } }),
+    };
+    const factory = new Function(
+      "SpreadsheetApp",
+      "ContentService",
+      `${GOOGLE_SHEET_SCRIPT_TEMPLATE}\nreturn { doPost: doPost };`,
+    );
+    const api = factory(SpreadsheetApp, ContentService) as { doPost(event: unknown): { text: string } };
+    const result = JSON.parse(
+      api.doPost({ postData: { contents: JSON.stringify({ action: "updateTable", sheet: "每週業績折線圖_業務週會", targetColumn: "A", rows: [] }) } }).text,
+    ) as Record<string, unknown>;
+    assert.equal(result.ok, false);
+    assert.match(String(result.error), /業務週報彙整\(2026\)/, "要點名目前綁定的試算表叫什麼，讓使用者判斷是不是綁錯試算表");
+    assert.match(String(result.error), /工作表1/);
+    assert.match(String(result.error), /彙整表/);
   });
 });

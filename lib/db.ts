@@ -115,7 +115,8 @@ function init(): Database.Database {
       path TEXT NOT NULL,
       mime TEXT NOT NULL,
       size INTEGER NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'output'
     );
     CREATE INDEX IF NOT EXISTS idx_run_files_wf ON run_files(workflow_id, created_at DESC);
 
@@ -184,6 +185,52 @@ function init(): Database.Database {
       decided_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status, expires_at);
+
+    -- 無人值守觸發(排程/監聽/webhook)的正式流程失敗，若原因被判定為「外部服務暫時性問題」
+    -- (例如免費視覺模型當下無回應)，不是邏輯/帳密問題，AI 改設定也沒用，重跑同一份設定
+    -- 很可能就直接成功——排一個延後自動重跑，而不是靜靜停在那裡等使用者自己想到要手動重試。
+    CREATE TABLE IF NOT EXISTS pending_retries (
+      id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      trigger_params_json TEXT,
+      attempt INTEGER NOT NULL DEFAULT 1,
+      retry_at TEXT NOT NULL,
+      original_trigger TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_retries_due ON pending_retries(retry_at);
+
+    -- 讓 AI 修(autofix)／自動測試(autorun)迴圈在「改節點設定→重跑驗證→決定保留或還原」這整個過程
+    -- 可能橫跨好幾輪、幾十秒到幾分鐘；迴圈自己只在正常結束(成功/失敗/使用者取消/逾時)時才會呼叫
+    -- restoreUnverified() 把沒驗證過的改動還原。若承載這個迴圈的進程中途死掉(部署重啟/crash/被殺)，
+    -- 這段清理來不及跑，未驗證的節點改動就會半吊子永久留在流程上，事後完全看不出那是暫時改動
+    -- (真實踩過的事故：一次「讓AI修」中途被服務重啟打斷，事後不確定當時節點內容是不是已驗證過的版本)。
+    -- 這張表存「迴圈開始前的完整快照」，迴圈乾淨結束(不管哪種結局)都會刪掉這筆自己的紀錄；
+    -- 只有「進程真的死了」才會留下孤兒列，交給下次啟動時的 recoverCrashedRepairs() 拿快照整個還原，
+    -- 跟 runs.owner_pid 的崩潰復原(recoverCrashedRuns)是同一個道理，只是保護的是「迴圈中的節點改動」。
+    CREATE TABLE IF NOT EXISTS repair_sessions (
+      id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      owner_pid INTEGER NOT NULL,
+      before_json TEXT NOT NULL,
+      started_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_repair_sessions_wf ON repair_sessions(workflow_id, started_at);
+
+    -- 寫入/發送類節點(google-sheet-append、send-email、telegram/line/slack-notify)標成 retryable：
+    -- 引擎逾時或暫時性錯誤會整個節點重跑。問題是「重跑」跟「這次真的沒送到」是兩件不一定相同的事——
+    -- 遠端有可能其實已經處理成功，只是我們這邊等回應逾時，重跑就會寄兩次信、多寫一列、發兩次通知。
+    -- 這張表記錄「(這次執行, 這個節點)這個邏輯動作目前的狀態」，key 是 runId:nodeId(repeat-steps
+    -- 內嵌步驟的 nodeId 本身已經帶迭代序號，天然唯一，不用額外處理)。status 見 lib/workflow/idempotency.ts
+    -- 的說明：'pending'=已經要發起外部呼叫但結果還不確定(此時不自動重試,交給人判斷)；
+    -- 'completed'=確定成功，重跑直接沿用記錄的輸出，不會重複產生外部副作用。
+    CREATE TABLE IF NOT EXISTS idempotent_actions (
+      key TEXT PRIMARY KEY,
+      output_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_idempotent_actions_created ON idempotent_actions(created_at);
   `);
 
   // 無痛升級：schema 有變動時對既有 DB 補欄位，永遠不需要刪 DB(才不會弄丟已存的帳密/設定)。
@@ -203,16 +250,35 @@ function init(): Database.Database {
   // 安全試跑失敗後若從原處續跑，必須沿用「只讀」身分。沒存這欄會讓續跑的下游寫入步驟變正式執行。
   addColumnIfMissing(db, "runs", "dry_run", "dry_run INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "runs", "owner_pid", "owner_pid INTEGER");
+  // 部分執行(從這步開始測/只測這幾步)挑「可沿用種子」的舊 run 時，必須核對圖版本——沒有這欄就只能
+  // 盲挑「最近一次成功過的 run」，可能把已經改過設定/日期區間的舊邏輯結果，靜默當成今天的資料沿用。
+  addColumnIfMissing(db, "runs", "graph_fingerprint", "graph_fingerprint TEXT");
+  // 正式流程無人值守失敗的背景修法提案改用整圖感知修復(aiRepairGraph)後，真正原因可能在別的節點
+  // (不只是失敗回報的那個)——這欄存「除了主要那格以外，還一併要改的節點」，套用提案時一起套。
+  addColumnIfMissing(db, "fix_proposals", "extra_edits_json", "extra_edits_json TEXT");
   addColumnIfMissing(db, "node_runs", "attempt", "attempt INTEGER NOT NULL DEFAULT 1");
   // 分支節點(if/switch)這次選了哪個出口——「從失敗那步續跑」要重放上次的分支選擇，下游跳過邏輯才會一致
   addColumnIfMissing(db, "node_runs", "active_ports", "active_ports TEXT");
   addColumnIfMissing(db, "schedules", "last_fired_minute", "last_fired_minute TEXT");
   addColumnIfMissing(db, "schedules", "next_run_at", "next_run_at TEXT");
   addColumnIfMissing(db, "schedules", "params_json", "params_json TEXT");
+  // 失敗自動重跑排的這筆記錄，原本是從哪個 run 失敗才排的——有這個才能到期時優先「續跑」那個
+  // run(沿用失敗前已成功步驟的結果，不會讓已經寫入/寄出的副作用重演一次)，沒有的話只能整條
+  // 從頭重跑。舊資料沒有這欄(NULL)一律退回從頭重跑，行為跟改動前一樣，不會出錯。
+  addColumnIfMissing(db, "pending_retries", "run_id", "run_id TEXT");
+  // idempotent_actions 原本只記「確定完成」——真實踩過的漏洞(code review 抓到)：這樣完全防不住
+  // 「外部呼叫已經送出、但因為逾時而拋錯」這個最常見的觸發路徑，下一次重試照樣查不到紀錄、照樣
+  // 真的送第二次。補上 pending 狀態：舊資料(這個功能剛推出時的既有紀錄，都是「確定完成」的動作)
+  // 用 DEFAULT 'completed' 補齊，行為完全不變；新紀錄才會用到 'pending'。
+  addColumnIfMissing(db, "idempotent_actions", "status", "status TEXT NOT NULL DEFAULT 'completed'");
   // Webhook 觸發用的秘密 token(每條流程一個)：URL 路徑就是認證，沒有 token 的人打不動
   addColumnIfMissing(db, "workflows_meta", "webhook_token", "webhook_token TEXT");
   // LINE 訊息觸發的 webhook token(每條流程一個)——跟一般 webhook 分開，各自啟用/停用
   addColumnIfMissing(db, "workflows_meta", "line_token", "line_token TEXT");
+  // 檔案分兩種：'output'=給使用者的交付產出、'intermediate'=抓進來給下游/AI 對話用的中間檔
+  // (下載的信件附件、解壓出的檔案)。中間檔照樣登記(生命週期跟著 run、對話還讀得到)，
+  // 只是「產出檔案」頁不列出來——使用者只想看到真正的成品。
+  addColumnIfMissing(db, "run_files", "kind", "kind TEXT NOT NULL DEFAULT 'output'");
 
   // 帳密改成全域共用(依 key)：把舊的「每個 workflow 各存一份」搬進共用區 __shared__，
   // 使用者已填過的帳密不會不見。已有共用值就不覆蓋(第一筆為準)，搬完刪掉舊的各別列。冪等。

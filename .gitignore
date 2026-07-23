@@ -48,3 +48,6 @@ next-env.d.ts
 *.db
 *.db-shm
 *.db-wal
+
+# 本機開發時的瀏覽器 console 除錯紀錄，不是原始碼
+/.playwright-cli/

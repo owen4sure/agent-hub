@@ -34,6 +34,10 @@ export function VersionsPanel({ workflowId, onClose, onRestored }: { workflowId:
     try {
       const res = await fetch(`/api/workflows/${workflowId}/versions/${encodeURIComponent(filename)}/restore`, { method: "POST" }).catch(() => null);
       if (!res || !res.ok) { window.alert("還原失敗，請再試一次。"); return; }
+      const data = (await res.json().catch(() => ({}))) as { warning?: string };
+      // 備份只還原流程圖本身，不含排程/Webhook/LINE 這類觸發設定——這次還原的版本若用了不同的
+      // 執行參數、且這條流程目前有作用中的自動觸發，後端會回一句警告，這裡要讓使用者看到。
+      if (data.warning) window.alert(data.warning);
       onRestored();
     } finally {
       setRestoring(null);

@@ -5,8 +5,11 @@ import { getClient } from "@/lib/modelClient";
 import { getWorkflow, saveWorkflow } from "@/lib/workflow/store";
 import { getWorkflowModel } from "@/lib/settingsStore";
 import { aiRepairGraph, applyNodeConfigEdits, type RepairAttempt, type NodeEdit } from "@/lib/workflow/graphRepair";
+import { applyGraphStructureEdits, type GraphStructureEdits } from "@/lib/workflow/graphStructure";
+import { checkOscillation, computeEditFingerprint } from "@/lib/workflow/oscillationGuard";
 import { runWorkflowAndWait, classifyFailure, getMissingWorkflowSettings, isUserCancelled, getVarWarnings } from "@/lib/workflow/engine";
 import { autorunActive, loopCancelRequested, loopAbortControllers } from "@/lib/workflow/busyLocks";
+import { beginRepairSession, endRepairSession } from "@/lib/workflow/repairSessions";
 import { recordFix } from "@/lib/workflow/learnedFixes";
 import { checkRunSemantics, verifyAgainstExpected } from "@/lib/workflow/resultCheck";
 import { resolveParams } from "@/lib/relativeDate";
@@ -15,6 +18,7 @@ import { getDb } from "@/lib/db";
 import { fillSampleParams, fileSampleKind, writeSampleFile } from "@/lib/workflow/sampleData";
 import { sampleMailForTest } from "@/lib/mailWatcher";
 import { getWorkflowCoverage } from "@/lib/workflow/coverage";
+import { hasExecutableSteps } from "@/lib/workflow/graphLint";
 import type { WorkflowNode } from "@/lib/workflow/types";
 
 // 一輪自動測試最多修幾次(跨節點總和)，以及同一個節點最多連續修幾次就放棄
@@ -52,9 +56,14 @@ function summarizeEdits(edits: NodeEdit[]): string {
 
 /**
  * 草稿區的「幫我測到會跑」全自動迴圈：
- *   跑一輪(有頭瀏覽器，使用者看得到) → 成功且乾淨(沒有 {{變數}} 警告)就結束
- *   → 失敗且明確「需人工」(帳密沒填/找不到指定資料)就停下來，明確告訴使用者要補什麼
+ *   跑一輪(背景執行，不開視窗搶畫面) → 成功且乾淨(沒有 {{變數}} 警告)就結束
+ *   → 失敗且明確「需人工」(帳密沒填/找不到指定資料/被平台擋自動化登入)就停下來，明確告訴使用者要補什麼
  *   → 其餘失敗(選擇器/逾時/變數沒解析/無法歸類)就讓 AI 整圖修復再跑 → 直到乾淨通過
+ *
+ * **永遠是安全排練(dryRun 強制 true)**：抓資料/計算/瀏覽器操作都是真的，但寫試算表/寄信/發通知
+ * 一律攔住不會真的送出——按鈕上的「測」字必須名符其實，不能讓使用者以為在測試、實際卻寫壞了
+ * 生產資料(踩過的真實 bug：以前只有對話觸發這條路是安全的，工具列按鈕會真的寫入)。
+ * 要驗證寫入真的生效，請用「▶ 執行」。
  *
  * 迴圈工程(裡面的模型可能是弱模型，收斂必須靠迴圈設計不能靠模型聰明)：
  * - 迴圈記憶：每輪把「改了什麼→結果如何」記進 attemptHistory 餵給下一輪修復，模型才不會反覆提同一個無效改法
@@ -68,6 +77,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const { id } = await params;
   const wf = getWorkflow(id);
   if (!wf) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
+  if (!hasExecutableSteps(wf.nodes)) {
+    return NextResponse.json({
+      ok: false,
+      needsHuman: true,
+      code: "WORKFLOW_HAS_NO_STEPS",
+      steps: [{ kind: "human", title: "還沒有流程可以測試", detail: "直接在右側用一句話描述你想完成的事；AI 先把步驟建立出來後，才可以安全測試。這次沒有執行任何操作。" }],
+    }, { status: 400 });
+  }
   const missing = getMissingWorkflowSettings(wf);
   if (missing.length > 0) {
     return NextResponse.json({
@@ -84,12 +101,27 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   autorunActive.add(id);
   const loopAbort = new AbortController();
   loopAbortControllers.set(id, loopAbort);
+  // 崩潰復原的快照登記：跟 autofix 同一套道理，見 repairSessions.ts 與 lib/db.ts 的
+  // repair_sessions 表——迴圈邊改節點邊驗證，進程中途死掉的話沒驗證過的改動不能留下來。
+  // beginRepairSession 現在也會做跨進程互斥檢查，可能會拋錯(另一個進程正在修這條流程)——
+  // 這個檢查點在上面的記憶體鎖(autorunActive.add)之後才會執行到，拋錯時必須比照下面 finally
+  // 一樣清掉剛剛註冊的鎖，否則這條流程會卡在「看起來被鎖住、但其實從沒真的開始跑」的狀態，
+  // 永遠等不到任何 finally 去解鎖。
+  let repairSessionId: string;
+  try {
+    repairSessionId = beginRepairSession(id, "autorun", { nodes: wf.nodes, edges: wf.edges });
+  } catch (err) {
+    autorunActive.delete(id);
+    loopAbortControllers.delete(id);
+    return NextResponse.json({ error: err instanceof Error ? err.message : "無法開始自動測試" }, { status: 409 });
+  }
   try {
     return await runAutoTestLoop(req, id, wf, loopAbort.signal);
   } finally {
     autorunActive.delete(id);
     loopCancelRequested.delete(id);
     loopAbortControllers.delete(id);
+    endRepairSession(repairSessionId);
   }
 }
 
@@ -100,15 +132,21 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
     : {};
   // 使用者(選填)給的「這次已知正確答案」——跑綠後拿去對,對不上就當失敗餵回修復迴圈(見下面 answerVerified)
   const expected = typeof body.expected === "string" ? body.expected.trim() : "";
-  // 對話裡的「修到會跑」預設先用只讀模式收斂：抓資料/計算/瀏覽器操作照跑，但寫試算表、寄信、
-  // 通知都攔住。原本工具列的「測到會跑」不帶這個旗標，維持既有完整測試行為。
-  const dryRun = body.dryRun === true;
+  // 「測到會跑」永遠是安全排練：抓資料/計算/瀏覽器操作照跑，但寫試算表、寄信、通知一律攔住——
+  // 不管從工具列或對話觸發都一樣。以前工具列這條路 body.dryRun 沒傳就是 false,會真的寫入 Google
+  // Sheet/寄信/發通知,跟按鈕上「測」字給使用者的預期完全不符(真實使用者以為在測試,結果真的寫壞了
+  // 生產資料的 bug)。真要驗證寫入端到端真的成功,用「▶ 執行」——那才是唯一會真的動外部資料的入口。
+  const dryRun = true;
+  void body.dryRun; // 保留欄位相容舊前端請求,但伺服器端不再信任呼叫端決定要不要真的寫入
 
   const db = getDb();
   const model = getWorkflowModel(id, wf.defaultModel);
   const client = getClient();
   const triggerParams = resolveParams(wf.triggerParams ?? [], rawParams, new Date());
   const steps: Step[] = [];
+  // 只要其中一項輸入是系統虛構的，這輪最多只能證明「接線／基本邏輯」；絕不能讓 UI 誤導成
+  // 已拿使用者真實資料驗證過，更不能直接升成正式流程。
+  let usedSimulatedInput = false;
 
   // 監聽型流程(trigger 有 watchPath)的自動測試：正常情況下 {{filePath}} 來自「被丟進資料夾的新檔案」，
   // 手動/自動測試沒有這個來源，下游第一步就會死。拿監聽資料夾裡「最新的一個檔案」當測試樣本；
@@ -143,6 +181,7 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
         });
       }
       const sample = writeSampleFile(kind);
+      usedSimulatedInput = true;
       triggerParams.filePath = sample.filePath;
       triggerParams.fileName = sample.fileName;
       steps.push({ kind: "info", title: "自動用模擬資料當測試樣本", detail: `${sample.fileName}(通用${kind === "csv" ? "表格" : "文字"}內容;真檔案丟進監聽資料夾後建議再實測一次)` });
@@ -163,15 +202,18 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
       steps.push({ kind: "info", title: "用信箱裡最新一封符合條件的信當測試樣本", detail: String(sample.params.subject ?? "") });
     } else {
       Object.assign(triggerParams, sample.params);
+      usedSimulatedInput = true;
       steps.push({ kind: "info", title: "自動用模擬信件當測試樣本", detail: sample.note });
     }
   }
   // Telegram/LINE 訊息觸發型：訊息沒法回放，用模擬訊息(誠實標注)驗流程接線
   if (trigger?.config?.telegramWatch === "on" && triggerParams.message === undefined) {
+    usedSimulatedInput = true;
     Object.assign(triggerParams, { message: "(測試訊息)", fromName: "測試", chatId: "", messageId: 0 });
     steps.push({ kind: "info", title: "自動用模擬 Telegram 訊息當測試樣本", detail: "(測試訊息)——設為正式後真的傳訊息給 bot 建議再實測一次" });
   }
   if (trigger?.config?.lineWatch === "on" && triggerParams.message === undefined) {
+    usedSimulatedInput = true;
     Object.assign(triggerParams, { message: "(測試訊息)", userId: "", replyToken: "" });
     steps.push({ kind: "info", title: "自動用模擬 LINE 訊息當測試樣本", detail: "(測試訊息)——接上 LINE 後真的傳訊息建議再實測一次" });
   }
@@ -181,7 +223,10 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
   {
     const { params: filled, notes } = fillSampleParams(wf.triggerParams ?? [], triggerParams);
     Object.assign(triggerParams, filled);
-    if (notes.length) steps.push({ kind: "info", title: "用模擬值補上沒填的參數", detail: notes.join("、") });
+    if (notes.length) {
+      usedSimulatedInput = true;
+      steps.push({ kind: "info", title: "用模擬值補上沒填的參數", detail: notes.join("、") });
+    }
   }
   const fixCountByNode: Record<string, number> = {};
   const labelOf = (nodeId: string | null | undefined) => (nodeId && wf.nodes.find((n) => n.id === nodeId)?.label) || nodeId || "某一步";
@@ -192,9 +237,27 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
   // 「AI 說修了 A，點開 A 卻還是舊設定」(踩過的真實 bug)。所以只回滾「沒通過驗證」節點的 config，
   // 且以「當下最新版」為底(保留使用者在 autorun 期間拖的節點位置等改動)，只動 config。
   const originalNodes: WorkflowNode[] = wf.nodes;
-  const verifiedFixes = new Map<string, Record<string, unknown>>(); // nodeId → 重跑驗證通過的 config
+  // nodeId → 重跑驗證通過的 config**與 label**——label 一定要跟著存,還原時才不會留下
+  // 「名稱是新目的地、實際設定卻是舊目的地」的矛盾(applyNodeConfigEdits 改目的地會同步改 label)
+  const verifiedFixes = new Map<string, { config: Record<string, unknown>; label: string }>();
   const editedNodeIds = new Set<string>(); // autorun 真的動過的節點——還原只能碰這些
+  // 變更節點型別/接線的修復不能套用原本的「只還原 config」邏輯。保留這一輪拓樸快照，
+  // 讓安全試跑失敗時能回到完整可執行的舊圖，而不是留下新節點配舊設定的半套狀態。
+  let pendingStructureBefore: { nodes: WorkflowNode[]; edges: typeof wf.edges } | null = null;
+  const rollbackPendingStructure = () => {
+    if (!pendingStructureBefore) return;
+    const cur = getWorkflow(id);
+    if (!cur) return;
+    const positions = new Map(cur.nodes.map((node) => [node.id, node.position]));
+    saveWorkflow({
+      ...cur,
+      nodes: pendingStructureBefore.nodes.map((node) => ({ ...node, position: positions.get(node.id) ?? node.position })),
+      edges: pendingStructureBefore.edges,
+    });
+    pendingStructureBefore = null;
+  };
   const restoreIfEdited = () => {
+    rollbackPendingStructure();
     if (editedNodeIds.size === 0) return;
     const cur = getWorkflow(id);
     if (cur) {
@@ -203,9 +266,9 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
       const nodes = cur.nodes.map((n) => {
         if (!editedNodeIds.has(n.id)) return n;
         const kept = verifiedFixes.get(n.id);
-        if (kept) return { ...n, config: kept };
+        if (kept) return { ...n, config: kept.config, label: kept.label };
         const orig = originalNodes.find((o) => o.id === n.id);
-        return orig ? { ...n, config: orig.config } : n;
+        return orig ? { ...n, config: orig.config, label: orig.label } : n;
       });
       saveWorkflow({ ...cur, nodes });
     }
@@ -228,8 +291,10 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
       | { error: string | null; reason: string | null }
       | undefined;
 
-  // 有頭瀏覽器跑草稿(讓人看得到)，正式流程則 headless
-  const headed = wf.status === "draft";
+  // 一律背景執行(headless)。以前草稿開有頭瀏覽器「讓人看得到」，但修復迴圈一輪一輪跑,
+  // 每輪都跳一個瀏覽器視窗搶走使用者的螢幕焦點(「一直自己開開關關、畫面一直被拉走」——真實抱怨)。
+  // 進度本來就有步驟面板可看;想親眼看瀏覽器操作,用「▶ 執行」勾「這次看畫面」單獨跑。
+  const headed = false;
   const startedAt = Date.now();
   const remainingMs = () => OVERALL_TIME_BUDGET_MS - (Date.now() - startedAt);
 
@@ -401,6 +466,8 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
 
     // 整圖修復：看整條流程 + 失敗節點實際收到的資料 + 執行紀錄 + 頁面 HTML/截圖 + 前幾輪試過什麼
     let edits: NodeEdit[];
+    let structure: GraphStructureEdits | undefined;
+    let preserveStructureOnHumanSetup = false;
     let explanation: string;
     try {
       // apply:false = 先算出修改、過完震盪檢查才真的寫進磁碟——先套用再檢查的話，
@@ -409,6 +476,8 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
       const repair = await aiRepairGraph(client, model, id, failedNode, errBeforeFix, result.runId, { attemptHistory, apply: false, signal: loopSignal });
       edits = repair.edits;
       explanation = repair.explanation;
+      structure = repair.structure;
+      preserveStructureOnHumanSetup = repair.preserveStructureOnHumanSetup === true;
       repairThrows = 0; // 修復呼叫成功就歸零——這個上限管的是「連續」出錯，非連續的暫時性失敗不該累計成放棄
       if (repair.skipped.length > 0) {
         // 部分修改沒被套用(指錯節點/型別非法)——記進迴圈記憶，模型下輪才知道
@@ -433,33 +502,43 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
       continue;
     }
 
-    // ── 震盪偵測：跟之前一模一樣的改法、或等於沒改 → 不浪費一次完整重跑(那個 config 已驗證過失敗) ──
-    const fingerprint = JSON.stringify(edits.map((e) => ({ n: e.nodeId, a: e.after })));
-    const isNoop = edits.every((e) => JSON.stringify(e.before) === JSON.stringify(e.after));
-    if (isNoop || seenEditFingerprints.has(fingerprint)) {
-      consecutiveRepeats++;
-      attemptHistory.push({
-        action: `${isNoop ? "回了等於沒改的方案" : "重複了之前試過的改法"}：${summarizeEdits(edits)}`,
-        outcome: "這個改法已經驗證過無效，未重跑",
-      });
-      if (consecutiveRepeats >= 2) {
-        steps.push({ kind: "giveup", title: "AI 開始原地打轉(反覆提出同樣的修法)，先停下來", detail: "建議點紅色節點看截圖，用白話補充線索再讓 AI 修。" });
+    if (structure) {
+      const before = getWorkflow(id);
+      if (!before) return failResponse({ node: failedNode });
+      const applied = applyGraphStructureEdits(id, structure);
+      if (!applied.ok) {
+        steps.push({ kind: "giveup", title: "AI 提出的流程調整不安全", detail: applied.problems.join("；") });
         return failResponse({ node: failedNode });
       }
-      steps.push({ kind: "run", title: "AI 回了試過的修法，要求它換方向再想一次" });
-      continue;
+      pendingStructureBefore ??= { nodes: before.nodes, edges: before.edges };
+      consecutiveRepeats = 0;
+    } else {
+      // ── 震盪偵測：跟之前一模一樣的改法、或等於沒改 → 不浪費一次完整重跑(那個 config 已驗證過失敗) ──
+      const oscillation = checkOscillation(edits, seenEditFingerprints, consecutiveRepeats);
+      if (oscillation.shouldSkip) {
+        consecutiveRepeats = oscillation.consecutiveRepeats;
+        attemptHistory.push({
+          action: `${oscillation.isNoop ? "回了等於沒改的方案" : "重複了之前試過的改法"}：${summarizeEdits(edits)}`,
+          outcome: "這個改法已經驗證過無效，未重跑",
+        });
+        if (oscillation.shouldStop) {
+          steps.push({ kind: "giveup", title: "AI 開始原地打轉(反覆提出同樣的修法)，先停下來", detail: "建議點紅色節點看截圖，用白話補充線索再讓 AI 修。" });
+          return failResponse({ node: failedNode });
+        }
+        steps.push({ kind: "run", title: "AI 回了試過的修法，要求它換方向再想一次" });
+        continue;
+      }
+      seenEditFingerprints.add(computeEditFingerprint(edits));
+      consecutiveRepeats = 0;
+      // 通過震盪檢查才真的套用(e.after 已是合併+schema過濾+型別驗證過的完整 config，直接重套是冪等的)
+      applyNodeConfigEdits(id, edits.map((e) => ({ nodeId: e.nodeId, config: e.after })));
+      for (const e of edits) editedNodeIds.add(e.nodeId);
     }
-    seenEditFingerprints.add(fingerprint);
-    consecutiveRepeats = 0;
-
-    // 通過震盪檢查才真的套用(e.after 已是合併+schema過濾+型別驗證過的完整 config，直接重套是冪等的)
-    applyNodeConfigEdits(id, edits.map((e) => ({ nodeId: e.nodeId, config: e.after })));
-    for (const e of edits) editedNodeIds.add(e.nodeId);
     fixCountByNode[failedNode] = triedThisNode + 1;
     totalFixes++;
     steps.push({
       kind: "fix",
-      title: `AI 修了：${edits.map((e) => `「${e.nodeLabel}」`).join("、")}`,
+      title: structure ? "AI 調整了流程步驟" : `AI 修了：${edits.map((e) => `「${e.nodeLabel}」`).join("、")}`,
       nodeLabel: labelOf(failedNode),
       detail: explanation,
     });
@@ -468,8 +547,26 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
     result = await runWorkflowAndWait(id, triggerParams, { headed, timeoutMs: Math.max(remainingMs(), 10_000), dryRun });
     // 修好上游後這輪跑到了「等人簽核」＝簽核之前全通過，收工(不能把等簽核當失敗繼續修)
     if (result.status === "waiting") {
-      for (const e of edits) verifiedFixes.set(e.nodeId, e.after); // 這批修改被驗證有效(跑到簽核了)，不能回滾
+      for (const e of edits) verifiedFixes.set(e.nodeId, { config: e.after, label: e.nodeLabel }); // 這批修改被驗證有效(跑到簽核了)，不能回滾
       return waitingResponse();
+    }
+
+    // 官方整合升級後第一次少的是使用者自己的 OAuth/權限，AI 不可能替他補。這不是「升級錯了」：
+    // 把正確的新節點還原成脆弱的舊瀏覽器點擊，會讓使用者每次按修復都回到原點。保留這一個
+    // 可證明的遷移，並直接以人話指出下一步；其他模型猜測的結構修改依舊維持安全回滾。
+    if (structure && preserveStructureOnHumanSetup && result.status === "failed") {
+      const categoryAfterMigration = classifyFailure(result.error ?? "").category;
+      if (categoryAfterMigration === "credentials" || categoryAfterMigration === "configuration") {
+        pendingStructureBefore = null;
+        steps.push({
+          kind: "human",
+          title: "已換成較可靠的官方 Google 簡報步驟，還差一次授權",
+          nodeLabel: labelOf(failedNode),
+          detail: result.error ?? "請依對話中的設定卡完成 Google 一次性授權後，再按一次測試。",
+          runId: result.runId,
+        });
+        return NextResponse.json({ ok: false, needsHuman: true, node: failedNode, steps });
+      }
     }
 
     // 迴圈記憶：這輪改了什麼、結果如何——下一輪修復的 prompt 會帶上
@@ -480,7 +577,10 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
         : result.failedNode === failedNode
           ? `同一步仍失敗：${(result.error ?? "").slice(0, 120)}`
           : `這步過了，換「${labelOf(result.failedNode)}」失敗：${(result.error ?? "").slice(0, 100)}`;
-    attemptHistory.push({ action: summarizeEdits(edits), outcome: outcomeDesc });
+    attemptHistory.push({
+      action: structure ? "已把舊瀏覽器操作換成官方 Google 簡報步驟" : summarizeEdits(edits),
+      outcome: outcomeDesc,
+    });
 
     // 這一輪的修復讓流程前進了(整條成功、或失敗點移到後面別的節點)= 這批修改被實際執行驗證有效，
     // 記下來，即使最後整條沒全綠也不能被 restoreIfEdited 回滾掉。
@@ -488,7 +588,7 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
     // 記進學習庫會在往後每次修復裡以「優先參考」身分誤導模型(污染會自我繁殖)。
     const advanced = result.status === "success" || (result.failedNode && result.failedNode !== failedNode);
     if (advanced) {
-      for (const e of edits) verifiedFixes.set(e.nodeId, e.after);
+      for (const e of edits) verifiedFixes.set(e.nodeId, { config: e.after, label: e.nodeLabel });
     }
     if (result.status === "success" && result.varWarnings === 0) {
       // 學習庫延後寫入：等語意驗收也通過才 flush——「全綠但輸出是垃圾」的修復記進去會污染往後每次修復
@@ -524,7 +624,7 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
         title: "流程能跑，但算出來的結果跟你給的正確答案還是對不上",
         detail: `對答案檢查：${lastAnswerMismatch.slice(0, 200)}。修了幾輪仍對不上，建議點那個節點用白話補充「應該怎麼抓/怎麼算」再讓 AI 修，或親自核對一下資料。`,
       });
-      return NextResponse.json({ ok: true, steps, runId: result.runId, answerMismatch: lastAnswerMismatch });
+      return NextResponse.json({ ok: false, needsReview: true, steps, runId: result.runId, answerMismatch: lastAnswerMismatch });
     }
     if (lastSuspicion) {
       // 全綠、但語意驗收修了幾輪還是覺得可疑——流程能跑就交還給使用者，但把疑點講明白，
@@ -534,7 +634,7 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
         title: "流程能跑通了，但建議你親自看一眼結果",
         detail: `AI 驗收檢查覺得結果可疑：${lastSuspicion.slice(0, 200)}。如果你看過結果沒問題，就可以按「設為正式」；有問題的話點該節點用白話說明，讓 AI 再修。`,
       });
-      return NextResponse.json({ ok: true, steps, runId: result.runId, suspicion: lastSuspicion });
+      return NextResponse.json({ ok: false, needsReview: true, steps, runId: result.runId, suspicion: lastSuspicion });
     }
     for (const f of pendingRecordFixes) recordFix(f);
     // 分支覆蓋提醒:成功一次只證明其中一條路能走——沒走過的分支(拒絕/超標/失敗備案)講清楚,
@@ -549,8 +649,12 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
         coverageNote = "所有分支出口都被實際走過(完整驗證)。";
       }
     } catch { /* 覆蓋率只是加分資訊,算不出來不擋收工 */ }
-    steps.push({ kind: "done", title: "完成！這條流程已經測到會跑了", detail: `確認結果沒問題後，可以按「設為正式」把它固定下來。${coverageNote}` });
-    return NextResponse.json({ ok: true, steps, runId: result.runId });
+    if (usedSimulatedInput) {
+      steps.push({ kind: "done", title: "流程接線與基本邏輯已通過，但尚未用你的真實資料驗證", detail: `這輪有使用系統產生的測試資料，所以只能確認步驟能接起來，不能當成正式驗收。請用一份真實但可安全測試的資料再跑一次；在那之前不能直接設為正式。${coverageNote}` });
+      return NextResponse.json({ ok: true, canPromote: false, validationLevel: "simulated", steps, runId: result.runId });
+    }
+    steps.push({ kind: "done", title: "完成！已用真實資料完成只讀驗證", detail: `這是安全排練：讀取與計算都是真的；寫入 Google Sheet、寄信、發通知都被攔住，沒有真的送出。核對上面列出的結果與計畫寫入內容沒問題後，才可以設為正式或按「▶ 執行」真的寫入。${coverageNote}` });
+    return NextResponse.json({ ok: true, canPromote: true, validationLevel: "real-readonly", steps, runId: result.runId });
   }
 
   steps.push({

@@ -15,7 +15,7 @@ function workflow(nodes: Workflow["nodes"]): Workflow {
   };
 }
 
-test("正式執行前只預檢需要 v2 能力的 Sheet 更新節點", () => {
+test("正式執行前只預檢需要 v3 能力的 Sheet 更新節點", () => {
   const targets = collectExternalPreflightTargets(workflow([
     { id: "read", type: "google-sheet-read", label: "讀取", position: { x: 0, y: 0 }, config: { sheetUrl: "https://docs.google.com/spreadsheets/d/x" } },
     { id: "append", type: "google-sheet-append", label: "新增列", position: { x: 0, y: 0 }, config: { scriptUrl: "https://script.google.com/macros/s/append/exec" } },
@@ -24,7 +24,7 @@ test("正式執行前只預檢需要 v2 能力的 Sheet 更新節點", () => {
   assert.deepEqual(targets, [{
     nodeId: "update",
     nodeLabel: "更新週報",
-    kind: "google-sheet-v2",
+    kind: "google-sheet-v3",
     endpoint: "https://script.google.com/macros/s/v2/exec",
   }]);
 });

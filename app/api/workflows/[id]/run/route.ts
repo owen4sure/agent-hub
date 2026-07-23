@@ -21,6 +21,22 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (body.headed !== undefined && typeof body.headed !== "boolean") {
     return NextResponse.json({ error: "headed 必須是 true 或 false" }, { status: 400 });
   }
+  // 「只測試,不更改任何資料」勾選:明確要求安全排練才傳 true(只認 true,方向是「要求更少影響」所以安全)。
+  // 部分執行(框選/從某步開始)預設是真的執行——使用者拍板「圈起來執行的就執行到底,除非我有說只測試」。
+  if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
+    return NextResponse.json({ error: "dryRun 必須是 true 或 false" }, { status: 400 });
+  }
+  // 「從這一步開始測」：只跑指定節點+它的下游，前面的步驟沿用最近一次結果或跳過(engine 的 startAtNodeId)
+  if (body.startAtNodeId !== undefined && (typeof body.startAtNodeId !== "string" || !wf.nodes.some((n) => n.id === body.startAtNodeId))) {
+    return NextResponse.json({ error: "起點節點不在這條流程裡(流程可能剛被改過)，請重新整理頁面再試" }, { status: 400 });
+  }
+  // 「只測選取的幾步」：畫布框選的節點集合(像 n8n)，只跑這幾格，其餘沿用最近結果或跳過
+  if (body.onlyNodeIds !== undefined && (
+    !Array.isArray(body.onlyNodeIds) || body.onlyNodeIds.length === 0 ||
+    !body.onlyNodeIds.every((nid: unknown) => typeof nid === "string" && wf.nodes.some((n) => n.id === nid))
+  )) {
+    return NextResponse.json({ error: "選取的步驟不在這條流程裡(流程可能剛被改過)，請重新整理頁面再試" }, { status: 400 });
+  }
   if (body.expectedGraphFingerprint !== undefined && (typeof body.expectedGraphFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(body.expectedGraphFingerprint))) {
     return NextResponse.json({ error: "安全預覽版本識別碼格式不正確" }, { status: 400 });
   }
@@ -66,6 +82,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       confirmedPreview: Boolean(replay),
       secretOverrides: replay?.secretOverrides,
       nodeConfigOverrides: replay?.nodeConfigOverrides,
+      startAtNodeId: body.startAtNodeId,
+      onlyNodeIds: body.onlyNodeIds,
+      dryRun: body.dryRun === true,
     });
     return NextResponse.json({ runId });
   } catch (err) {

@@ -1,6 +1,6 @@
 import type { NodeDefinition } from "../types";
 import { PermanentError } from "../types";
-import { cfgStr } from "../nodeHelpers";
+import { assertNoUnresolvedVars, cfgStr } from "../nodeHelpers";
 
 /**
  * 多路分流節點：把「請假→走A、報支→走B、其他→走C」這種多路分流做成一個節點，
@@ -46,7 +46,7 @@ export const switchNode: NodeDefinition = {
   category: "logic",
   label: "多路分流",
   description:
-    "依一個值走不同的路(三條以上的分流)，例如「請假→走A、報支→走B、其他→走C」。比巢狀的條件判斷清楚很多。下游連線的 fromPort 直接寫選項文字(如「請假」)，沒比對到的走「其他」。",
+    "依一個值走不同的路(三條以上的分流)，例如「請假→走A、報支→走B、其他→走C」。比巢狀的條件判斷清楚很多。下游連線的「fromPort」直接寫選項文字(如「請假」)，沒比對到的走「其他」。",
   icon: "🧭",
   outputs: "matched(比對到的選項，沒比對到=其他), switchValue(被分類的原始值)",
   configSchema: [
@@ -56,6 +56,10 @@ export const switchNode: NodeDefinition = {
   retryable: false,
   async execute(ctx) {
     const value = cfgStr(ctx, "value");
+    // 分類值沒解析到=必然走錯路(會默默落到「其他」把真正的問題蓋掉)，老實失敗並講清楚下一步。
+    // 注意:查的是「value」這個設定欄位本身的原始字串，不是上面已經解析完的 value——上游資料
+    // 本身若剛好含有字面 "{{...}}" 文字，解析完的值會巧合地符合樣子，但那不是沒解析到。
+    assertNoUnresolvedVars(ctx, "value", "分流「要分類的值」");
     const cases = parseSwitchCases(cfgStr(ctx, "cases"));
     if (cases.length === 0) throw new PermanentError("多路分流沒有設定任何選項——請在「分流選項」填要分幾路(一行一個)");
     const matched = pickSwitchCase(value, cases);

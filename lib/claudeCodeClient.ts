@@ -65,7 +65,10 @@ export function claudeCodeArgs(opts: { hasReadPaths: boolean; effort?: ClaudeCod
   const args = [
     "-p",
     "--model", "sonnet",
-    "--safe-mode",
+    // 目前安裝的 CLI(2.1.89)沒有 --safe-mode 這個選項("unknown option"，每次呼叫都 exit 1、
+    // 整個 Claude Code 路徑必然失敗)——實際的安全邊界已經由下面的 --tools/--allowedTools 限制
+    // (無附件時零工具、有附件時僅唯讀 Read/Glob/Grep，Bash/Edit/Write 永遠不在允許清單內)
+    // 加上 --no-session-persistence/--disable-slash-commands/cwd 隔離做到，不依賴這個不存在的旗標。
     "--no-session-persistence",
     "--disable-slash-commands",
     "--no-chrome",
@@ -85,8 +88,10 @@ export function claudeCodeArgs(opts: { hasReadPaths: boolean; effort?: ClaudeCod
 }
 
 // 「還在做事就一直等它做完」的心跳計時:只要 Claude Code 有任何輸出(串流逐字/工具往返)就重置。
-// 只有「完全靜止」這麼久(genuinely 卡死/沒回應)才收掉——不是用固定牆(時間到就砍,把還在跑的也一起殺了)。
-const IDLE_MS = 180_000; // 3 分鐘完全沒動靜 = 視為卡死(涵蓋「等第一個 token」的慢啟動,含訂閱接近上限被降速)
+// 但「第一個字都沒有、畫面卻卡三分鐘」對使用者而言就是壞掉——真實測試已驗證這種情況會發生。
+// CLI 正常啟動會很快送出 stream-json 事件；45 秒仍完全靜止就停止並交給上層改走下一個模型/回報，
+// 而非讓修復按鈕看起來在跑、實際沒有任何工作證據。持續有心跳的長任務完全不受這個值限制。
+const IDLE_MS = 45_000;
 // 絕對上限只是防「一直吐東西卻永遠不結束」的失控行程,正常路徑永遠碰不到——真正的守門是上面的閒置心跳。
 const ABSOLUTE_MAX_MS = 20 * 60_000;
 

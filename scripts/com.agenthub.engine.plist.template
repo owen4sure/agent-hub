@@ -19,6 +19,8 @@
 
   <key>EnvironmentVariables</key>
   <dict>
+    <key>HOME</key>
+    <string>__HOME_DIR__</string>
     <key>PATH</key>
     <string>/usr/local/bin:/usr/bin:/bin:__NODE_DIR__</string>
   </dict>
@@ -29,8 +31,8 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>__WORKDIR__/data/engine.log</string>
+  <string>__LOG_DIR__/engine.log</string>
   <key>StandardErrorPath</key>
-  <string>__WORKDIR__/data/engine.error.log</string>
+  <string>__LOG_DIR__/engine.error.log</string>
 </dict>
 </plist>

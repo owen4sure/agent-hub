@@ -3,9 +3,9 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { getDb } from "../db";
 import { getChatAttachment } from "../chatAttachments";
-import { getWorkflowSecrets } from "../settingsStore";
+import { getWorkflowSecretsForKeys } from "../settingsStore";
 import { resolveParams } from "../relativeDate";
-import { getWorkflow } from "./store";
+import { deriveRequiresSecrets, getWorkflow } from "./store";
 import { runWorkflowAndWait } from "./engine";
 import { dryRunSkipKind, DRY_RUN_SKIPPED_WRITES_KEY, type DryRunSkippedWrite } from "./dryRun";
 import { formatPlannedWriteLines, humanizePreviewPair } from "./plainLanguage";
@@ -279,8 +279,13 @@ export async function runWorkflowPreview(
     }
 
     // 本輪對話提供的只讀網址算「這次驗證已具備」；但寫入網址仍要如實列為正式執行前缺少。
-    const effectiveSecrets = { ...getWorkflowSecrets(workflowId), ...(secretOverrides ?? {}) };
-    const missingSecrets = (wf.requiresSecrets ?? [])
+    const requiredSecrets = deriveRequiresSecrets(wf) ?? [];
+    const requiredKeys = new Set(requiredSecrets.map((field) => field.key));
+    const effectiveSecrets = {
+      ...getWorkflowSecretsForKeys(workflowId, requiredKeys),
+      ...Object.fromEntries(Object.entries(secretOverrides ?? {}).filter(([key]) => requiredKeys.has(key))),
+    };
+    const missingSecrets = requiredSecrets
       .filter((field) => !String(effectiveSecrets[field.key] ?? "").trim())
       .map((field) => ({ key: field.key, label: field.label }));
 

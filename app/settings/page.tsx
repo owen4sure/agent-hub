@@ -38,6 +38,9 @@ export default function SettingsPage() {
   const [prefs, setPrefs] = useState("");
   const [prefsSaved, setPrefsSaved] = useState("");
   const [prefsMsg, setPrefsMsg] = useState(false);
+  const [effort, setEffort] = useState<"low" | "medium" | "high">("high");
+  const [effortSaved, setEffortSaved] = useState<"low" | "medium" | "high">("high");
+  const [effortMsg, setEffortMsg] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -47,6 +50,9 @@ export default function SettingsPage() {
         setHasApiKey(Boolean(d.hasApiKey));
         setPrefs(d.builderPrefs ?? "");
         setPrefsSaved(d.builderPrefs ?? "");
+        const loadedEffort = (d.builderEffort === "low" || d.builderEffort === "medium" || d.builderEffort === "high") ? d.builderEffort : "high";
+        setEffort(loadedEffort);
+        setEffortSaved(loadedEffort);
       } catch {
         setLoadError(true);
       }
@@ -117,6 +123,22 @@ export default function SettingsPage() {
     } catch (error) {
       setSavedError(true);
       setSavedMsg(error instanceof Error ? error.message : "偏好儲存失敗");
+      setTimeout(() => setSavedMsg(null), 3000);
+    }
+  }
+  async function saveEffort(next: "low" | "medium" | "high") {
+    setEffort(next);
+    try {
+      const response = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ builderEffort: next }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error((data as { error?: string }).error ?? "推理力度儲存失敗");
+      setEffortSaved(next);
+      setEffortMsg(true);
+      setTimeout(() => setEffortMsg(false), 2000);
+    } catch (error) {
+      setEffort(effortSaved);
+      setSavedError(true);
+      setSavedMsg(error instanceof Error ? error.message : "推理力度儲存失敗");
       setTimeout(() => setSavedMsg(null), 3000);
     }
   }
@@ -239,7 +261,7 @@ export default function SettingsPage() {
               />
             ) : (
               <select value={testModel} onChange={(e) => setTestModel(e.target.value)} className="input" style={{ width: "auto" }}>
-                {MODELS.map((m) => {
+                {MODELS.filter((m) => (KNOWN_WORKING_MODELS as readonly string[]).includes(m) || isClaudeCodeModel(m)).map((m) => {
                   const working = (KNOWN_WORKING_MODELS as readonly string[]).includes(m) || isClaudeCodeModel(m);
                   const vision = supportsVision(m);
                   const captcha = supportsCaptchaVision(m);
@@ -283,10 +305,32 @@ export default function SettingsPage() {
         </div>
       </section>
 
+      <section className="card p-5 space-y-3">
+        <div>
+          <h2 className="font-medium">🧭 AI 推理力度</h2>
+          <p className="text-sm muted mt-0.5">
+            建立/修改流程、產生自訂程式碼時，本機 Claude Code 要想多深。力度愈高，愈能想清楚複雜或含糊的需求，但單輪回覆會等比較久；
+            力度愈低，回覆比較快，但遇到規則沒涵蓋到的講法比較容易理解錯。建議維持「高」——正確建好或修好比省那幾秒更重要。
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {(["low", "medium", "high"] as const).map((level) => (
+            <button
+              key={level}
+              onClick={() => saveEffort(level)}
+              className={effort === level ? "btn btn-primary" : "btn btn-ghost"}
+            >
+              {level === "low" ? "低(較快)" : level === "medium" ? "中" : "高(建議)"}
+            </button>
+          ))}
+          {effortMsg && <span className="text-sm" style={{ color: "var(--green)" }}>已儲存，下次跟 AI 對話就生效</span>}
+        </div>
+      </section>
+
       <section className="space-y-3">
         <div>
           <h2 className="font-medium">共用帳密</h2>
-          <p className="text-sm muted mt-0.5">同一個帳密只要填一次，所有用到它的 workflow 都會自動套用。要用不同帳密的流程，會單獨列成另一個欄位。</p>
+          <p className="text-sm muted mt-0.5">同一個帳密只要填一次，使用這個欄位的流程會自動套用。內容會加密保存在這台電腦；每條流程執行時只拿得到自己真的需要的欄位。要用不同帳密的流程，會單獨列成另一個欄位。</p>
         </div>
         {fields.length === 0 && <p className="text-sm muted">目前沒有需要帳密的 workflow。</p>}
         {fields.length > 0 && (

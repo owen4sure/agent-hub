@@ -67,8 +67,11 @@ export async function POST(req: Request) {
       if (!scriptUrl || scriptUrl.length > 2_000) {
         return NextResponse.json({ ok: false, message: "請先貼上這個寫入步驟的 Apps Script /exec 網址" });
       }
-      await probeSheetScript(scriptUrl);
-      return NextResponse.json({ ok: true, message: "✅ 網址、權限與腳本版本都正確；這次只檢查，沒有寫入任何資料。" });
+      const probed = await probeSheetScript(scriptUrl);
+      // 這個檢查驗不出「綁定的是不是正確的那份試算表」——把目前綁定的名稱一起顯示，
+      // 讓使用者當下就能核對是不是自己要的那份，不用等到真的寫入失敗才發現綁錯。
+      const boundNote = probed.spreadsheetName ? `目前綁定的試算表是「${probed.spreadsheetName}」——請確認這是你要寫入的那份。` : "";
+      return NextResponse.json({ ok: true, message: `✅ 網址、權限與腳本版本都正確；這次只檢查，沒有寫入任何資料。${boundNote}` });
     }
 
     if (action === "imap-test") {

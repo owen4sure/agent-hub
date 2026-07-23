@@ -10,6 +10,50 @@ import { isClaudeCodeModel } from "../claudeCodeClient";
 import { VISION_MODELS, supportsCaptchaVision } from "../models";
 import { PermanentError, type NodeContext } from "./types";
 
+/**
+ * 通知/寄信類節點缺帳密時的統一指引措辭——以前 sendEmail.ts 跟 notify.ts 的 telegram/slack/line
+ * 各自手寫了大同小異的句子(有的說「最下面的」、有的沒有；標點與斷句也不完全一樣)，只改其中一處
+ * 容易讓其他幾個地方顯得不一致。統一成一個地方維護，往後只需要改一次；cardName 是設定頁上那張
+ * 卡片的名稱(例如「Email」「Telegram」「Slack」「LINE」)。
+ */
+export function needsSetupHint(cardName: string): string {
+  return `請到「設定」頁最下面的「通知串接」區，找到「${cardName}」卡片照教學一步一步填好(有「測試發送」可以先驗證)`;
+}
+
+/**
+ * 找出「原始設定字串」裡真的沒解析到的 {{token}}(只看原始設定,不是解析後的值)。
+ * 回傳第一個沒對應到 input/vars/secrets 的 token 名稱，都有對應就回 null。
+ * 跟 cfgStr 共用同一份判準：只掃「原始設定」裡的 {{}}，不能對「解析完的值」再掃一次——
+ * 上游資料本身若剛好含有字面 "{{...}}" 文字(例如信件主旨、網頁擷取內容)，那不是模板 token，
+ * 對解析後的值重新掃描會把這種巧合誤判成「沒解析到」。
+ */
+function findUnresolvedToken(rawText: string, ctx: NodeContext): string | null {
+  const leftover = [...rawText.matchAll(/\{\{\s*([^}]+)\s*\}\}/g)].find((m) =>
+    /^\{\{\s*[^}]+\s*\}\}$/.test(resolveTemplate(m[0], ctx)),
+  );
+  return leftover ? leftover[1].trim() : null;
+}
+
+/**
+ * 分流/條件這類「值決定走哪條路」的欄位,拿到字面 {{欄位}} 必須老實失敗——默默比對失敗會走錯
+ * 分支還全綠,把「上游沒提供資料」偽裝成別的結論(踩過:部分執行沒框到生產 fileType 的上游,
+ * switch 收到字面 {{fileType}} 落到「其他」分支發「檔案格式不支援」通知,使用者以為檔案有問題、
+ * 對話 AI 也查不出原因)。錯誤訊息要直接講清楚下一步怎麼做。
+ * 注意:一定要用 ctx.config 的原始設定字串查(不能拿 cfgStr 解析完的值再掃一次)——上游資料本身
+ * 剛好含有字面 "{{...}}" 文字(例如信件主旨、網頁擷取內容)時，解析完的值會「巧合地」符合
+ * {{...}} 的樣子，但那並不是沒解析到，對解析後的值重新掃描會把這種巧合誤判成上游沒給資料。
+ */
+export function assertNoUnresolvedVars(ctx: NodeContext, key: string, what: string): void {
+  const rawText = String(ctx.config[key] ?? "");
+  const token = findUnresolvedToken(rawText, ctx);
+  if (!token) return;
+  throw new PermanentError(
+    `${what}拿到的不是實際資料,而是字面文字「${rawText.slice(0, 80)}」——上游沒有提供「${token}」這個欄位。` +
+    `常見原因:①這次是部分執行(只測選取的幾步/從某步開始測),沒把「產出 ${token} 的那一步」一起執行——請把它一起框選,或直接對它按「從這一步開始測」;` +
+    `②產出它的上游步驟失敗了、或從未成功執行過。問題不在這個節點的設定,請先讓上游真的跑出這個欄位。`,
+  );
+}
+
 /** 模板值轉字串：物件/陣列用 JSON 呈現——String() 對物件會輸出無意義的 [object Object] */
 function stringify(v: unknown): string {
   if (v !== null && typeof v === "object") {
@@ -22,26 +66,51 @@ function stringify(v: unknown): string {
   return String(v);
 }
 
+/** {{token}} 的查值邏輯，resolveTemplate 與 resolveJsonSafeTemplate 共用：找不到回 undefined(呼叫端決定怎麼呈現原文)。 */
+function lookupTemplateValue(key: string, ctx: NodeContext): string | undefined {
+  // 先找 input（上游資料，支援 nodeId.field 或直接 field）
+  if (key.includes(".")) {
+    const [head, ...rest] = key.split(".");
+    const source =
+      (ctx.input[head] as Record<string, unknown> | undefined) ??
+      (ctx.vars[head] as Record<string, unknown> | undefined);
+    if (source && typeof source === "object") {
+      const v = rest.reduce<unknown>((acc, k) => (acc as Record<string, unknown>)?.[k], source);
+      if (v !== undefined) return stringify(v);
+    }
+  }
+  if (key in ctx.input) return stringify(ctx.input[key]);
+  if (key in ctx.vars) return stringify(ctx.vars[key]);
+  if (key in ctx.secrets) return ctx.secrets[key];
+  return undefined;
+}
+
 /** 解析 config 值裡的 {{...}}：{{secretKey}} / {{nodeId.field}} / {{var}} / 相對日期已在引擎層先處理過 */
 export function resolveTemplate(value: string, ctx: NodeContext): string {
   return value.replace(/\{\{\s*([^}]+)\s*\}\}/g, (_, expr: string) => {
     const key = expr.trim();
-    // 先找 input（上游資料，支援 nodeId.field 或直接 field）
-    if (key.includes(".")) {
-      const [head, ...rest] = key.split(".");
-      const source =
-        (ctx.input[head] as Record<string, unknown> | undefined) ??
-        (ctx.vars[head] as Record<string, unknown> | undefined);
-      if (source && typeof source === "object") {
-        const v = rest.reduce<unknown>((acc, k) => (acc as Record<string, unknown>)?.[k], source);
-        if (v !== undefined) return stringify(v);
-      }
-    }
-    if (key in ctx.input) return stringify(ctx.input[key]);
-    if (key in ctx.vars) return stringify(ctx.vars[key]);
-    if (key in ctx.secrets) return ctx.secrets[key];
+    const found = lookupTemplateValue(key, ctx);
     // 找不到就把原本的 {{...}} 留著(不要默默清成空字串，免得變成空選擇器之類的怪錯誤)
-    return `{{${key}}}`;
+    return found ?? `{{${key}}}`;
+  });
+}
+
+/**
+ * 給「值本身就是 JSON 文字」的欄位用(目前只有子流程呼叫的 paramsJson)。跟 resolveTemplate 的差異：
+ * resolveTemplate 是給網址/檔名/prompt 這類純文字欄位設計的，直接把 {{token}} 換成原始文字；但
+ * paramsJson 這欄位的值本身要被 JSON.parse()，若替換進去的上游資料剛好含換行/引號/反斜線這些
+ * JSON 特殊字元，沒跳脫就會讓整個 JSON 壞掉，拋出使用者看不懂的底層錯誤(真實踩過：子流程間傳遞
+ * 一段多行報表內容，收到「不是合法 JSON 物件：Bad control character in string literal」，使用者
+ * 完全不知道問題出在自己的資料裡有換行——這是子流程間傳遞多行文字內容的常見情境，不是使用者填錯)。
+ * 用 JSON.stringify(...).slice(1,-1) 取跳脫後、不含外層引號的內容再替換，讓 {{token}} 出現在
+ * JSON 字串值內部時，換行/引號/反斜線都會被正確跳脫成合法的 JSON 字串片段。
+ */
+export function resolveJsonSafeTemplate(value: string, ctx: NodeContext): string {
+  return value.replace(/\{\{\s*([^}]+)\s*\}\}/g, (whole, expr: string) => {
+    const key = expr.trim();
+    const found = lookupTemplateValue(key, ctx);
+    if (found === undefined) return whole;
+    return JSON.stringify(found).slice(1, -1);
   });
 }
 
@@ -61,12 +130,10 @@ export function cfgStr(ctx: NodeContext, key: string, fallback = ""): string {
   // 讓「讓 AI 修」有線索)，然後正常回傳、保留字面的 {{X}}——若那真的是要輸出的字面文字就無妨。
   // 只檢查原始設定裡的 token。若 {{error}} 被替換成一段剛好提到 {{filePath}} 的上游資料，
   // 後者不是這個 config 的模板，不能對替換後全文再掃一次製造假警告。
-  const leftover = [...rawText.matchAll(/\{\{\s*([^}]+)\s*\}\}/g)].find((m) =>
-    /^\{\{\s*[^}]+\s*\}\}$/.test(resolveTemplate(m[0], ctx)),
-  );
-  if (leftover) {
+  const leftoverToken = findUnresolvedToken(rawText, ctx);
+  if (leftoverToken) {
     ctx.log(
-      `設定「${key}」裡的 {{${leftover[1].trim()}}} 沒對應到上游資料(input/vars/secrets 都找不到)。若這是要輸出的字面文字可忽略；若是想引用上游欄位，請確認上游有輸出這個欄位、或欄位名稱是否兜對。`,
+      `設定「${key}」裡的 {{${leftoverToken}}} 沒對應到上游資料(input/vars/secrets 都找不到)。若這是要輸出的字面文字可忽略；若是想引用上游欄位，請確認上游有輸出這個欄位、或欄位名稱是否兜對。`,
     );
   }
   return resolved;
@@ -76,6 +143,13 @@ export function cfgNum(ctx: NodeContext, key: string, fallback = 0): number {
   const s = cfgStr(ctx, key, String(fallback));
   const n = Number(s);
   return Number.isFinite(n) ? n : fallback;
+}
+
+/** boolean 型 config：checkbox 存的是真的 boolean，withSchemaDefaults 補的預設值是字串，兩種都要認得 */
+export function cfgBool(ctx: NodeContext, key: string, fallback = false): boolean {
+  const raw = ctx.config[key];
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  return raw === true || raw === "true";
 }
 
 export function makeClient(ctx: NodeContext, timeoutMs = 25_000): OpenAI {

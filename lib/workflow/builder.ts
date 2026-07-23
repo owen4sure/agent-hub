@@ -7,24 +7,29 @@ import { z } from "zod";
 import { listNodeDefsForAI, getNodeDef } from "./registry";
 import { lintGraph, lintVarRefWarnings, validateConfigTypes } from "./graphLint";
 import { DATE_TOKENS } from "../relativeDate";
-import { getBuilderPrefs } from "../settingsStore";
+import { getBuilderPrefs, getBuilderEffort } from "../settingsStore";
 import { autoLayout } from "./layout";
 import { callAIWithRetry } from "../aiRetry";
 import { extractJsonObject, stripCodeFences } from "../jsonExtract";
 import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../claudeCodeClient";
 import { communityRefsSection } from "../communityIndex";
-import { checkRequirements, unmetFeedback, checklistText } from "./requirementCheck";
+import { checkRequirements, unmetFeedback, checklistText, isManualFileUploadRequested, hasCustomCodeFileReader } from "./requirementCheck";
 import { getSharedSecrets } from "../settingsStore";
 import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
 import { materializeChatAttachment } from "../chatAttachments";
 import { KNOWN_WORKING_MODELS, MODELS, VISION_MODELS, supportsVision } from "../models";
 import { plainLanguage } from "./plainLanguage";
 import { parseCron } from "../cron";
+import { planGraphStructureEdits, type GraphStructureEdits } from "./graphStructure";
 
 export type MessagePart =
   | { kind: "text"; text: string }
-  | { kind: "image"; b64: string; name?: string; mime?: string; assetId?: string }
-  | { kind: "file"; name: string; content: string; assetId?: string };
+  // role：這份附件在這次需求裡的角色(來源資料／範本／正確答案範例／SOP／要比對的另一份…)。
+  // 多檔案工作流(對帳、套版、比較兩份 Excel)少了這個線索，模型只能從檔名/內容猜，容易來源目的
+  // 顛倒。目前沒有專門的 UI 讓使用者手動標記，先用 inferAttachmentRoleHint 從當輪文字裡的白話
+  // 說法(「這是範本」「這是正確答案」…)推斷；欄位保留給未來如果要做手動標記 UI 直接寫入。
+  | { kind: "image"; b64: string; name?: string; mime?: string; assetId?: string; role?: string }
+  | { kind: "file"; name: string; content: string; assetId?: string; role?: string };
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -37,7 +42,7 @@ export type BuildResult =
   | { phase: "clarify"; message: string }
   | { phase: "answer"; message: string }
   | { phase: "ready"; message: string; nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[]; schedule?: SuggestedSchedule; autoWebhook?: boolean; onFailureWorkflow?: string }
-  | { phase: "edits"; message: string; edits: { nodeId: string; stepIndex?: number; config: Record<string, unknown> }[]; triggerParams?: ParamField[] };
+  | { phase: "edits"; message: string; edits: { nodeId: string; stepIndex?: number; config: Record<string, unknown>; label?: string }[]; triggerParams?: ParamField[]; structure?: GraphStructureEdits; schedule?: SuggestedSchedule };
 
 export interface SuggestedSchedule {
   cron: string;
@@ -45,6 +50,18 @@ export interface SuggestedSchedule {
 }
 
 export const BUILDER_MAX_OUTPUT_TOKENS = 12_000;
+
+/**
+ * 改既有圖通常只要回一小段增量 JSON；若共用 gateway 連這種請求都卡太久，繼續等不會讓答案
+ * 更完整，只會讓使用者以為 AI 又在鬼打牆。從零建圖仍保留較長時間，避免大型流程被過早切斷。
+ * 這不是總建圖上限：逾時後會立即改走備援模型／本機 Claude Code，並保留既有的驗證迴圈。
+ */
+export function builderGatewayTimeoutMs(existingGraphEdit: boolean): number {
+  // 從零建圖確實比改一個節點需要多一點時間，但「一分鐘才知道主力模型沒回」
+  // 對正在描述需求的新手仍然是失敗體驗。45 秒後交給既有備援路徑，比重送同一包
+  // prompt 更有機會收斂，也不會把使用者困在沒有資訊的處理中畫面。
+  return existingGraphEdit ? 30_000 : 45_000;
+}
 
 /** 排程在對話裡只講人話；無法對應簡易表單的進階排程也不把 cron 語法露給使用者。 */
 export function describeSuggestedSchedule(cron: string): string {
@@ -68,6 +85,85 @@ export function describeSuggestedSchedule(cron: string): string {
   return "自訂的固定時間";
 }
 
+/** 現有流程的對話修改不該把「從零建一條流程」的長篇配方也塞進模型。 */
+export function isLikelyExistingGraphEdit(text: string): boolean {
+  const value = text.replace(/\s+/g, " ").trim();
+  return /(?:把|將).{0,120}(?:改成|改為|換成|改掉|重寫|新增|加上|刪除|移除|接到|填到|寫到)/.test(value) ||
+    /(?:請|幫我|我要|我需要|需要).{0,32}(?:修改|調整|更改|改成|改為|改掉|重寫|新增|加上|刪除|移除).{0,120}/.test(value) ||
+    /(?:不需要|不要|拿掉).{0,48}(?:節點|步驟|通知|流程|這一步)/.test(value) ||
+    // 條列式/直接陳述句(例如「代碼:agg1~agg6」「檔名也改成:X」)是真實常見的說法，沒有「把/將/請/幫我」
+    // 這種完整句型前綴，卻明明白白是在對「已經存在」的流程講具體要改的值——之前只認完整句型時，
+    // 這種說法會被誤判成「不是明確編輯」掉進更重、更慢、還會比對社群範本的從零建圖模式，使用者
+    // 明明只是要調兩個參數，畫面卻卡在「理解需求、對照社群藍圖」跑了好幾輪(實測踩過)。
+    // 只在「改成/改為/換成/改掉」這幾個最明確的「換成什麼值」字樣出現時放寬，不看前面有沒有主詞句型；
+    // 「重寫/新增/加上/刪除/移除/接到/填到/寫到」這幾個字較常單獨出現在「描述全新流程要做什麼」的
+    // 敘述裡，維持原本較嚴格的把/將前綴要求，避免真的要建新流程的需求被誤導向編輯模式。
+    /(?:改成|改為|換成|改掉)/.test(value);
+}
+
+/** 使用者明確要整條從零重做時，才允許既有流程走整圖替換；其餘一律走可驗證的增量修改。 */
+export function wantsFullGraphReplacement(text: string): boolean {
+  const value = text.replace(/\s+/g, " ").trim();
+  return /(?:整條|整個|全部|完全).{0,16}(?:流程|工作流|步驟)?.{0,20}(?:從零|重新).{0,12}(?:建立|建|做|畫)|(?:從零|重新).{0,12}(?:建立|建|做|畫).{0,20}(?:整條|整個|全部).{0,12}(?:流程|工作流|步驟)|(?:整條|整個|全部|完全).{0,20}(?:重做|重建)/.test(value);
+}
+
+/**
+ * 使用者要「外部網址打一下就能觸發」時，套用時要自動啟用 webhook 並回網址，不用叫他自己進 ⚡ 面板按啟用。
+ * 真實踩過的 bug：使用者原話是「希望能有一個外部網址，我自己在瀏覽器打開或用工具打一下就能立刻觸發同一條
+ * 流程」——原本的寫法要求「外部(工具|程式|系統|服務)」這個名詞跟「觸發」在 8 個字內緊鄰，但這種自然口語
+ * 中間常插一大段描述(打開瀏覽器、用工具打一下…)，量出來的實際距離常常超過 20 字，正規表示式配不到，
+ * `autoWebhook` 判成 false。壞的地方是：AI 自己在回覆裡仍照樣宣稱「套用後系統會直接把觸發網址顯示給你」，
+ * 使用者照做套用後卻真的看不到任何網址(因為套用路由是靠這個旗標決定要不要自動產生 webhook 網址)——
+ * 變成 AI 自己講的話兌現不了的空頭支票。改成兩個訊號(提到外部網址類名詞／提到觸發動作)各自獨立判斷、
+ * 不要求緊鄰在一起，只要同一段話裡都出現就算數，同時把「網址/連結/網頁」這些非工程師更自然的說法也
+ * 加進名詞清單(原本只有工具/程式/系統/服務這幾個偏技術的詞)。
+ */
+export function wantsAutoWebhook(text: string): boolean {
+  const t = text.replace(/\s+/g, "");
+  if (/webhook|捷徑|表單/i.test(t)) return true;
+  const mentionsExternalUrl = /(?:外部|另外|專屬|自己(?:的)?).{0,10}(?:網址|連結|網頁|url)/i.test(t);
+  const mentionsTrigger = /觸發|打進|串接|叫它跑|叫它執行|馬上跑|立刻跑|直接跑|提早/i.test(t);
+  return mentionsExternalUrl && mentionsTrigger;
+}
+
+/**
+ * extractJsonObject 抓不到合法 JSON 時，程式原本假設「模型在用白話回覆(追問/說明)」，直接把原文
+ * 丟給 plainLanguage() 白話化。這個假設在弱模型/relay 不穩時會出錯：模型有時真的「試著」輸出
+ * 結構化 JSON(phase:"ready" 附節點清單)卻寫壞格式(欄位名打錯、值忘了加引號、用了非預期的鍵名)，
+ * 導致解析失敗——這種殘骸不是自然語言，是半成品程式碼。plainLanguage() 的白話化規則是為真人prose
+ * 設計的，套在 JSON 殘骸上只會把裡面的欄位名/大括號當成程式詞彙亂翻譯，產生比原始 JSON 更看不懂的
+ * 東西(真實踩過的殘骸："config":整理好的資料 這種語法都壞掉、混雜白話替換詞的四不像)。
+ * 用「有沒有明顯的 JSON 結構特徵」把這種情況跟真的白話回覆分開，寧可保守(漏判影響不大，
+ * 誤判會讓使用者看不到真正的白話說明)。
+ */
+export function looksLikeBrokenStructuredOutput(text: string): boolean {
+  if (/"phase"\s*:\s*"(?:ready|edits|clarify|answer)"/i.test(text)) return true;
+  if (/"(?:nodes|edges|edits|triggerParams)"\s*:\s*\[/.test(text)) return true;
+  const braceCount = (text.match(/[{}]/g) ?? []).length;
+  return braceCount >= 6 && /"[a-zA-Z_]+"\s*:/.test(text);
+}
+
+/**
+ * 驗收用的「目前有效需求」不是機械地把整段聊天串起來。
+ *
+ * - 新流程尚未有既有圖：保留所有澄清，因為每句都可能是同一份需求的補充。
+ * - 一般既有流程修改：圖本身保存了既有事實，最後一句才是本次差異；避免舊命令反過來推翻新命令。
+ * - 使用者要求整條重建後又分幾句補資料：從最後一次「重建」開始收集所有使用者訊息，不能只看最後
+ *   一句「每週一」，也不能把更早已淘汰的「不要存檔」重新當成限制。
+ */
+export function effectiveRequirementText(history: ChatMessage[], hasExistingGraph: boolean): string {
+  if (!hasExistingGraph) return userRequirementText(history);
+  let replacementStart = -1;
+  for (let i = 0; i < history.length; i++) {
+    const message = history[i];
+    if (message.role !== "user") continue;
+    if (wantsFullGraphReplacement(userRequirementText([message]))) replacementStart = i;
+  }
+  if (replacementStart >= 0) return userRequirementText(history.slice(replacementStart));
+  const lastUser = [...history].reverse().find((message) => message.role === "user");
+  return lastUser ? userRequirementText([lastUser]) : "";
+}
+
 /**
  * 使用者只丟一份 SOP／需求文件、沒有另外打字時，文件本身就是需求。
  * 有文字時，只有文字明確說「照附件／需求文件」才把檔案內容併入，避免一般資料表裡剛好出現
@@ -87,6 +183,71 @@ export function userRequirementText(history: ChatMessage[]): string {
     }
   }
   return chunks.join("\n\n").slice(0, 120_000);
+}
+
+/** 白話角色線索的實際判斷規則，供 inferAttachmentRoleHint 對「全段文字」或「單一檔名附近的窗口」共用。 */
+function matchRoleHintPattern(scope: string): string | undefined {
+  if (/範本|模板|套用這個格式|依這個(?:格式|樣式)/.test(scope)) return "使用者說這是範本／格式參考，不是要處理的原始資料";
+  if (/正確(?:的)?(?:答案|結果|範例)|標準答案/.test(scope)) return "使用者說這是正確答案／結果範例，用來核對輸出對不對";
+  if (/(?:上一版|之前|舊版)(?:的)?(?:輸出|產出|結果)/.test(scope)) return "使用者說這是先前的輸出，用來比對這次的結果";
+  if (/(?:另一份|要比對|對照|核對).{0,10}(?:資料|檔案|表)/.test(scope)) return "使用者說這是要拿來比對／對照的第二份資料";
+  if (/sop|作業流程|操作說明|操作手冊/i.test(scope)) return "使用者說這是 SOP／操作說明，不是要處理的原始資料";
+  if (/(?:原始|來源)(?:資料|檔案)|這是我要處理的資料/.test(scope)) return "使用者說這是原始來源資料";
+  return undefined;
+}
+
+/**
+ * 依標點把文字拆成分句，但保護「看起來像檔名副檔名/小數點」的英文句點(前後都是英數字，
+ * 如 data.xlsx、3.14)——真實踩過的回歸：直接用 /[。.]/ 當分句符號，會把 "data.xlsx" 從中間
+ * 切成 "data" 和 "xlsx" 兩個獨立分句，導致下一份檔名(如緊接著出現的 "report.xlsx")的敘述
+ * 被切進前一份檔名所在的分句、彼此的角色線索互相污染(第四輪外部審查抓到的解析錯誤)。
+ */
+function splitIntoClauses(text: string): string[] {
+  const PLACEHOLDER = " ";
+  const protectedText = text.replace(/([A-Za-z0-9])\.([A-Za-z0-9])/g, `$1${PLACEHOLDER}$2`);
+  return protectedText.split(/[，,。.；;\n]+/).map((c) => c.split(PLACEHOLDER).join("."));
+}
+
+/**
+ * 多檔案情境(對帳、套版、比較兩份 Excel、拿舊簡報當模板)下，附件本身沒有角色欄位，模型只能從
+ * 檔名/內容猜這份是要處理的原始資料還是範本/比對目標，容易來源目的顛倒。這裡從使用者當輪文字裡
+ * 抓常見的白話角色說法當提示——不是嚴謹分類，只是把使用者已經講出口的線索餵給模型，好過完全不給。
+ *
+ * 只有一份附件時沒有歸屬歧義，整段文字都拿來判斷(維持原本行為)。多份附件時(2026-07 第三輪外部
+ * 審查抓到的 P1：以前不管幾份附件都套用同一個猜測角色，容易把「這是範本」誤套到其實是原始資料的
+ * 另一份檔案上)，把文字依標點拆成分句，只在「有實際提到這個檔名(或去掉副檔名的主檔名)」的那個
+ * 分句裡找角色線索——使用者描述多份檔案角色時通常一句講一份(「A是原始資料，B是範本」)，用分句
+ * 而非固定字數窗口，才不會在檔名彼此距離近時互相滲透。文字裡沒有點名這份檔案時，寧可不給提示，
+ * 也不要把別份檔案的角色線索誤套過來。
+ *
+ * allFileNames(這則訊息裡全部附件的檔名)用來處理「同一分句裡同時提到好幾份檔案」的情況
+ * (使用者沒有用標點分開講，如「data.xlsx是原始資料而report.xlsx是範本」整句只有一個分句)——
+ * 這時只取「這個檔名」到「下一個其他檔名」之間的文字，不看這個檔名之前的部分，避免把前一份
+ * 檔案的角色描述文字誤套到這一份身上(第四輪外部審查抓到：report.xlsx 被誤標成原始資料，
+ * 因為分句沒被切開、matchRoleHintPattern 對整句掃描時先命中了屬於 data.xlsx 的「原始資料」)。
+ */
+export function inferAttachmentRoleHint(messageText: string, fileName?: string, totalFiles = 1, allFileNames: string[] = []): string | undefined {
+  const text = messageText.replace(/\s+/g, " ");
+  if (totalFiles <= 1 || !fileName) return matchRoleHintPattern(text);
+  const bareName = fileName.replace(/\.[^.]+$/, "");
+  const clauses = splitIntoClauses(text);
+  const otherNames = allFileNames.filter((n) => n !== fileName && n.length >= 2);
+  for (const needle of [fileName, bareName].filter((n) => n.length >= 2)) {
+    let clause = clauses.find((c) => c.includes(needle));
+    if (!clause) continue;
+    const mentionsOtherFile = otherNames.some((other) => clause!.includes(other) || clause!.includes(other.replace(/\.[^.]+$/, "")));
+    if (mentionsOtherFile) {
+      const idx = clause.indexOf(needle);
+      const laterOtherPositions = otherNames
+        .map((other) => clause!.indexOf(other))
+        .filter((pos) => pos > idx);
+      const windowEnd = laterOtherPositions.length > 0 ? Math.min(...laterOtherPositions) : clause.length;
+      clause = clause.slice(idx, windowEnd);
+    }
+    const hint = matchRoleHintPattern(clause);
+    if (hint) return hint;
+  }
+  return undefined;
 }
 
 /** 已知不會看圖的內建模型不得拿來理解截圖；自訂模型能力未知，尊重使用者設定並照常嘗試。 */
@@ -121,12 +282,15 @@ export type RuntimeContext =
       error: string;
       actualInput: Record<string, unknown> | null;
       htmlElements: string | null;
+      /** 最近一次執行的每一步實況(狀態/沿用/跳過/分支)——「全綠但走樣」時對話唯一的眼睛 */
+      trace?: string;
     }
   | {
       kind: "success";
       runId: string;
       startedAt: string;
       evidence: string;
+      trace?: string;
     };
 
 const triggerParamSchema = z.object({
@@ -176,7 +340,30 @@ const graphSchema = z.object({
 /** 模型常把表單欄位型別寫成通用 UI 名稱(file/string/integer/date)，但 Agent Hub 只有固定型別。
  * 這些是一對一、沒有語意歧義的別名，直接正規化；不為了把 file 改成 text 再跑一次完整模型呼叫。 */
 export function normalizeBuilderGraphObject(obj: Record<string, unknown>): Record<string, unknown> {
-  if (!Array.isArray(obj.triggerParams)) return obj;
+  // 排程是選填。弱模型在「沒有排程需求」時偶爾仍會吐 schedule:{}；若直接交給 zod，
+  // 整張本來可用的流程會因為少了 cron 被打回，最後只留下無用的反問。把不完整的
+  // 選填 schedule 視為沒提供；若使用者真的要求自動時間，後面的需求檢查會明確要求模型補回。
+  const rawSchedule = obj.schedule;
+  const scheduleObject = rawSchedule && typeof rawSchedule === "object" && !Array.isArray(rawSchedule)
+    ? rawSchedule as Record<string, unknown>
+    : undefined;
+  const schedule = scheduleObject && typeof scheduleObject.cron === "string" && scheduleObject.cron.trim()
+    ? rawSchedule
+    : undefined;
+  const base = rawSchedule !== undefined && !schedule
+    ? Object.fromEntries(Object.entries(obj).filter(([key]) => key !== "schedule"))
+    : obj;
+  // 「安全測試」是執行模式，不是這顆節點的永久用途。模型若把它寫進「建立簡報」節點名稱，
+  // 使用者會以為正式執行也只會測試；在不改變真正業務名稱的前提下，移除這個誤導性的尾碼。
+  const nodes = Array.isArray(base.nodes)
+    ? base.nodes.map((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+      const node = raw as Record<string, unknown>;
+      if (node.type !== "google-slides-create" || typeof node.label !== "string") return raw;
+      return { ...node, label: node.label.replace(/[（(]\s*安全測試\s*[）)]\s*$/u, "").trim() || "建立 Google 簡報" };
+    })
+    : base.nodes;
+  if (!Array.isArray(base.triggerParams)) return nodes === base.nodes ? base : { ...base, nodes };
   const aliases: Record<string, ParamField["type"]> = {
     file: "text",
     path: "text",
@@ -186,8 +373,9 @@ export function normalizeBuilderGraphObject(obj: Record<string, unknown>): Recor
     date: "date-or-token",
   };
   return {
-    ...obj,
-    triggerParams: obj.triggerParams.map((raw) => {
+    ...base,
+    nodes,
+    triggerParams: base.triggerParams.map((raw) => {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
       const p = raw as Record<string, unknown>;
       const type = typeof p.type === "string" ? aliases[p.type.trim().toLowerCase()] : undefined;
@@ -197,22 +385,108 @@ export function normalizeBuilderGraphObject(obj: Record<string, unknown>): Recor
 }
 
 /**
+ * 新手說「每次我上傳一份檔案」時，模型很常正確畫出讀檔步驟、卻漏掉一個機械式的
+ * filePath 表單欄位。這不是需要使用者回答的業務問題，也不該為此把整張可用圖打回重畫。
+ * 在已經有明確讀檔節點的前提下，補上平台固定的選檔契約並把該節點指向它。
+ * 若模型連讀檔步驟都漏了，仍交由需求檢查要求它補，絕不憑空假裝會讀檔。
+ */
+export function wireManualFileUpload(
+  nodes: WorkflowNode[],
+  triggerParams: ParamField[] | undefined,
+  requirementText: string,
+): { nodes: WorkflowNode[]; triggerParams: ParamField[] | undefined } {
+  if (!isManualFileUploadRequested(requirementText)) return { nodes, triggerParams };
+  const withFilePathParam = (): ParamField[] => {
+    const current = triggerParams ?? [];
+    const hasFilePath = current.some((field) => field.key === "filePath");
+    return hasFilePath
+      ? current
+      : [{ key: "filePath", label: "本次要處理的檔案", type: "text" as const, help: "直接選檔案即可，不用知道電腦路徑" }, ...current];
+  };
+  const pathKeyByType: Record<string, string> = {
+    "read-file": "path",
+    "pdf-read": "inputPath",
+    unzip: "inputPath",
+    "excel-process": "inputPath",
+  };
+  const reader = nodes.find((node) => pathKeyByType[node.type]);
+  if (reader) {
+    const pathKey = pathKeyByType[reader.type];
+    const wiredNodes = nodes.map((node) =>
+      node.id === reader.id ? { ...node, config: { ...node.config, [pathKey]: "{{filePath}}" } } : node,
+    );
+    return { nodes: wiredNodes, triggerParams: withFilePathParam() };
+  }
+  // custom-code 也常被用來讀上傳檔案(內建節點做不到的複雜驗證邏輯，如同時檢查多項業務規則)；
+  // 它沒有固定的「路徑」設定欄位可以塞 {{filePath}}——讀取邏輯是 codegen 依 intent 產生的程式碼，
+  // 在執行期直接讀 ctx.input.filePath，只要 triggerParams 宣告了 filePath，custom-code 就能透過
+  // ctx.input 自動拿到(鐵則 6a：上游欄位一律沿整條鏈往下傳)，不需要、也無法像內建節點那樣硬塞 config。
+  // 用 hasCustomCodeFileReader 判斷「這是不是讀檔用的 custom-code」，跟 checkRequirements 共用同一個
+  // 判斷式，避免這裡覺得已經處理好、驗收那邊卻認不得，兩邊各自認定不一致。
+  if (!hasCustomCodeFileReader(nodes)) return { nodes, triggerParams };
+  // 對帳/比對兩份資料這類天生需要一次上傳多個檔案的情境，AI 自己回傳的 JSON 常常已經正確宣告好
+  // 語意化的檔案參數(如 orderFile/bankFile)，custom-code 的 intent 也已經引用這些名稱。這種情況
+  // 不能再無條件塞一個沒有任何節點會用到的通用「filePath」——那只會在執行表單多長出一個使用者
+  // 不知道要不要填、填了也沒用的選檔欄。只有在 AI 完全沒宣告任何檔案類參數時，才用 filePath 兜底。
+  const alreadyHasFileParam = (triggerParams ?? []).some(
+    (field) => !field.derived && /file|path|檔|附件/i.test(`${field.key} ${field.label}`),
+  );
+  if (alreadyHasFileParam) return { nodes, triggerParams };
+  return { nodes, triggerParams: withFilePathParam() };
+}
+
+/**
+ * 真實業務數字沒有來源時，先問「資料在哪裡」是唯一必要的澄清，其他事（投影片怎麼分、
+ * 欄位怎麼對應、版面怎麼排）都應由 AI 讀完資料後自行判斷。若把這個判斷交給遠端模型，
+ * 常見結果是等一分鐘後問一長串問題，甚至先編出一份假數字；因此在送模型前確定性處理。
+ */
+export function needsBusinessDataSourceClarification(requirementText: string, hasAttachedResource: boolean): boolean {
+  // 「寫一封銷售信」不是要讀真實數字，不能因為單獨出現「銷售」就擋住建圖；只在它明確
+  // 是要計算/整理數據時才問來源。反過來，業績、營收、庫存、KPI 本身就已是資料型工作。
+  const asksOperationalMetrics = /業績|營收|開戶|庫存|KPI|績效|財務數字/i.test(requirementText)
+    || /(?:銷售|數據|數字).{0,16}(?:資料|報表|分析|彙整|統計|趨勢|簡報)|(?:資料|報表|分析|彙整|統計|趨勢|簡報).{0,16}(?:銷售|數據|數字)/i.test(requirementText);
+  if (!asksOperationalMetrics || /示範|假資料|模擬資料|測試資料|虛構/i.test(requirementText)) return false;
+  if (hasAttachedResource || isManualFileUploadRequested(requirementText)) return false;
+  // 使用者已說明由信件、網址、公開網頁或既有 Google Sheet 取得，圖可以先建立；真正不能
+  // 動工的是連「在哪裡取得」都沒有說的情況。Google Sheet 只有名稱而沒有網址仍需釐清。
+  const explicitSource = /(?:https?:\/\/|信件附件|email\s*附件|郵件附件|收件匣|webmail|上網|網路|網頁|公開資料|搜尋|Google\s*(?:Sheet|試算表)\s*(?:https?:\/\/))/i.test(requirementText);
+  // 上面那組要求「信件」「附件」緊鄰的固定詞組，但「我每天會收到一封信…裡面有一個Excel附件」
+  // 這種完全自然的白話描述，兩個詞中間隔了別的字就配不到——實測踩過的真實 bug：使用者明明已經
+  // 講清楚資料來源是信件附件，卻被誤判成「沒說在哪裡」而擋下建圖、還被塞一句跟需求無關的罐頭問句。
+  // 改成「有提到收信/信箱這類詞」且「文字裡有附件二字」就算已指明來源，不要求兩者緊鄰。
+  const impliedMailAttachment = /收到|寄來|寄給我|信箱|郵件|email|mail/i.test(requirementText) && /附件/.test(requirementText);
+  return !(explicitSource || impliedMailAttachment);
+}
+
+/**
  * 建好圖之後的「可執行性提示」:告訴使用者這條流程是「馬上能測」還是「還缺什麼」——
  * 缺帳密/自訂步驟要產碼這種事,建完當下講清楚,不要等執行失敗才發現(GPT 體檢 #7)。
  */
-function readinessNotes(nodes: WorkflowNode[]): string {
+export function readinessNotes(nodes: WorkflowNode[], secretsOverride?: Record<string, string>): string {
   const needed = new Map<string, string>();
   for (const n of nodes) {
     const def = getNodeDef(n.type);
     for (const f of def?.secretFields?.(n.config ?? {}) ?? []) needed.set(f.key, f.label);
   }
-  let secrets: Record<string, string> = {};
-  try { secrets = getSharedSecrets(); } catch { /* 測試環境沒 DB 時略過,不擋建圖 */ }
-  const missing = [...needed].filter(([k]) => !secrets[k]?.length).map(([, l]) => l);
+  // secretsOverride 只給測試用：這支函式跟正式服務共用同一份真實 __shared__ 密鑰表，
+  // 一旦真的設定過 Google OAuth(例如本機已串接過 Slides)，測試假設的「環境裡沒有密鑰」
+  // 前提就不成立，斷言會跟著真實資料庫內容漂移(踩過：本機設定過憑證後這個測試就開始誤判失敗)。
+  let secrets: Record<string, string> = secretsOverride ?? {};
+  if (!secretsOverride) {
+    try { secrets = getSharedSecrets(); } catch { /* 測試環境沒 DB 時略過,不擋建圖 */ }
+  }
+  const missing = [...needed].filter(([k]) => !secrets[k]?.length);
+  const hasGoogleSlides = nodes.some((node) => node.type === "google-slides-create" || node.type === "google-slides-refresh");
+  const googleSlidesKeys = new Set(["googleOAuthClientId", "googleOAuthClientSecret", "googleOAuthRefreshToken"]);
+  const googleSlidesMissing = hasGoogleSlides && missing.some(([key]) => googleSlidesKeys.has(key));
+  const otherMissing = missing.filter(([key]) => !googleSlidesKeys.has(key)).map(([, label]) => label);
   const pendingCode = nodes.filter((n) => n.type === "custom-code" && !String(n.config?.code ?? "").trim()).length;
   const lines: string[] = [];
-  if (missing.length) lines.push(`🔑 執行前要先到「設定」頁填:${[...new Set(missing)].join("、")}`);
-  if (pendingCode) lines.push(`⚙️ 有 ${pendingCode} 個自訂步驟會在第一次執行時自動產生程式碼(那一步會多花一點時間)`);
+  // Google Slides 的三個授權欄位由套用後同一段對話自動顯示的安全卡處理；叫小白去設定頁
+  // 找 Client ID/Secret 只會讓人填錯位置，也和「在對話完成」的產品承諾相衝突。
+  if (googleSlidesMissing) lines.push("🖼️ 套用後，這段對話會直接帶你完成 Google 簡報的第一次安全授權；不需要到設定頁找欄位。");
+  if (otherMissing.length) lines.push(`🔑 執行前要先完成這些服務的連接：${[...new Set(otherMissing)].join("、")}`);
+  if (pendingCode) lines.push(`⚙️ 有 ${pendingCode} 個計算步驟會在第一次執行時自動準備好規則（那一步會多花一點時間）`);
   return lines.length ? `\n\n下一步:\n${lines.join("\n")}` : "";
 }
 
@@ -308,7 +582,7 @@ function compactGraphJson(graph: { nodes: WorkflowNode[]; edges: WorkflowEdge[] 
 
 /**
  * 精簡對話歷史：①去掉連續重複的同一句使用者訊息(重試時常見，會一直往提示裡堆同一段長文字)；
- * ②保留第一則、最近 11 則，以及所有含附件的訊息；③附件每輪完整保留。
+ * ②保留所有使用者確認過的需求、最近助手回覆，以及所有含附件的訊息；③附件每輪完整保留。
  * 模型 API 和每次 `claude -p` 都是全新的 stateless 呼叫，絕不能假設「上一輪已看過」；過去把舊附件
  * 截成 1,200 字/一句圖片標記，正是複雜需求在澄清一輪後突然失去檔案邏輯的根因。
  * 大附件改由 assetId 在伺服器補回，Claude Code 則用 Read 工具按需讀取，兼顧正確性與提示大小。
@@ -326,11 +600,12 @@ export function trimHistoryForBuilder(history: ChatMessage[]): ChatMessage[] {
     if (prev && prev.role === m.role && m.role === "user" && signatureOf(prev) === signatureOf(m) && textOf(m).length > 0) continue;
     deduped.push(m);
   }
-  // 模型 API/Claude CLI 每一次呼叫都是全新的 stateless session。「上一輪看過附件」不代表這一輪還記得。
-  // 因此除了第一則需求與最近 11 則，所有含附件的訊息也永久釘住，不能滑出視窗或只留摘要。
+  // 模型 API/Claude CLI 每一次呼叫都是全新的 stateless session。使用者的中段修正(目的地、不可寫入、
+  // 資料對照規則)不是可丟棄的閒聊；除了最近助手回覆，所有 user 訊息與附件都要帶回。
   const keep = new Set<number>();
   if (deduped.length) keep.add(0);
   deduped.forEach((m, i) => { if ((m.parts ?? []).some((p) => p.kind === "file" || p.kind === "image")) keep.add(i); });
+  deduped.forEach((m, i) => { if (m.role === "user") keep.add(i); });
   for (let i = Math.max(0, deduped.length - 11); i < deduped.length; i++) keep.add(i);
   const recent = [...keep].sort((a, b) => a - b).map((i) => deduped[i]);
   const lastUserIdx = recent.map((m) => m.role).lastIndexOf("user");
@@ -349,8 +624,22 @@ export function trimHistoryForBuilder(history: ChatMessage[]): ChatMessage[] {
 
 function runtimeSection(rc: RuntimeContext | undefined): string {
   if (!rc) return "";
+  // 每一步實況：成功與失敗都附。「全綠但走樣」(部分執行跳過了生產資料的步驟、分流收到字面
+  // {{欄位}} 默默落到其他分支)只有這裡看得出來——沒有它,模型只能對著使用者的描述瞎猜、亂改設定。
+  const traceSection = rc.trace
+    ? `
+
+【最近一次執行的每一步實況——使用者問「為什麼走到某一步/為什麼說找不到/為什麼沒更新/為什麼都停在某節點」，先看這裡，不要猜】
+${rc.trace}
+判讀規則(重要)：
+- 「⏭ 這次沒有執行」＝那一步根本沒跑——它宣稱要輸出的欄位這次全部不存在，下游引用只會拿到字面 {{欄位}}。
+- 分流/條件節點「實際收到的分類值」若是字面 {{欄位}}＝上游沒提供那個欄位。追法：找到「宣稱輸出那個欄位的上游步驟」，看它這次的實況(被跳過？失敗？從未成功執行？)。
+- 這種情況**問題幾乎都不在節點設定，不要去改設定**。正確做法是回 {"phase":"answer"} 教使用者怎麼執行：把生產該欄位的那一步一起跑(框選時包含它、或直接對它按「▶ 從這一步開始測」)，或先完整執行一次讓每一步都有結果。
+- 上面若標了「這是一次部分執行」，被跳過的步驟是使用者自己沒選到，不是流程壞掉——要跟使用者講清楚這件事。`
+    : "";
   if (rc.kind === "success") {
-    return `
+    const evidenceSection = rc.evidence
+      ? `
 
 【這條流程最近一次成功執行的真實資料——不是範例，也不是模型猜測】
 - 執行編號：${rc.runId}
@@ -361,11 +650,13 @@ ${rc.evidence.slice(0, 24_000)}
 請直接依欄名、列名與 A1 儲存格位址判斷並完成修改；禁止再回答「我無法打開檔案／只能依你描述」、
 禁止把欄列對照工作丟回給使用者。目標 Google Sheet 現有數字可能是舊日期留下的值，不是本次來源欄位的驗證答案；
 當「列名＋語意欄名」已可對上（例如同一通路的上月↔前月、本月↔本月），就要用本次下載檔案的值完成對照，不得只因目標舊值不相等就再反問使用者。
-只有證據裡真的沒有目標分頁、資料列，或同時有兩個語意同樣合理的來源時，才具體說缺哪一份資料。`;
+只有證據裡真的沒有目標分頁、資料列，或同時有兩個語意同樣合理的來源時，才具體說缺哪一份資料。`
+      : "";
+    return `${traceSection}${evidenceSection}`;
   }
   const inputStr = rc.actualInput ? JSON.stringify(rc.actualInput, null, 2).slice(0, 800) : "(沒有記錄到)";
   const html = rc.htmlElements ? `\n這一步失敗當下頁面實際的元素(濃縮)：\n${rc.htmlElements.slice(0, 1000)}` : "";
-  return `
+  return `${traceSection}
 
 【這條流程上次執行的失敗現場——修問題請以這個為準，不要憑空猜】
 - 失敗的步驟：id="${rc.failedNodeId}"、名稱="${rc.failedNodeLabel}"
@@ -434,6 +725,22 @@ ${lines.join("\n")}
 - 使用者反映「日期/期間不會跟著選的跑」時，第一件事就是檢查節點設定裡是不是有寫死的具體日期，改回引用參數。`;
 }
 
+/** 這條流程需要的帳密欄位與是否已填(絕不含值)。使用者最常卡在「要我登入卻沒地方填帳密」——
+ * 模型看不到這份清單就會答「我沒辦法處理帳密」或亂指路;看得到就能講清楚缺哪幾個、去哪裡填。 */
+function secretsStatusSection(status?: { key: string; label: string; filled: boolean }[]): string {
+  if (!status?.length) return "";
+  const lines = status.map((s) => `- ${s.label?.includes(s.key) ? s.label : `${s.key}（${s.label || s.key}）`}：${s.filled ? "✅已填" : "❌未填"}`);
+  return `
+
+【這條流程需要的帳密欄位與狀態(只有欄位名，值看不到也不需要看)】
+${lines.join("\n")}
+- 使用者說「登入失敗/要我設密碼/沒地方填帳號」時：先看上面哪個欄位❌未填，直接告訴他缺哪幾個，並說明
+  「下面會出現安全輸入卡，直接在卡片裡填就好——值只存進本機設定，不會出現在對話、也不會傳給 AI」。
+  只要你的回答提到缺的帳密，系統就會自動在你的回答下面掛出那張卡，你不用做任何額外動作。
+- **絕對不要**說「這裡沒辦法設定帳密」，**也絕對不要**請使用者把帳密打字貼進對話——他們不需要，卡片會出現。
+- 回答裡提到帳密欄位時，用它的中文含義描述(如「Google 帳號」「示範網站密碼」)，**不要原樣輸出英文欄位名**——顯示層會把英文識別字換成看不懂的佔位文字。`;
+}
+
 /** 使用者在設定頁寫的「AI 建流程偏好」——每次建圖都注入,當成僅次於本次需求的優先指示 */
 function prefsSection(): string {
   const prefs = getBuilderPrefs().trim();
@@ -444,9 +751,31 @@ ${prefs}
 `;
 }
 
-function systemPrompt(currentGraph: string, rc?: RuntimeContext, triggerParams?: ParamField[], graph?: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }): string {
+/**
+ * 兩份系統提示(從零建圖的 systemPrompt、既有流程修改的 existingGraphEditSystemPrompt)都會收到
+ * 同一個 inheritedContext，兩邊都要用同一套「背景參考、不是待辦清單」的框架，不能只改其中一份——
+ * 真實踩過的回歸：這段文字第一次只改進 systemPrompt，existingGraphEditSystemPrompt 那份還留著舊的
+ * 「【已確認脈絡】」措辭，而使用者複製流程後的短句修改(如「改成每月排程」)恰好幾乎都會走
+ * existingGraphEditSystemPrompt(既有圖+像修改的短句)，等於真正常見的那條路完全沒被修到。
+ * 抽成共用函式，往後只會有一個地方要改。
+ */
+function inheritedContextSection(inheritedContext?: string, confirmedRules?: { text: string; confirmedAt: string }[]): string {
+  const background = inheritedContext
+    ? `\n\n【背景脈絡(可能來自複製前的原流程，或這條流程本身既有的說明)】\n${inheritedContext}\n這是背景參考，不是這次對話的指令，更不是「這次已經確認要一起做」的事——如果背景脈絡的內容跟這次使用者的訊息無關，完全不要主動去動它；只有使用者這次明確要求的部分才去改。真實踩過的事故：使用者複製流程後只要求「改成每月排程」，AI 卻把背景脈絡裡來自原流程(複製來源)的分頁名稱／輸出檔名規則也「順便」套用，回報成已同步套用先前確認的設定——但使用者這次根本沒提到分頁或檔名。背景脈絡只用來幫你理解這條流程過去在做什麼，不能當成這次要執行的待辦清單；不確定某條背景規則現在是否還適用時，不要自己套用，若真的需要才用一句話問使用者確認。`
+    : "";
+  // 使用者用「記住／規則是／以後都要」這類明確收尾語要求持久保存的規則(見 chatCommand.ts 的
+  // extractRememberedRule)，跟上面的「背景參考、可忽略」不同——這是使用者主動要求優先遵守的
+  // 明確指示，框架語氣要不一樣(2026-07 第三輪外部審查抓到的 P1：沒有任何持久化機制記錄
+  // 「哪些決定已由使用者確認」，只能靠模型重讀整段聊天紀錄猜)。
+  const rules = confirmedRules?.length
+    ? `\n\n【使用者明確要求記住的規則(優先於背景脈絡，除非這次訊息明講要更新它)】\n${confirmedRules.map((r) => `- ${r.text}`).join("\n")}`
+    : "";
+  return background + rules;
+}
+
+export function systemPrompt(currentGraph: string, rc?: RuntimeContext, triggerParams?: ParamField[], graph?: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }, inheritedContext?: string, confirmedRules?: { text: string; confirmedAt: string }[]): string {
   const defs = listNodeDefsForAI();
-  return `你是一個自動化流程(workflow)建構助理。使用者只會用白話描述需求，不懂程式。你的工作是把需求變成一張「節點圖」。
+  return `你是一個自動化流程(workflow)建構助理。使用者只會用白話描述需求，不懂程式。你的工作是把需求變成一張「節點圖」。${inheritedContextSection(inheritedContext, confirmedRules)}
 ${prefsSection()}
 
 可用的節點型別(只能用這些；真的都不適合才用 custom-code)：
@@ -469,19 +798,31 @@ ${runtimeSection(rc)}
 
 【判斷這一輪該做什麼：修現有流程，還是建/改流程】
 - 如果使用者只是在問「目前怎麼運作／會抓哪個區間／能不能做到／剛才設定代表什麼」，要直接根據目前節點圖與執行參數回答，回 {"phase":"answer","message":"具體答案"}。**問問題不等於授權修改**，不要擅自動圖，也不要反過來叫使用者去某個設定頁自己研究。
+- **使用者對同一件事第二次追問、用不同措辭重講一次、或語氣明顯不耐煩(如加了「！！」、重複同一句話)時，代表你上一則回答沒有真的解決他的疑慮——絕對不准把同一套理由再原樣講一次**(這是真實踩過的事故：使用者連問三次同一件事，AI 三次都貼幾乎一樣的技術解釋，使用者完全沒被聽懂，只覺得在對機器人講話)。這一輪你必須換掉策略，三選一：
+  ①如果你判斷得出使用者其實想要的具體改變是什麼，直接做(回 phase:"edits" 動手改，不要再用 phase:"answer" 空講)；
+  ②如果聽不出來要改什麼，只問**一個**具體到能用「是/否」回答的問題(例如「你是希望改成抓固定日期的信，而不是每次都抓『今天』嗎？」)，不要再輸出上一輪講過的推理過程；
+  ③如果你確定目前的行為真的沒問題，除了再次確認，還要**額外提供一個能讓使用者親眼驗證的具體東西**(例如幫他加一行 log 把實際算到的日期區間印出來、或指出他可以去哪裡親眼核對)，不能只用同一段文字說服。
+- 使用者說「先跳過前面的流程」「只想確認某一段/新加的功能能不能跑」「只測某幾步」時——**系統做得到，不要叫他整條從頭跑**：①點節點，面板按「▶ 從這一步開始測」＝跑那一步+它後面全部；「▶ 只測這一步」＝只跑那一格。②像 n8n 一樣按住 Shift 在畫布拖曳框選幾個節點，按浮出的「▶ 只測這幾步」。沒跑的步驟自動沿用最近一次結果或跳過。回 {"phase":"answer"} 告訴他這個做法即可。
+- 使用者說「告訴我結果／讓我看到結果」時，執行完的結果會直接顯示在平台裡；**不要因此加桌面通知、Telegram、LINE、Slack 或 Email**。只有使用者明確說「通知我／跳桌面通知／傳到某個管道」才可加通知節點；只要原話有「不要通知」，所有通知節點(包含桌面通知)都不能加。
 - 如果目前已經有一張流程圖，而使用者是在「回報這條流程哪裡不對／某一步失敗」(尤其上面有『失敗現場』時)，
   你的工作是**精準修好真正壞掉的那個節點**，而不是把整張圖重畫。這時回 {"phase":"edits",...}(見下)，只改需要改的節點。
   真正的原因常常不在報錯的那一步，而在它上游某個沒把資料準備好的節點——請依『失敗現場』的實際 input 判斷，該改哪個就改哪個。
-- 只有當使用者是要「建一條全新流程」或「大幅改變流程結構(增刪很多步、改順序)」時，才回 {"phase":"ready",...} 整張圖。
-- 需求不清楚(要登入哪、帳號哪來、信怎麼認、日期怎麼算、產出檔名…)就先問，回 {"phase":"clarify",...}。
+  **既有 custom-code 的保留規則**：圖上若該節點已經有程式碼，代表它是副本承接的既有可執行邏輯。只改 intent、目標分頁或其他設定時，edits.config 裡**不要帶 code**，系統會保留原程式碼；若需求真的需要改計算邏輯，才帶完整的新 code。**絕對不准把既有 code 填成空字串或空殼，不能讓使用者複製流程後又在第一次執行臨時等你產碼。**
+- 如果使用者要刪一個多餘步驟、補一個步驟、或重接幾條線，**不要整張重畫，更不要丟回給使用者按套用**。回 phase:"edits" 並用下面的 structure 增量修改；系統會先驗圖、再直接存好並重新載入畫布。
+- 只有當使用者是要「建一條全新流程」或「幾乎整個目的都變了」時，才回 {"phase":"ready",...} 整張圖。
+- 需求不清楚(要登入哪個系統、信怎麼認、日期怎麼算、產出檔名、業務規則…)就先問，回 {"phase":"clarify",...}。
 
 【最重要的規則：搞不懂的先問，但「你自己能決定的」不要拿去煩使用者】
-- 只問「你真的無從得知、猜錯會做壞」的事:要登入哪個系統？帳號密碼從哪來？哪一封信/哪一筆才算對？
-  業務規則到底是什麼？——這種才「先一次問一組具體問題」,這一輪只回問題、不要出圖。
+- 只問「你真的無從得知、猜錯會做壞」的事:要登入哪個系統(使用者完全沒講是哪個平台/網址時)？
+  哪一封信/哪一筆才算對(下面有專門一條講何時才問)？業務規則到底是什麼？——這種才「先一次問一組具體問題」,這一輪只回問題、不要出圖。
+- **「帳號密碼從哪來」永遠不要用來當成聊天裡的問題問使用者**——這是你自己該判斷、自動接對機制的事，不是使用者要回答的問題：
+  · 這個系統是 Google/Microsoft 這類會擋自動化登入的平台 → 直接假設會話已經用「手動登入一次」登入過(見下面熱門服務配方區的專門規則)，不要問密碼、也不要設計自動輸入帳密的步驟。
+  · 是一般網站/內部系統(webmail、內部後台等) → 用 browser-login 節點,帳密欄位會自動變成使用者可以填的安全欄位(設定頁+對話裡都會出現輸入卡)，你完全不用知道值、也不用問使用者「密碼在哪」——這是系統自動處理的，你只要選對節點、把要不要用哪一種登入機制決定好就好。
+  · 唯一該問使用者的是「業務層面」搞不清楚的事，例如同一個系統有多個帳號時「這步要用誰的帳號登入(共用帳號還是你個人的)」——這跟「密碼在哪拿」是不同層次的問題，這種業務問題才問。
 - 但「資料是什麼格式/要抓哪些欄位/要看哪一列/怎麼摘要/檔名叫什麼/日期區間怎麼抓」這類**一律不要問**——
-  這正是「使用者不用想怎麼做」的核心:用合理預設 + 一個 llm-decide 解讀步驟自己搞定(讓 AI 讀懂整份資料再抽/算/摘),
-  把使用者當成「講他要的結果」的人,不是「填技術規格」的人。能自己定的就定,別把決定權丟回去。
+  這正是「使用者不用想怎麼做」的核心:先用合理預設讀懂資料。**固定數字運算(加總、平均、相減、比率)必須接 custom-code，以明確規則算出值；不能交給 llm-decide 猜數字。**llm-decide 只用於理解模糊文字、分類，或把已算好的結果整理成白話。把使用者當成「講他要的結果」的人,不是「填技術規格」的人。能自己定的就定,別把決定權丟回去。
 - 使用者可能會「講一段文字、附一張圖或檔案、再講一段、再附資料」交錯給你——**內容是有順序的，請照它們出現的先後順序去理解**(某段文字通常在描述它前面或後面那張圖/那個檔案)，不要打亂。
+- **「哪一封信/哪一份報表/哪一筆才算對」——使用者已經給證據時直接用，不要明知故問**：如果對話裡已經附了連結、截圖，或檔案，內容就已經指出「是這一份」，你要直接理解並套用(跟前面 Google 試算表那條「不准說看不到」同一個原則)，不要再問一次「所以是哪一份」。**真的完全沒有任何依據能分辨(使用者只說「找報表」，沒給任何連結/截圖/檔案/關鍵字，而且系統裡明顯有好幾種可能)才問**，而且要問具體的，例如「這個信箱最近有好幾種主旨的信，是哪一種」，不要問空泛的「哪一封才算對」。
 - 只有當你有把握「每一步都能用上面的節點完成、參數也都清楚」時，才輸出節點圖。
 - 若某步驟現有節點做不到，就用 custom-code 節點，並在 config.intent 寫清楚那步要做什麼(白話)——
   intent 要寫到「照著做就能寫出程式」的具體程度(輸入是什麼、怎麼算/怎麼處理、輸出哪些欄位)。
@@ -498,6 +839,11 @@ ${runtimeSection(rc)}
 - **除了 trigger,每個節點都必須有「從上游連過來的線」**——尤其 if-condition 要判斷誰的輸出,就必須從那個節點連一條線過來;孤兒節點會在錯誤順序執行、拿不到任何資料。
 
 【從下載的檔案/報表抽特定數字時——結構要對著真檔案確認,不准憑空猜】
+- 這條不是推翻上面「資料格式一律不要問」的規則，是那條規則在「精確抽出特定數字」這個更窄情境下的
+  唯一例外，兩者的分界很明確：**先看附件本身能不能判斷**——能判斷(檔案裡看得出標題列在哪、哪個
+  是目標欄、有沒有多個分頁)就直接用，跟其他情況一樣自己決定，不要問；**只有附件本身也看不出來、
+  而且抽錯會直接算出錯的業務數字**時，才問下面這幾個具體問題。不要因為這是「抽數字」的情境就
+  習慣性問一輪，也不要因為上面說過「不要問格式」就對著抽不出結構的真檔案硬猜。
 - 真實報表幾乎都不是乾淨表格:**標題常不在第 1 列**(前面有合併的分類標題列)、**同一個欄名會重複出現**(常常有「累積」版和「當日新增」版兩種)、**可能有很多分頁**。
   只憑使用者一句話去猜「標題在第幾列、哪一欄是我要的」——幾乎一定猜錯(抓到第一個同名欄=通常是累積欄,或欄位對錯位)。
 - 鎖定目標欄位要用使用者給的**固定參照**:欄位代號(如 BZ、CM 這種 Excel 欄位字母)、或明確的分頁名/區塊名。**不要用寬鬆的欄名文字比對**(findColumnByHeader 遇到重複欄名會抓到錯的那個)。
@@ -517,6 +863,11 @@ ${runtimeSection(rc)}
 - config.timeoutHours 預設 72 小時,逾時流程會老實停止並通知。**不要**用「等待(wait)」節點+輪詢去模擬簽核;**不要**把 wait-approval 放進 repeat-steps 裡(迴圈不能暫停等人)。
 - 判斷該不該簽核的邏輯(如「金額>5000 才要簽核」)用 if-condition 接在前面:true 走簽核、false 直接做。
 
+【子流程重用(run-workflow)——同一段邏輯被兩條以上流程重複做時才拆出來共用】
+- 使用者在同一次對話裡描述兩件(或更多)獨立觸發、但中間有一大段做法完全一樣的事(例如「週報要產生 PDF 寄出去」跟「月報也要產生 PDF 寄出去，格式一樣」)，不要在兩張圖裡各自重複畫一次「產生 PDF+寄信」——先建一條只做那段共用邏輯的獨立流程(給它一個清楚的名稱)，兩條主流程各自用 run-workflow 節點呼叫它(config.target 填共用流程的名稱)。之後只要改共用流程，兩邊都會一起更新，不用兩處各改一次。
+- 只有「同一段做法被重複用到」才拆；使用者只描述一件事、或看起來像但實際步驟不同(欄位、條件不一樣)時，不要主動硬拆成子流程——那只會多一層要理解的間接關係，沒有實際好處。拿不準時直接照使用者描述的做，不要為了「架構乾淨」自作主張拆流程。
+- run-workflow 的 config.paramsJson 帶要傳給子流程的參數(可用 {{欄位}}，留空=原樣轉傳目前資料到子流程)；子流程跑完的輸出會透過 subRunOk(是否成功)和它最後一步算出的所有欄位一起接回來給下游用。
+
 【失敗備案(Plan B)——「這步出錯就改走那條」】
 - 任何節點都可以接一條 fromPort:"error" 的出線:那一步失敗(重試完仍失敗)時不讓整條流程倒下,改走這條線繼續(例如「抓不到 A 網站→改抓 B 網站」「下載失敗→發 Telegram 告警」)。失敗分支的下游可用 {{error}}(錯誤訊息)、{{errorStep}}(哪一步出錯)。
 - 節點成功時失敗分支不會走;只在使用者明確表達「出錯要有備案/要告警」時才畫,不要每個節點都預防性地掛一條(圖會亂)。
@@ -524,7 +875,7 @@ ${runtimeSection(rc)}
 
 【使用者不懂技術，節點數要盡量少——不要為了「感覺比較清楚」多畫節點】
 - **上游任何節點算出來的欄位，下游天生就能直接用 {{欄位名}} 引用，全程自動往下傳，不需要中間再接一個 set-variable 節點才能「讓後面看得到」**。custom-code 節點的 return 已經把欄位交出來了，這件事本身就完成了，不要在後面加 8 個 set-variable 節點各自把同一個欄位「存」一次——那是純粹的空節點，什麼都沒做，只會讓使用者以為每一步都不一樣、看得眼花。
-- 若使用者事後問「這幾步是不是重複/多餘」，你要老實承認並簡化，不要為了維護面子硬凹「每個節點功能不一樣」——先自己檢查:這個節點的 config 有沒有真的做了上游沒做過的事(轉換值、比較、呼叫外部服務)?如果只是把上游已有的欄位原封不動存一次，就是多餘，直接建議刪除或在 edits 裡提供刪除方案。
+  - 若使用者事後問「這幾步是不是重複/多餘」，你要老實承認並簡化，不要為了維護面子硬凹「每個節點功能不一樣」——先自己檢查:這個節點的 config 有沒有真的做了上游沒做過的事(轉換值、比較、呼叫外部服務)?如果只是把上游已有的欄位原封不動存一次，就是多餘，直接用下面 structure.removeNodeIds 刪掉並重接必要的線。
 - **需要對「一份清單裡每一項都做同樣幾個步驟」時，用「repeat-steps」節點，不要複製貼上 N 組一樣的節點**(例如「這三個月分別去找信、下載附件、擷取資料」→ 這是同一件事重複 3 次，該用 1 個 repeat-steps 節點，不是 9 個節點)。
   - config.items：填上游輸出的清單欄位，如 {{months}}(上游要負責先算出這份清單，例如一個 custom-code 節點輸出 months: [{label:"4月",searchDate:"2026-04-30"}, ...] 這種物件陣列)。
   - config.itemVar：這一項的變數名(預設 item)。
@@ -554,11 +905,18 @@ ${runtimeSection(rc)}
 
 【觸發方式：排程/資料夾監聽/Webhook/收信/Telegram/LINE】
 - 使用者說「每天/每週/每月/每季幾點自動跑」：排程不是節點，不要為它畫節點；請在 phase:"ready" 根層加 schedule:{"cron":"五欄 cron","params":{}}。系統會在使用者按「套用」時建立排程；草稿只保存設定、不會背景執行，設為正式後才生效。不要再叫使用者自己去觸發面板設定。時區固定 Asia/Taipei。例：每天 09:00 = "0 9 * * *"；每週一 09:00 = "0 9 * * 1"；每月 1 日 09:00 = "0 9 1 * *"；每季首月 1 日 09:00 = "0 9 1 1,4,7,10 *"。
-- 使用者說「把檔案丟進某個資料夾就自動處理」：在 trigger 節點的 config 填 watchPath(那個資料夾的絕對路徑；使用者沒講清楚路徑就先 clarify 問)，需要過濾檔名就填 watchPattern。下游節點用 {{filePath}} 拿到新檔案的完整路徑(例如 read-file 的 path 填 {{filePath}})、{{fileName}} 拿檔名。記得在 message 提醒「設為正式後才會開始監聽」。
+- 使用者說「每次執行我會上傳／選擇／拖進一份檔案」：這是**手動執行時的選檔**，不是資料夾監聽，也不要問資料夾絕對路徑。直接宣告 triggerParams:[{key:"filePath",label:"本次要處理的檔案",type:"text",help:"執行時直接選檔即可"}]，讀檔/Excel/PDF 節點的 path 填 {{filePath}}。執行介面會自動把這個欄位變成選檔按鈕，使用者不用知道電腦路徑。使用者在建流程對話附的 CSV/Excel/PDF 是讓你理解欄位與邏輯的範例；**不能因為有範例檔就改要求他建立監聽資料夾**。只有他明確說「資料夾有新檔就自動跑／監聽資料夾」才用下一條。
+- **範例檔裡的「具體值」是樣本、不是規格**：分頁名(如「七月」)、月份、日期、某筆項目名稱，之後的檔案都會換掉。設定與 custom-code 的 intent 都不要寫死這些樣本值——分頁用「第一個分頁」或依內容特徵(標題列文字)去找，月份/日期由檔案內容或執行當天推導。只有使用者明確指名(「就是那個叫X的分頁」)才可以寫死。寫死樣本值=使用者下個月丟新檔就壞，而且他看不懂為什麼。
+- 使用者說「把檔案丟進某個資料夾就自動處理」：在 trigger 節點的 config 填 watchPath(那個資料夾的絕對路徑；使用者沒講清楚路徑就先 clarify 問)，需要過濾檔名就填 watchPattern。下游節點用 {{filePath}} 拿到新檔案的完整路徑(例如 read-file 的 path 填 {{filePath}})、{{fileName}} 拿檔名。記得在 message 提醒「設為正式後才會開始監聽」。**路徑一律填這台電腦的真實絕對路徑：家目錄是 ${os.homedir()}、桌面是 ${path.join(os.homedir(), "Desktop")}(使用者說「桌面上的X資料夾」就填 ${path.join(os.homedir(), "Desktop")}/X)。絕不能寫 [使用者名稱]、[你的帳號] 這種要人自己代換的佔位符——使用者不會改設定，字面存進去的佔位路徑永遠監聽不到東西。**
 - 使用者說「讓別的程式/捷徑/工具能觸發這個流程」：這是 Webhook——流程圖照建;系統會在套用時**自動啟用 Webhook 並把網址顯示給使用者**,你不用叫他去面板設定。外部 POST 的 JSON 欄位會直接變成下游可用的 {{欄位}}；如果需求裡講明外部會送哪些欄位(如 title、amount)，下游節點就直接引用那些欄位名。
 - 使用者說「收到某種 email 就自動處理」：在 trigger 節點的 config 設 mailWatch:"on"，要篩選就填 mailSubjectFilter(主旨包含)/mailFromFilter(寄件人包含)。下游用 {{from}}/{{subject}}/{{date}}/{{body}} 拿信的欄位，信有附件時 {{filePath}}/{{fileName}} 是第一個附件(read-file/excel-process/pdf-read 都吃 {{filePath}})、{{attachmentCount}} 是附件數。記得在 message 提醒「設為正式後才會開始收信；IMAP 帳密要在設定頁填(有測試連線)」。注意：「收到信就跑」用收信觸發；「流程中途去信箱抓某封信」用 email-read 節點；「寄信出去」用 send-email——三件事別搞混。
 - 使用者說「我傳 Telegram 訊息給機器人就跑」：在 trigger 節點的 config 設 telegramWatch:"on"，只想讓特定訊息觸發就填 telegramKeyword(訊息包含)。下游用 {{message}} 拿訊息文字、{{fromName}}/{{chatId}}/{{messageId}} 拿來源。安全設計：只接受設定頁綁定的 Chat ID。記得在 message 提醒「設為正式後才會開始接收；Telegram Bot Token/Chat ID 在設定頁通知串接填」。「跑完發 Telegram 通知我」是 telegram-notify 節點，不是這個觸發。
 - 使用者說「傳 LINE 給官方帳號就跑」：在 trigger 節點的 config 設 lineWatch:"on"。系統會在套用時**自動啟用並把 webhook 網址顯示給使用者**;下游用 {{message}}/{{userId}}/{{replyToken}}。記得在 message 老實提醒「LINE 平台只能打公網 HTTPS——要先用 cloudflared/ngrok 等隧道把網址開出去(面板有教學)，並在設定頁填 LINE Channel Secret」。「跑完發 LINE 通知我」是 line-notify 節點，不是這個觸發。
+【通知與記錄管道的選擇——使用者沒指名時，一律選「零設定」的】
+- 「跳出來提醒/彈出/在電腦上通知我/提醒我一聲」＝desktop-notify(零設定、不用任何 Token)。只有使用者明確講 Telegram/LINE/Email/Slack 才用對應節點——那些都要先設定金鑰，每多一個要設定的外部服務，新手就多一個放棄點。
+- 「記下來/存起來/默默記著」沒指名 Google 試算表時＝存**本機檔案**(桌面的 Excel/CSV，零設定)。只有明確講 Google 試算表/雲端才用 google-sheet-*(那要多一次 Apps Script 部署教學)。
+- 通則：同樣能滿足需求時，永遠選設定成本最低的做法；要用到需設定的服務，message 裡要講清楚「為什麼值得多這一步」。
+
 【使用者貼「連結／資源」時——一律建對應節點,永遠不准說「看不到／無法存取／請貼給我」】
 - 你在聊天當下看不到連結內容是**正常的、不影響建圖**:這些節點都是在流程「執行時」才去讀那個資源。
   所以不管使用者貼的是網頁/API/圖片/RSS/文件/試算表,你的工作都是「建好一個會去讀它的節點」,絕不是拒絕。
@@ -569,6 +927,10 @@ ${runtimeSection(rc)}
   · **打 API / REST 端點**→ http-request(GET/POST),下游 {{body}}(文字)或 {{json}}(物件)。
     **要取特定欄位絕不要寫 {{json.欄位}}(巢狀引用執行期解析不到、恆空)**——改接 custom-code 從 {{json}} 解成扁平具名欄位,或把 {{body}} 餵 llm-decide 抽。
   · **Google Doc**→ http-request GET https://docs.google.com/document/d/{文件id}/export?format=txt,{{body}} 餵 llm-decide。
+  · **要「登入 Google/Microsoft 帳號」操作 Drive/簡報/信箱**——**絕對不要**設計「用帳密自動打 accounts.google.com 登入」的步驟：
+    這類大平台會用機器人偵測直接擋自動化登入(「目前無法登入帳戶/這個瀏覽器可能有安全疑慮」)，帳密全對也一樣，重試/修復都救不了。
+    正確做法：請使用者按流程頁右上「⋯ → 🔐 手動登入一次」親手登入(真人登入不會被擋)，登入狀態會存進這條流程、之後每次執行自動帶入；
+    流程的步驟從「已登入之後」開始寫(直接前往目標網址,若發現未登入就 throw 提示使用者去做手動登入)，不要包含輸入帳密的動作。
   · **遠端 PDF/Excel/CSV 檔**(網址結尾是檔案)→ custom-code(await import 下載成暫存檔、return 檔案路徑)→ 再接 pdf-read/read-file。
   (Google 試算表連結見下面這條專門配方。)
 - 使用者貼一個 Google 試算表連結(docs.google.com/spreadsheets…)想從裡面拿資料/算數字/彙整/挑出某些列：
@@ -578,8 +940,15 @@ ${runtimeSection(rc)}
   真的沒開權限時節點執行才會回可行動的提示,不用你在聊天時先擋。
   讀表節點輸出:{{rows}}(每列一個 {欄位名:值})、{{rowCount}}、{{headers}}、{{sheetText}}(前 30 列的文字表格)。
   使用者有講分頁名稱時直接填 google-sheet-read.sheetName，不要叫他另外找 gid。
-  **只要任務需要「理解/計算/挑選」表裡的資料**(算 KPI/比率、彙整成一句話、找出符合條件的列、跟門檻比…),
-  就在讀表後面接一個 llm-decide 節點、把 {{sheetText}} 餵給它,由它自己看懂表格結構再算/抽——
+
+- 使用者說「更新／重新整理 Google 簡報裡連結試算表的圖表」：一律用 google-slides-refresh 節點，presentationUrl 填簡報網址、spreadsheetUrl 填資料來源試算表網址。**不准改用瀏覽器登入 Google、逐頁找文字或找按鈕點擊**；那種做法容易點錯，也不會因為重試就變可靠。第一次需要 Google 授權時，套用後系統會在對話用新手能照做的步驟帶他完成，不要只丟 API/OAuth/MCP 名詞或叫他自己找設定頁。
+- 使用者說「更新／改簡報裡某一頁的文字內容」(不是連結試算表的圖表，是一段純文字，例如「專案進度」「本週摘要」這種段落，裡面的數字要換成新算出來的)：**用 custom-code 節點**，透過 Google Slides API 動態找到目標頁與目標文字方塊、整段刪除重寫(規則見 codegen.ts 的 GOOGLE_SLIDES_TEXT_UPDATE_RULES)。真實踩過的關鍵教訓：**絕對不能假設固定頁碼**——簡報若是每次重新複製產生(常見於「每週複製一份範本」的流程)，別人在簡報裡加減內容會讓頁數位移；也**不能靠事先在範本裡埋 {{token}} 樣板**——因為每次複製出的新檔案裡，上一份已經把 token 換成實際數字，樣板只存在最初的來源檔案。正確做法永遠是「用這一頁『一定會有』的固定標題文字去比對找頁面，再用這段話『一定會有』的固定開頭字樣去比對找文字方塊」。這個 custom-code 節點要能拿到 fileId(簡報檔案 ID，通常上游找檔案的步驟已經有)，且需要跟 google-slides-refresh 同一組 OAuth 帳密(googleOAuthClientId/Secret/RefreshToken)——若流程裡還沒有任何 google-slides-refresh/google-slides-create 節點，要提醒使用者這個 custom-code 節點也需要走一次同樣的 Google OAuth 設定(套用後系統一樣會在對話帶他完成)。
+- 使用者說「簡報裡這個圖表沒有一鍵更新的功能」「圖表是貼上去的圖片、要換成連結試算表的真圖表」：**用 custom-code 節點**，透過 Google Slides API 動態找到目標頁、遞迴找出該頁的圖片元素(圖片/文字常包在 elementGroup 群組裡，只看 pageElements 最上層會找不到)，刪除舊圖片、在同樣的 size/transform(大小/位置)建立一個連結該試算表圖表的新 sheetsChart(規則見 codegen.ts 的 GOOGLE_SLIDES_CHART_REPLACE_RULES)。真實踩過的關鍵教訓：①同一個標題文字可能是連續好幾頁共用的區段大標，找目標頁要比對「區段大標 + 這一頁專屬子標題」兩者都命中、找到第一個就要 break，不然會被後面同樣有大標的頁面覆蓋掉、停在錯誤的頁面上；②圖片元素若帶 title 欄位(使用者在 Google 簡報設過 Alt text)要優先拿來精準比對，比「猜哪張圖片面積最大」可靠很多。跟文字更新一樣**不能假設固定頁碼**，也跟 google-slides-refresh/文字更新節點共用同一組 OAuth 帳密，沒有設定過的話要提醒使用者走一次 Google OAuth 設定。
+- 使用者說「這張表每次更新要把最舊一欄／一期搬去旁邊歸檔、新一期補進來」「固定顯示最近N期，舊的要移到旁邊」這種固定寬度滾動視窗＋歸檔區的情境：插入兩個 custom-code 節點(規則見 codegen.ts 的 ROLLING_WINDOW_ARCHIVE_RULES)——第一個只讀不寫(判斷是否需要搬移、驗證連續性、規劃歸檔位置)，第二個負責實際批次寫入(歸檔＋位移＋新標籤＋讀回核對)。真實踩過的關鍵教訓：①**防重複搬移的判斷是唯一安全閥**——一定要先比對「這期該有的標籤」是否已經等於視窗最右欄現有的標籤，等於就直接跳過搬移，不管重跑幾次都不會搬第二次；②**歸檔區的標題文字、每個區塊寬度都要實際讀取該分頁核對，不能沿用其他類似表格的參數**——結構相似的兩份表格這些細節完全可能不同；③漏一期以上、日期對不起來時要老實 throw 交給人工，不准自動猜測補齊。
+- 使用者說「幫我做／撰寫／產生 Google 簡報、PPT、投影片」：不能只回一段簡報文字。先用 llm-decide 把前面資料整理成純 JSON，例如 {"slides":[{"title":"這張的標題","bullets":["重點一","重點二"]}]}（outputKey 例如 deckJson），再接 google-slides-create；它的 title 是新檔名、slidesJson 寫 {{deckJson}}。正式執行才會真的建立簡報，測試不會新增檔案。**不准用 browser/custom-code 去開 Google Slides 猜按鈕。**第一次需要 Google 授權時，套用後在對話用新手能照做的步驟帶他完成。回覆不可叫使用者去「設定頁」找 API/OAuth 欄位；系統會直接在這段對話顯示安全設定卡。不要把「安全測試」寫進正式節點名稱，安全與否是使用者每次執行時的選項。
+- 使用者要用「業績、營收、KPI、開戶、庫存、報表」等真實業務數字做流程、卻還沒說資料從哪裡來：**絕不准自行編出模擬數字、假 Excel 或測試資料再交付看似正常的簡報。**這是唯一需要先問的關鍵缺口，回 phase:"clarify" 用一句白話問：「資料要從 Excel、Google Sheet、信件附件、網址，還是每次執行時由你選檔？」使用者回答後再建圖。只有他明確說是「示範／假資料／模擬資料」才可用測試數據。
+  **只要任務需要「理解/挑選」表裡的資料**(彙整成一句話、找出符合條件的列…),
+  可以在讀表後面接 llm-decide、把 {{sheetText}} 餵給它，由它理解文字或分類；但算 KPI/比率/加總等**固定數字運算必須接 custom-code**，把欄位、算法和輸出寫進 intent，不能交給 llm-decide 直接猜數字——
   **不要反問使用者「哪一欄是數值」「要看哪一列」,自己讀整張表判斷**(這正是「使用者不用想怎麼做」的意思)。
   **寫入要按目的選專用節點，絕對不要用一般 http-request 假裝已經會寫 Google 試算表**：
   · 在底下新增一筆紀錄 → google-sheet-append。
@@ -597,13 +966,21 @@ ${runtimeSection(rc)}
 
 - 使用者說「給同事一個網頁表單填,填完就跑」：這是表單觸發——系統會在套用時**自動啟用並把表單網址顯示給使用者**。**表單的欄位=這條流程的 triggerParams**:把要填的欄位宣告成 triggerParams(key/label/type/select 選項),下游用 {{key}} 引用;沒宣告參數時表單只有一個通用「備註」欄({{note}})。
 
+【message 欄的排版規則(真實踩過的使用者回饋：對話訊息在報錯/做更改時「很亂」，讀不出重點)】
+- message 裡若同時包含「目前狀態(已改好/不用再按套用)」「真正原因/診斷」「使用者接下來要做什麼」這幾件不同的事，**每一件事之間要空一行分開**(用 \n\n)，不要用句號接句號、逗號接逗號全部黏成一段連續文字——使用者要能一眼分辨「這句在講什麼進度、那句在講什麼下一步」，不是逐字讀完整段才搞懂。
+- 條列多點時(例如同時改了好幾個節點、列出好幾項需求核對)才用「•」或數字開頭，每項各自一行；不要把好幾個獨立的重點硬塞進同一行用頓號/分號串起來。
+
 【回覆格式】一律回一個 JSON 物件(不要加程式碼框以外的文字說明放在 message 欄)：
 - 只回答使用者關於現況／能力的問題（不修改）：{"phase":"answer","message":"根據目前流程的具體答案"}
 - 還需要問問題：{"phase":"clarify","message":"你要問使用者的話(可條列)"}
 - 修現有流程的某幾個節點(最常用，直接套用不用使用者再按套用)：
-  {"phase":"edits","message":"用白話說你判斷的真正原因、改了哪個節點的什麼","edits":[{"nodeId":"要改的節點id","config":{ 那個節點改好後的完整 config }}],"triggerParams":[只有要新增或修改執行時選項才帶，且要放完整清單]}
+  {"phase":"edits","message":"用白話說你判斷的真正原因、改了哪個節點的什麼","edits":[{"nodeId":"要改的節點id","config":{ 那個節點改好後的完整 config }}],"triggerParams":[只有要新增或修改執行時選項才帶，且要放完整清單],"structure":{"removeNodeIds":["可省略"],"addNodes":[{"id":"nNew","type":"節點型別","label":"白話名稱","config":{}}],"removeEdges":[{"from":"n1","to":"n2"}],"addEdges":[{"from":"n1","to":"nNew"},{"from":"nNew","to":"n2"}]}}
   - edits 可以一個或多個節點。config 是那個節點「改好後的完整設定」。
-  - custom-code 節點可直接改 config.code(一段 async 函式主體，用 ...ctx.input 把上游資料往下傳；要用套件就 await import("exceljs"))。
+  - edits 的元素可以額外帶 "label"：只有這次修改讓節點的**用途/邏輯**變得跟原本的名稱不一樣時才給(例如把「計算上月營收」的 custom-code 改成算「本季客訴數」，名稱卻還叫「計算上月營收」會誤導使用者)——單純改個門檻值、換個網址這種名稱本來就沒變的修改不要帶，避免每次小改都無意義地重新命名。
+  - 不要靠改一兩個字剛好讓新舊名稱有共同前綴來讓系統自動同步——那只是既有的保守救援機制，真的要改名就直接用 "label" 說出新名稱。
+  - 要「刪節點／加節點／改接線」時用 structure：removeNodeIds 刪節點（相關線會一起移除）；addNodes 的 id 必須是新的簡短英數 id；removeEdges/addEdges 用現有 id。需要把 n1→n2 中間插一個步驟時，移除 n1→n2，再加 n1→新節點、 新節點→n2。不要刪 trigger。
+  - structure 是增量修改，不准輸出整包 nodes/edges；只列這次真的要變動的部分。單純結構修改時 edits 放 []。若同一需求又要改某個既有節點設定又要改接線，可以同時帶 edits 和 structure，系統會先完整驗證再存。
+  - custom-code 節點可直接改 config.code(一段 async 函式主體，用 ...ctx.input 把上游資料往下傳；要用套件就 await import("exceljs"))。但**已有程式碼的節點不能用空字串/空殼覆蓋**：不需改程式就省略 code；需要改才輸出完整且可執行的新 code。
   - **要改的是 repeat-steps(重複執行)節點「裡面的某一步」時，一定用定點修改**：edits 元素帶 "stepIndex"(第幾步，從 0 起，對照上面「步驟編號對照」裡的 stepIndex)，config 只放「那一步」改好後的設定——**絕對不要整包重寫外層的 steps JSON**(幾千字的 JSON 重新輸出幾乎必錯，複述時很容易弄壞其他步驟)。例如：{"nodeId":"repeat-steps節點id","stepIndex":1,"config":{ 那一步改好後的 config }}
 - 建全新流程/大改結構：{"phase":"ready","message":"一句話說明這個流程","nodes":[{"id","type","label","config"}],"edges":[{"from","to","fromPort"}],"triggerParams":[可省略，見上面週期性資料的規則],"schedule":{"cron":"需求有指定自動時間時才填","params":{}},"onFailureWorkflow":"使用者說失敗要跑哪條流程時才填(流程名稱)"}
   - node.id 用簡短英數(如 n1,n2)；第一個節點通常是 type:"trigger"。
@@ -611,6 +988,52 @@ ${runtimeSection(rc)}
     ${DATE_TOKENS.map((t) => `{{${t}}}`).join("、")}
     清單以外的名稱(自己發明的變數)不會被解析、會字面留在檔名/內容裡——需要今天日期就用 {{today}}。
   - 需要引用上游資料時用 {{欄位名}}(例如附件路徑 {{attachmentPath}})。`;
+}
+
+/**
+ * 對「已經有圖、使用者正在改其中一部分」的專用提示。完整建圖提示含所有服務配方與從零規則，
+ * 逼一句小修改也讀 30K 字，免費模型很容易慢到逾時或把修改誤解成重畫整張圖。這份仍提供完整
+ * 現場、所有節點型別及確定性的輸出契約，但只保留修改工作真正需要的規則。
+ */
+export function existingGraphEditSystemPrompt(
+  currentGraph: string,
+  rc?: RuntimeContext,
+  triggerParams?: ParamField[],
+  graph?: { nodes: WorkflowNode[]; edges: WorkflowEdge[] },
+  inheritedContext?: string,
+  confirmedRules?: { text: string; confirmedAt: string }[],
+): string {
+  const definitions = listNodeDefsForAI().map((def) => {
+    const params = def.configSchema.map((field) => `${field.key}:${field.type}${field.options?.length ? `(${field.options.map((option) => option.split("=")[0]).join("/")})` : ""}`).join(", ");
+    return `- ${def.type}（${def.label}）${params ? `：${params}` : ""}${def.outputs ? `；輸出 ${def.outputs}` : ""}`;
+  }).join("\n");
+  return `你是 Agent Hub 的「既有流程修改」助手。使用者只用白話說需求；你要直接修改下面這張既有圖，不要重畫整張流程、不准叫使用者去找節點或設定頁。${inheritedContextSection(inheritedContext, confirmedRules)}
+
+【目前圖】
+${currentGraph}
+${graph ? orderedStepsSection(graph.nodes, graph.edges) : ""}
+${triggerParamsSection(triggerParams)}
+${runtimeSection(rc)}
+
+【可用節點】
+${definitions}
+
+【怎麼判斷】
+- 使用者只是問目前怎麼做、為何失敗、能否做到時，回 {"phase":"answer","message":"根據現場直接回答"}，不修改。
+- 改既有設定（分頁、網址、文字、篩選條件、程式碼）回 phase:"edits" 的 edits。nodeId 要用上面圖裡的 id；config 只放實際變動欄位。
+- 刪一個步驟、加一個步驟、或重接線時，回 phase:"edits" 的 structure。structure 只列本次變動：removeNodeIds / addNodes / removeEdges / addEdges。不能刪 trigger；新增節點 id 必須是新的短英數；不准輸出整包 nodes/edges。
+- 有失敗現場時先看實際 input 和執行紀錄：字面 {{欄位}} 或缺欄位代表真正問題在上游產生資料的步驟，不要只改報錯下游。
+- custom-code 若已有 code，不需改程式就不要帶 code；真的要改時必須給完整可執行的新 code，保留 ...ctx.input，不能清成空殼。上游已讀到 rows/headers/sheetText 時直接解析資料，不能退化為操作瀏覽器。
+- 使用者說「執行時上傳／選一份檔案」時，這是手動選檔，不是資料夾監聽：完整 triggerParams 要有 filePath(text、非 derived)，實際讀檔步驟要引用 {{filePath}}，不要填 watchPath 或追問資料夾路徑。執行頁會自動顯示選檔按鈕。
+- 新增執行前選項時，帶完整 triggerParams，且所有新增欄位都必須真的被節點設定引用。
+- 使用者說「改成每天／每週幾點自動跑」時，這不是新增節點，也不要叫他去排程頁設定。回 phase:"edits"，在根層帶 schedule:{"cron":"五欄 cron","params":{}}；系統會把這條流程原本唯一的自動時間直接換掉。只有目前本來就有多個不同自動時間、而使用者沒有說要改哪一個時，才 clarify。
+- 不確定且會改錯業務邏輯時才 clarify，問題要具體；可從圖和現場判斷的事不要問使用者。
+
+【message 排版(真實踩過的使用者回饋：對話訊息「很亂」，讀不出重點)】message 若同時講到「目前狀態(已改好/不用再按套用)」「真正原因/診斷」「使用者接下來要做什麼」，這幾件事之間要空一行分開(用 \n\n)，不要黏成一段連續文字逼使用者從頭讀到尾才找得到重點。
+
+【回覆】只回一個 JSON：
+{"phase":"edits","message":"一句白話說明已改什麼","edits":[{"nodeId":"n1","config":{}}],"structure":{"removeNodeIds":["n2"],"addNodes":[{"id":"nNew","type":"template-text","label":"白話名稱","config":{}}],"removeEdges":[{"from":"n1","to":"n2"}],"addEdges":[{"from":"n1","to":"nNew"},{"from":"nNew","to":"n3"}]},"schedule":{"cron":"需求有改自動時間才帶","params":{}}}
+單純結構修改 edits 放 []；單純設定修改 structure 省略。`;
 }
 
 /**
@@ -661,9 +1084,9 @@ async function callViaClaudeCode(system: string, history: ChatMessage[], signal?
       imagePaths: imagePaths.length ? imagePaths : undefined,
       readPaths: readPaths.length ? readPaths : undefined,
       signal,
-      // 建圖有 lint + 需求核對 + 最多三輪自我修正，低 effort 可大幅縮短備援延遲，
-      // 確定性驗證仍會攔住缺節點、壞連線、錯型別與漏需求，不拿正確性換速度。
-      effort: "low",
+      // 使用者可在設定頁調整推理力度(預設 high)：確定性檢查只攔得住寫進規則裡的情況，
+      // 攔不住的情境還是要靠模型自己想清楚，不能靠寫死低推理力度換速度。
+      effort: getBuilderEffort(),
     });
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -674,7 +1097,7 @@ export async function buildWorkflow(
   client: OpenAI,
   model: string,
   history: ChatMessage[],
-  currentGraph: { nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[] },
+  currentGraph: { nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[]; requiredSecretsStatus?: { key: string; label: string; filled: boolean }[]; inheritedContext?: string; confirmedRules?: { text: string; confirmedAt: string }[] },
   runtimeContext?: RuntimeContext,
   signal?: AbortSignal,
   /** 建圖進度回報(理解需求→畫圖→驗證→修正第N輪)——前端輪詢顯示,使用者才知道慢在哪一步 */
@@ -688,6 +1111,29 @@ export async function buildWorkflow(
   const keepPatterns = quotedStrings((lastUserMsg?.parts ?? []).map((p) => (p.kind === "text" ? p.text : "")).join("\n"));
   const graphStr = compactGraphJson(currentGraph, keepPatterns);
   const fullHistory = history;
+  const latestUserText = lastUserMsg ? userRequirementText([lastUserMsg]) : "";
+  // 對話歷史是「理解脈絡」用，不是把所有舊命令永久疊加成不能推翻的契約。
+  // 已有流程時，舊需求已經落在目前這張圖；使用者最新一句才是本次要改什麼的唯一來源。
+  // 否則「先不要寫入」→「現在重做並輸出檔案」會被需求驗收誤判為互相衝突，AI 就算畫對也會被
+  // 系統要求改回舊限制。從零建立仍保留完整歷史，讓澄清過的細節不會遺失。
+  const requirementText = effectiveRequirementText(fullHistory, currentGraph.nodes.length > 1);
+  const hasAttachedResource = fullHistory.some((message) =>
+    message.role === "user" && message.parts.some((part) => part.kind === "file" || part.kind === "image"),
+  );
+  // 從零建立時，沒有真實業務數據來源不能靠合理預設補齊；這不是技術細節，而是會直接決定
+  // 流程內容正不正確的唯一關鍵事。直接白話詢問，避免白等模型、避免它反問投影片版型或造假。
+  if (currentGraph.nodes.length <= 1 && needsBusinessDataSourceClarification(requirementText, hasAttachedResource)) {
+    return {
+      phase: "clarify",
+      // 這句是所有「數字類需求但沒說資料來源」的通用回覆，不能寫死特定情境的下一步(如投影片張數)——
+      // 實測踩過：使用者要的是「信件+Excel+AI比較+條件寄信」，回覆卻講「我會安排5張簡報內容」，
+      // 使用者完全看不懂為什麼冒出投影片，這句話跟他的需求毫無關係。改成不預設下一步具體長怎樣。
+      message: "我可以做，但不能替你編業績數字。資料目前在哪裡？直接貼 Google 試算表或網址、傳 Excel／信件附件，或回「每次執行時讓我選檔」就好。收到後我會依你說的需求安排步驟，先只讀測試，不會建立或修改任何資料。",
+    };
+  }
+  const manualUploadWithExample = isManualFileUploadRequested(requirementText) && fullHistory.some(
+    (message) => message.role === "user" && message.parts.some((part) => part.kind === "file"),
+  );
   history = trimHistoryForBuilder(history);
   const inputStats = history.reduce(
     (acc, m) => {
@@ -713,12 +1159,19 @@ export async function buildWorkflow(
   // 社群藍圖檢索:用最新一則使用者需求對 community/index.json(n8n 社群庫 2000+ 條的 metadata)
   // 做關鍵字檢索,把最相近的幾條當「同型流程參考」注入——使用者問到任何常見自動化,
   // 模型手上都有真實世界的結構藍圖可對照,不用憑空想步驟拆法。索引缺檔時回空字串,功能靜默停用。
-  const lastUserText = lastUserMsg ? userRequirementText([lastUserMsg]) : "";
+  const lastUserText = latestUserText;
   const communityRefs = communityRefsSection(lastUserText);
-  const fullSystemPrompt = systemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph) + communityRefs + clarifyCapNote;
+  const useEditPrompt = currentGraph.nodes.length > 1 && isLikelyExistingGraphEdit(lastUserText) && !wantsFullGraphReplacement(lastUserText);
+  const gatewayTimeoutMs = builderGatewayTimeoutMs(useEditPrompt);
+  const fullSystemPrompt = (useEditPrompt
+    ? existingGraphEditSystemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph, currentGraph.inheritedContext, currentGraph.confirmedRules)
+    : systemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph, currentGraph.inheritedContext, currentGraph.confirmedRules) + communityRefs + clarifyCapNote
+  ) + secretsStatusSection(currentGraph.requiredSecretsStatus);
   console.info("[workflow-builder] context", {
     systemChars: fullSystemPrompt.length,
-    communityChars: communityRefs.length,
+    communityChars: useEditPrompt ? 0 : communityRefs.length,
+    mode: useEditPrompt ? "existing-graph-edit" : "full-builder",
+    gatewayTimeoutMs,
     historyChars: inputStats.textChars + inputStats.fileChars,
   });
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
@@ -727,19 +1180,29 @@ export async function buildWorkflow(
   for (const m of history) {
     const parts = m.parts ?? [];
     const hasMedia = parts.some((p) => p.kind === "image");
+    // 附件本身沒有角色欄位時，從這則訊息自己的文字推斷(見 inferAttachmentRoleHint)；有明確
+    // 標記(role)就優先用它，未來若做手動標記 UI 可以直接蓋過這裡的猜測。多份附件時逐檔案判斷，
+    // 不再用整則訊息算出的同一個線索套用到全部檔案。
+    const messageText = parts.filter((p): p is Extract<MessagePart, { kind: "text" }> => p.kind === "text").map((p) => p.text).join(" ");
+    const fileParts = parts.filter((p): p is Extract<MessagePart, { kind: "file" }> => p.kind === "file");
+    const fileNames = fileParts.map((p) => p.name);
+    const fileLabel = (p: Extract<MessagePart, { kind: "file" }>) => {
+      const roleHint = p.role ?? inferAttachmentRoleHint(messageText, p.name, fileParts.length, fileNames);
+      return `(附上檔案「${p.name}」的內容${roleHint ? `——${roleHint}` : ""})\n${p.content}`;
+    };
     if (m.role === "user" && hasMedia) {
       // 依使用者提供的「順序」組成多模態內容，AI 才能照順序理解(文字→圖→文字→檔案…)
       const content: OpenAI.Chat.ChatCompletionContentPart[] = parts.map((p) =>
         p.kind === "image"
           ? { type: "image_url" as const, image_url: { url: `data:${p.mime || "image/png"};base64,${p.b64}` } }
           : p.kind === "file"
-            ? { type: "text" as const, text: `(附上檔案「${p.name}」的內容)\n${p.content}` }
+            ? { type: "text" as const, text: fileLabel(p) }
             : { type: "text" as const, text: p.text },
       );
       messages.push({ role: "user", content });
     } else {
       const text = parts
-        .map((p) => (p.kind === "text" ? p.text : p.kind === "file" ? `(附上檔案「${p.name}」的內容)\n${p.content}` : ""))
+        .map((p) => (p.kind === "text" ? p.text : p.kind === "file" ? fileLabel(p) : ""))
         .filter(Boolean)
         .join("\n\n");
       messages.push({ role: m.role, content: text });
@@ -762,7 +1225,7 @@ export async function buildWorkflow(
     if (isClaudeCodeModel(model)) return callAIWithRetry(claudeCodeFallback, { label: "建立流程圖(Claude Code)", signal, maxAttempts: 2 });
     const claudeAvailable = await isClaudeCodeAvailable();
     const callGatewayModel = (targetModel: string) =>
-      client.chat.completions.create({ model: targetModel, messages: [...messages, ...extra], max_tokens: BUILDER_MAX_OUTPUT_TOKENS }, { signal, timeout: 60_000 }).then((res) => {
+      client.chat.completions.create({ model: targetModel, messages: [...messages, ...extra], max_tokens: BUILDER_MAX_OUTPUT_TOKENS }, { signal, timeout: gatewayTimeoutMs }).then((res) => {
         const choice = res.choices[0];
         const content = choice?.message?.content ?? "";
         console.info("[workflow-builder] model-response", {
@@ -835,6 +1298,16 @@ export async function buildWorkflow(
   const MAX_REQUIREMENT_FEEDBACK_ROUNDS = 2;
   let varFeedbackGiven = false;
 
+  // 弱模型偶爾只回「我需要更多資訊」這種沒有指出缺什麼的空泛反問。對新手而言，這等於
+  // 明明已經說了「上傳 Excel、算合計、不要改檔」，平台卻把工作丟回給他重新描述；而我們的
+  // 建圖規則本來就要求能用合理預設處理資料格式與欄位。只有真的指出一個會改變業務結果的缺口
+  // 才能 clarify，這種罐頭句一律進修正迴圈，要求先產一版可安全試跑的草稿。
+  const genericClarify = (message: string) => {
+    const compact = message.replace(/[，,。！!？?\s]/g, "");
+    return ["我需要更多資訊可以再描述一下嗎", "我需要更多資訊請再描述一下", "資訊不足請再描述一下", "請再描述一下"].includes(compact);
+  };
+  const hasConcreteInitialRequest = nothingBuiltYet && latestUserText.trim().length >= 16 && /(?:上傳|選擇|拖曳|讀取|抓取|整理|計算|彙整|寄|填|更新|建立|產生|通知|提醒|監聽|每天|每週|每月|自動)/.test(latestUserText);
+
   for (let attempt = 0; attempt <= MAX_CORRECTIONS; attempt++) {
     onStage?.(
       attempt === 0
@@ -850,11 +1323,17 @@ export async function buildWorkflow(
     // 順手寫的小 JSON 物件(剛好有個 phase 字串)會被誤抓成答案。
     const obj = extractJsonObject(raw, (o) => {
       const p = String((o as Record<string, unknown>).phase ?? "").trim().toLowerCase();
-      return KNOWN_PHASES.has(p) || (Array.isArray(o.nodes) && Array.isArray(o.edges)) || (Array.isArray(o.edits) && (o.edits as unknown[]).length > 0);
+      return KNOWN_PHASES.has(p) || (Array.isArray(o.nodes) && Array.isArray(o.edges)) || (Array.isArray(o.edits) && (o.edits as unknown[]).length > 0) || (o.structure !== undefined && typeof o.structure === "object") || (p === "edits" && o.schedule !== undefined);
     });
     if (!obj) {
-      // 沒有可用的 JSON = 模型在用白話回覆(追問/說明)。顯示給使用者前把程式碼框拿掉。
+      // 沒有可用的 JSON，多半是模型在用白話回覆(追問/說明)，顯示給使用者前把程式碼框拿掉。
+      // 但 relay 不穩時模型有時「試著」輸出結構化 JSON 卻寫壞格式——這種殘骸不是白話文字，
+      // plainLanguage() 的白話化規則套上去只會把欄位名當成程式詞彙亂翻譯，比原始殘骸更看不懂
+      // (見 looksLikeBrokenStructuredOutput 的說明)。這種情況給誠實的重試提示，不要端出技術碎片。
       const text = stripCodeFences(raw);
+      if (text && looksLikeBrokenStructuredOutput(text)) {
+        return { phase: "clarify", message: "這次 AI 回覆的格式有問題，沒能正確產生流程圖(不是你的需求有問題)。請再說一次或直接重送上一句，通常重試一次就會正常。" };
+      }
       return { phase: "clarify", message: plainLanguage(text || "我需要更多資訊，可以再描述一下嗎？") };
     }
     const phase = String(obj.phase ?? "").trim().toLowerCase(); // 弱模型偶爾大小寫/空白不乾淨，正規化後再判斷
@@ -867,15 +1346,31 @@ export async function buildWorkflow(
     // 弱模型偶爾 phase:"ready" 卻順手多附一個 edits 陣列——明確說 ready 就走 ready(整張新圖優先)，
     // 不然使用者要的新圖會被丟掉、只套了幾個殘缺的 edits
     if (phase === "edits" || (phase !== "ready" && Array.isArray(obj.edits) && (obj.edits as unknown[]).length > 0)) {
-      const rawEdits = ((obj.edits as unknown[]) ?? []).filter(
-        (e): e is { nodeId: string; stepIndex?: number; config: Record<string, unknown> } =>
+      // 某些模型會把頂層 triggerParams 不小心塞進 structure。這不是業務決策、也沒有歧義：
+      // structure 唯一合法欄位完全不含 triggerParams，而且陣列格式仍會在下方照常驗證。
+      // 先做這個無損正規化，避免只因 JSON 外殼放錯一層就多等一輪模型，尤其是「改一個節點」
+      // 的小修改不該為此卡數十秒。
+      const editObj: Record<string, unknown> = { ...obj };
+      const misplacedStructure = editObj.structure;
+      if (
+        editObj.triggerParams === undefined &&
+        misplacedStructure && typeof misplacedStructure === "object" && !Array.isArray(misplacedStructure) &&
+        Array.isArray((misplacedStructure as Record<string, unknown>).triggerParams)
+      ) {
+        const { triggerParams, ...structureRest } = misplacedStructure as Record<string, unknown>;
+        editObj.triggerParams = triggerParams;
+        editObj.structure = Object.keys(structureRest).length > 0 ? structureRest : undefined;
+      }
+      const rawEdits = ((editObj.edits as unknown[]) ?? []).filter(
+        (e): e is { nodeId: string; stepIndex?: number; config: Record<string, unknown>; label?: string } =>
           !!e && typeof e === "object" && typeof (e as Record<string, unknown>).nodeId === "string" && typeof (e as Record<string, unknown>).config === "object" &&
-          ((e as Record<string, unknown>).stepIndex === undefined || typeof (e as Record<string, unknown>).stepIndex === "number"),
+          ((e as Record<string, unknown>).stepIndex === undefined || typeof (e as Record<string, unknown>).stepIndex === "number") &&
+          ((e as Record<string, unknown>).label === undefined || typeof (e as Record<string, unknown>).label === "string"),
       );
       const problems: string[] = [];
       let editedTriggerParams: ParamField[] | undefined;
-      if (obj.triggerParams !== undefined) {
-        const normalized = normalizeBuilderGraphObject({ triggerParams: obj.triggerParams });
+      if (editObj.triggerParams !== undefined) {
+        const normalized = normalizeBuilderGraphObject({ triggerParams: editObj.triggerParams });
         const validatedParams = triggerParamsSchema.safeParse(normalized.triggerParams);
         if (!validatedParams.success) {
           problems.push(...validatedParams.error.issues.slice(0, 8).map((issue) => `執行參數 ${issue.path.join(".") || "(根層)"}：${issue.message}`));
@@ -883,8 +1378,34 @@ export async function buildWorkflow(
           editedTriggerParams = validatedParams.data as ParamField[];
         }
       }
-      if (rawEdits.length === 0 && editedTriggerParams === undefined) {
-        problems.push(`edits 陣列是空的或元素格式不對——每個元素要是 {"nodeId":"節點id","config":{...}}`);
+      let editedSchedule: SuggestedSchedule | undefined;
+      if (editObj.schedule !== undefined) {
+        const scheduleCandidate = editObj.schedule;
+        if (!scheduleCandidate || typeof scheduleCandidate !== "object" || Array.isArray(scheduleCandidate)) {
+          problems.push("schedule 必須是包含自動時間的物件");
+        } else {
+          const cron = (scheduleCandidate as Record<string, unknown>).cron;
+          const params = (scheduleCandidate as Record<string, unknown>).params;
+          if (typeof cron !== "string" || (params !== undefined && (!params || typeof params !== "object" || Array.isArray(params)))) {
+            problems.push("schedule 必須包含合法的 cron 與物件 params");
+          } else {
+            editedSchedule = { cron, ...(params ? { params: params as Record<string, unknown> } : {}) };
+            problems.push(...validateSuggestedSchedule(editedSchedule));
+          }
+        }
+      }
+      let structure: GraphStructureEdits | undefined;
+      if (editObj.structure !== undefined) {
+        if (!editObj.structure || typeof editObj.structure !== "object" || Array.isArray(editObj.structure)) {
+          problems.push("structure 必須是物件");
+        } else {
+          const plan = planGraphStructureEdits({ nodes: currentGraph.nodes, edges: currentGraph.edges }, editObj.structure as GraphStructureEdits);
+          if (!plan.ok) problems.push(...plan.problems.map((problem) => `結構修改：${problem}`));
+          else structure = editObj.structure as GraphStructureEdits;
+        }
+      }
+      if (rawEdits.length === 0 && editedTriggerParams === undefined && !structure && !editedSchedule) {
+        problems.push(`edits、structure 與 schedule 都是空的或格式不對——設定修改要有 {"nodeId":"節點id","config":{...}}；結構修改要有 structure；改自動時間要有 schedule`);
       }
       for (const e of rawEdits) {
         let node = currentGraph.nodes.find((n) => n.id === e.nodeId);
@@ -895,6 +1416,21 @@ export async function buildWorkflow(
         if (!node) {
           problems.push(`edits 指到的節點 "${e.nodeId}" 不存在。現有節點：${currentGraph.nodes.map((n) => `${n.id}(${n.label})`).join("、")}——請用 id。`);
           continue;
+        }
+        // 真實踩過的事故：模型單憑文字猜測「這是另一份試算表」，沒有實際驗證過就把 5 個節點
+        // 目前能用的 scriptUrl 直接清空成空字串、要求使用者重新部署——猜測本身是錯的(其實是
+        // 同一份試算表)，清空後使用者反覆重新部署好幾次都救不回來，最後得靠外部直接改資料庫
+        // 才修好，完全違背「問題都在 agent-hub 對話裡讓 AI 解決」的產品目標。凡是把一個「目前
+        // 已經有值」的連結/端點類欄位改成空字串，而使用者原話沒有明確要求清空或重設，一律擋下
+        // 來、餵回去要求先確認——不能讓模型憑一個沒驗證過的理論就把已經在運作的設定砍掉。
+        if (typeof e.stepIndex !== "number") {
+          const wantsToClearConnection = /清空|移除|拿掉|重設|重新(?:設定|部署|貼|填|串接)/.test(requirementText);
+          for (const [key, value] of Object.entries(e.config)) {
+            const previous = node.config[key];
+            if (value === "" && typeof previous === "string" && previous.trim().length > 0 && /url|Url|網址|端點/.test(key) && !wantsToClearConnection) {
+              problems.push(`"${e.nodeId}" 的 "${key}" 目前有值，這次要改成空字串——除非使用者明確要求清空/重設這個連結，否則不能把已經在運作的設定砍掉。若懷疑目前的值有問題，要先講清楚具體理由(例如指出哪個檢查失敗)，不能只憑猜測就清空。`);
+            }
+          }
         }
         // repeat-steps 的定點修改(帶 stepIndex)——驗證要對照「那一步自己的節點型別 schema」，
         // 不是 repeat-steps 本身的 schema(它的 schema 是 items/itemVar/steps/outputKey，跟內嵌步驟的
@@ -948,12 +1484,17 @@ export async function buildWorkflow(
         }
       }
       if (problems.length === 0) {
-        return { phase: "edits", message: plainLanguage(String(obj.message ?? "已調整流程設定")), edits: rawEdits, triggerParams: editedTriggerParams };
+        return { phase: "edits", message: plainLanguage(String(obj.message ?? "已調整流程設定")), edits: rawEdits, triggerParams: editedTriggerParams, structure, schedule: editedSchedule };
       }
       lastProblems = problems;
     }
     // ── 建整張圖(ready)──zod 驗形狀 + lintGraph 驗語意，錯誤具體餵回
     else if (phase === "ready" || (Array.isArray(obj.nodes) && Array.isArray(obj.edges))) {
+      // 現有流程的日常修改若接受整包新圖，前端就得多一個「套用」動作，也很容易把剛修好的
+      // 其他節點覆蓋回舊快照。這不是 prompt 能保證的事：模型違反時直接餵回格式錯誤重來。
+      if (useEditPrompt) {
+        lastProblems = ["這是既有流程的修改，不能回 phase:ready 或整包 nodes/edges。請改回 phase:edits：設定變更用 edits；加/刪節點、重接線用 structure；只列本次差異，讓系統直接安全套用。"];
+      } else {
       const validated = graphSchema.safeParse(normalizeBuilderGraphObject(obj));
       if (!validated.success) {
         lastProblems = validated.error.issues.slice(0, 8).map((i) => `欄位 ${i.path.join(".") || "(根層)"}：${i.message}`);
@@ -970,9 +1511,15 @@ export async function buildWorkflow(
         if (lintErrors.length === 0) {
           // 由左到右分層對齊排列
           const pos = autoLayout(rawNodes, validated.data.edges);
-          const nodes = rawNodes.map((n) => ({ ...n, position: pos[n.id] ?? n.position }));
-          const edges = normalizeIfConditionPorts(nodes, validated.data.edges);
-          const triggerParams = validated.data.triggerParams as ParamField[] | undefined;
+          const positionedNodes = rawNodes.map((n) => ({ ...n, position: pos[n.id] ?? n.position }));
+          const edges = normalizeIfConditionPorts(positionedNodes, validated.data.edges);
+          const manualFileWiring = wireManualFileUpload(
+            positionedNodes,
+            validated.data.triggerParams as ParamField[] | undefined,
+            requirementText,
+          );
+          const nodes = manualFileWiring.nodes;
+          const triggerParams = manualFileWiring.triggerParams;
           const schedule = validated.data.schedule as SuggestedSchedule | undefined;
           const onFailureWorkflow = typeof validated.data.onFailureWorkflow === "string" && validated.data.onFailureWorkflow.trim()
             ? validated.data.onFailureWorkflow.trim()
@@ -981,17 +1528,18 @@ export async function buildWorkflow(
           // ── 需求完整性驗收(GPT 體檢 #2):lint 保證「圖合法」,這裡保證「需求有做到」。
           //    確定性規則從使用者原話抽契約(簽核/門檻/通知/存檔/排程…),沒對應到的餵回模型補一次;
           //    補完(或補不動)都把 ✓/✗ 清單附在回覆——沒做到的事要明講,不能默默當建好。 ──
-          const allUserText = userRequirementText(fullHistory);
-          const reqItems = checkRequirements(allUserText, { nodes, edges, triggerParams, schedule, onFailureWorkflow });
+          const reqItems = checkRequirements(requirementText, { nodes, edges, triggerParams, schedule, onFailureWorkflow });
           const unmet = reqItems.filter((i) => !i.met);
-          if (unmet.length > 0 && requirementFeedbackRounds < MAX_REQUIREMENT_FEEDBACK_ROUNDS && attempt < MAX_CORRECTIONS) {
-            // 弱模型常在第一次補齊時只補其中一項；還有修正預算就把「剩下哪項」再餵一次。
-            // 最多兩輪，仍保留明確止損，不讓同一需求無限燒模型。
-            requirementFeedbackRounds++;
+          if (unmet.length > 0) {
+            // 「還缺需求」絕不是可交付的 ready。以前修正輪數用完後會掉進下面的
+            // ready 分支，讓畫面宣稱流程已建好，實際卻把「每週手動上傳」做成沒有人
+            // 能選檔的排程。繼續把精確缺口餵回模型；若全部預算用完，迴圈結束後會
+            // 老實回 clarify，而不是把半成品交給使用者。
+            if (requirementFeedbackRounds < MAX_REQUIREMENT_FEEDBACK_ROUNDS) requirementFeedbackRounds++;
             lastProblems = [unmetFeedback(reqItems)];
           } else {
             // {{變數}} 引用查核是軟提醒(合法字面 {{}} 存在，不能硬擋)，附在訊息裡讓使用者/後續修復留意
-            const varWarnings = lintVarRefWarnings(nodes, edges, triggerParams, explicitTriggerInputKeys(allUserText));
+            const varWarnings = lintVarRefWarnings(nodes, edges, triggerParams, explicitTriggerInputKeys(requirementText));
             if (varWarnings.length > 0 && !varFeedbackGiven && attempt < MAX_CORRECTIONS) {
               // builder 產生的圖如果把 {{json}} 接到沒有 json 的上游，使用者不該第一次執行才發現。
               // 先把具體接線問題餵回一次；只修一輪，因為 prompt/template 也可能合法要求字面 {{佔位符}}。
@@ -1008,7 +1556,7 @@ export async function buildWorkflow(
               const scheduleNote = schedule ? `\n\n⏰ 套用流程時會一併建立排程（${describeSuggestedSchedule(schedule.cron)}，台北時間）；草稿不會背景執行，設為正式後才生效。` : "";
               // 觸發全自動套用(GPT 體檢 #5):白話提到 webhook/捷徑/表單 → 套用時自動啟用並回網址,
               // 不再叫使用者自己進 ⚡ 面板按啟用
-              const autoWebhook = /webhook|捷徑|表單|外部(工具|程式|系統|服務).{0,8}(觸發|打進|串接)/i.test(allUserText);
+              const autoWebhook = wantsAutoWebhook(requirementText);
               const webhookNote = autoWebhook ? "\n\n🔗 套用時會自動啟用 Webhook/表單網址(套用後顯示在對話裡,⚡ 面板也看得到)。" : "";
               return {
                 phase: "ready",
@@ -1021,10 +1569,25 @@ export async function buildWorkflow(
           lastProblems = lintErrors;
         }
       }
+      }
     }
     // ── 純 clarify(合法的反問)──直接回給使用者
     else {
-      return { phase: "clarify", message: plainLanguage(String(obj.message ?? stripCodeFences(raw))) };
+      const clarifyMessage = String(obj.message ?? stripCodeFences(raw));
+      // 已經附了可理解的範例檔，且明講「每次上傳/選檔」時，模型卻把它誤解成資料夾監聽、
+      // 追問一個不存在的絕對路徑，不能直接把這個錯誤反問丟回使用者。把平台已有的手動選檔
+      // 能力和具體輸出契約餵回模型，讓它直接建圖；這是「使用者白話操作」的底層收斂規則。
+      if (manualUploadWithExample && /資料夾|文件夾|folder|絕對路徑|watchPath/i.test(clarifyMessage)) {
+        lastProblems = [
+          "使用者已附範例檔且明講每次執行會手動上傳/選檔；這不是資料夾監聽，禁止追問資料夾或絕對路徑。請直接回 phase:ready：triggerParams 必須有 filePath(text、label=本次要處理的檔案)，讀檔/Excel/PDF 節點 path 用 {{filePath}}；不要填 trigger.watchPath。",
+        ];
+      } else if (hasConcreteInitialRequest && genericClarify(clarifyMessage)) {
+        lastProblems = [
+          "使用者的需求已經具體，但你只回了沒有指出任何缺口的罐頭反問。不要把資料格式、欄位位置或技術設定丟回給使用者；請用合理預設直接產出 phase:ready 的可安全試跑流程。若需要假設，寫在 message 讓使用者核對，不要回 phase:clarify。",
+        ];
+      } else {
+        return { phase: "clarify", message: plainLanguage(clarifyMessage) };
+      }
     }
 
     // 走到這裡 = 這一輪的輸出有具體問題。把「原文 + 錯在哪」餵回去要求修正(下一圈重打)。

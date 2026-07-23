@@ -66,6 +66,11 @@ function addDays(iso: string, days: number): string {
 }
 
 function relativeDayRange(text: string, now: Date): DateRange | null {
+  // 「本週成果」「上週報表」常是使用者要放進簡報的內容，並不代表他選了這段期間來執行。
+  // 只有週期詞附近真的有「跑／測／資料／區間」等執行語境，才把它變成參數；否則會出現
+  // 「我只是說本週成果，系統卻自作主張拿本週日期跑舊流程」這種嚴重的對話截斷。
+  const runPeriodContext = /(?:測試?|試跑|執行|跑|抓|讀|算|選).{0,14}(?:上週|上星期|前一週|本週|這週|本星期|昨天|昨日|今天|今日|(?:最近|過去)\s*\d{1,3}\s*天)|(?:上週|上星期|前一週|本週|這週|本星期|昨天|昨日|今天|今日|(?:最近|過去)\s*\d{1,3}\s*天).{0,14}(?:資料|區間|期間|日期|跑|執行|測|試|抓|讀|算|選)/;
+  if (!runPeriodContext.test(text)) return null;
   const todayParts = taipeiNow(now);
   const today = isoDate(todayParts.year, todayParts.month, todayParts.day)!;
   if (/昨天|昨日/.test(text)) {

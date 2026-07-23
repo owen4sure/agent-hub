@@ -85,7 +85,7 @@ export const emailReadNode: NodeDefinition = {
       for (const [i, a] of full.attachments.entries()) {
         const abs = path.join(ctx.outputDir, a.name);
         fs.writeFileSync(abs, a.content);
-        ctx.registerFile(a.name, abs, "application/octet-stream");
+        ctx.registerFile(a.name, abs, "application/octet-stream", "intermediate");
         if (i === 0) { filePath = abs; fileName = a.name; }
       }
       ctx.log(`讀到「${full.subject}」(${full.from})${full.attachments.length ? `，附件 ${full.attachments.length} 個已存檔` : ""}`);

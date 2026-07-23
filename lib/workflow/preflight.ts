@@ -4,13 +4,13 @@ import { probeSheetScript } from "./nodes/googleSheet";
 export interface ExternalPreflightTarget {
   nodeId: string;
   nodeLabel: string;
-  kind: "google-sheet-v2";
+  kind: "google-sheet-v3";
   endpoint: string;
 }
 
 /**
  * 只列出能「無副作用驗證」的外部整合。通知測試會真的發訊息，信箱測試會真的登入，不能偷做；
- * Google Sheet v2 有 capabilities 動作，不寫任何儲存格，所以可以在長流程開始前先確認。
+ * Google Sheet v3 有 capabilities 動作，不寫任何儲存格，所以可以在長流程開始前先確認。
  */
 export function collectExternalPreflightTargets(workflow: Workflow): ExternalPreflightTarget[] {
   const seen = new Set<string>();
@@ -20,7 +20,7 @@ export function collectExternalPreflightTargets(workflow: Workflow): ExternalPre
     const endpoint = String(node.config?.scriptUrl ?? "").trim();
     if (!endpoint || seen.has(endpoint)) continue;
     seen.add(endpoint);
-    targets.push({ nodeId: node.id, nodeLabel: node.label, kind: "google-sheet-v2", endpoint });
+    targets.push({ nodeId: node.id, nodeLabel: node.label, kind: "google-sheet-v3", endpoint });
   }
   return targets;
 }

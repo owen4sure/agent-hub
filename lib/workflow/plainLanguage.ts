@@ -13,6 +13,16 @@ const TOKEN_GLOSS: Record<string, string> = {
   periodStart: "區間開始日期", anchorDate: "區間結束日期", periodEnd: "區間結束日期",
   periodLabel: "原始日期區間", kpiSheetUrl: "週報試算表網址",
   kpiSheetScriptUrl: "週報試算表寫入網址",
+  // 這些不是內部欄位名，是真實世界的專有名詞，剛好長得像 camelCase(大小寫混合)會被下面的抓漏
+  // 規則誤認成程式變數——原樣傳回去，不能套「前面步驟提供的「X」資料」這種框架，那個說法是用來
+  // 描述「上一步算出來的欄位」，不是「使用者要去 Telegram 找的官方帳號名字」。實測踩過：AI 教使用者
+  // 「用 Telegram 搜尋 @BotFather 建立機器人」被改寫成「@前面步驟提供的「BotFather」資料」，
+  // 使用者對著這句話完全不知道要去哪裡找、也不知道這是不是系統壞了。
+  BotFather: "BotFather",
+  // 作業系統/產品名也是同一類「長得像 camelCase 的專有名詞」——真實踩過：建圖訊息說
+  // 「watchPath 預設為 macOS 桌面路徑」被改寫成「前面步驟提供的「macOS」資料 桌面路徑」。
+  macOS: "macOS", iOS: "iOS", iPadOS: "iPadOS", watchOS: "watchOS", iCloud: "iCloud", iPhone: "iPhone", iPad: "iPad",
+  GitHub: "GitHub", YouTube: "YouTube", PayPal: "PayPal", LinkedIn: "LinkedIn", WhatsApp: "WhatsApp", OneDrive: "OneDrive", SharePoint: "SharePoint", PowerPoint: "PowerPoint", OpenAI: "OpenAI",
 };
 
 const PREVIEW_FIELD_GLOSS: Record<string, string> = {
@@ -45,7 +55,7 @@ const PREVIEW_FIELD_GLOSS: Record<string, string> = {
 /** 執行紀錄卡只顯示可行動的錯誤，不把 Playwright 的 ANSI 控制碼與數十行重試 call log 倒給使用者。 */
 export function conciseRuntimeError(value: string): string {
   const clean = String(value ?? "")
-    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\r/g, "");
   if (/page\.fill: Timeout \d+ms exceeded/i.test(clean) && /element is not enabled/i.test(clean)) {
     const errorStart = clean.search(/page\.fill: Timeout \d+ms exceeded/i);
@@ -61,7 +71,7 @@ export function conciseRuntimeError(value: string): string {
   return clean;
 }
 
-function protectLiteralPieces(value: string, open = "\uE000", close = "\uE001"): { text: string; restore: (text: string) => string } {
+function protectLiteralPieces(value: string, open = "", close = ""): { text: string; restore: (text: string) => string } {
   const pieces: string[] = [];
   const stash = (piece: string) => {
     const index = pieces.push(piece) - 1;
@@ -69,10 +79,38 @@ function protectLiteralPieces(value: string, open = "\uE000", close = "\uE001"):
   };
   const text = value
     .replace(/https?:\/\/[^\s，。、）)】」』]+/gi, stash)
-    .replace(/[^\s，。；：:()（）「」『』]+?\.(?:xlsx|xlsm|xls|docx|doc|pdf|pptx|csv|tsv|zip|rtf|eml|txt|json|ya?ml|sql|jsx?|tsx?)\b/gi, stash);
+    .replace(/[^\s，。；：:()（）「」『』]+?\.(?:xlsx|xlsm|xls|docx|doc|pdf|pptx|csv|tsv|zip|rtf|eml|txt|json|ya?ml|sql|jsx?|tsx?)\b/gi, stash)
+    // 「」『』框住的內容一律當成「照抄的第三方 UI 字面文字」保護起來，不能被下面的白話替換規則
+    // 誤傷——真實踩過：教使用者去 Google Cloud Console 點「API 和服務→已啟用的 API」這種必須逐字
+    // 對照才找得到的選單路徑，被 .replace(/\bAPI\b/g, "外部服務") 改成「外部服務 和服務→已啟用的
+    // 外部服務」，使用者對著這句話在 Google 的畫面上永遠找不到對應選項。引號在這個檔案本來就是
+    // 「這是精確字面值」的既有慣例(節點名稱、分頁名稱都這樣引用)，保護它不影響原本的白話簡化用途。
+    .replace(/「[^」]*」|『[^』]*』/g, stash)
+    // 單一反引號(如 AI 很自然會寫的 `telegramBotToken`)是 markdown 慣例的「這是技術字面值」寫法，
+    // 跟「」『』同一個意思，卻完全不在上面那條保護規則涵蓋範圍內——真實踩過：AI 教使用者去設定頁
+    // 新增帳密欄位 `telegramBotToken`，反引號內容沒被保護，先被 hideTechnicalContracts 的 camelCase
+    // 抓漏規則壓成「前面步驟提供的「telegramBotToken」資料」，此檔案原本在最後才做的反引號→「」
+    // 轉換規則再把這段已經壓壞的文字整段包多一層引號，變成使用者完全看不懂要新增哪個欄位的雙層
+    // 包裹句子。直接在這裡把反引號內容轉成「」形式一併保護，跟上面那條規則同一個道理；
+    // 不比對三個以上連續反引號(``` 開頭的程式碼區塊)，那個由 plainLanguage 最後另一條規則整段隱藏。
+    .replace(/(?<!`)`(?!``)([^`\n]+)`(?!`)/g, (_match, inner: string) => stash(`「${inner}」`));
   return {
     text,
-    restore: (result: string) => result.replace(new RegExp(`${open}(\\d+)${close}`, "g"), (_match, index: string) => pieces[Number(index)] ?? ""),
+    // 還原必須跑到「不動點」，不能只掃一趟：規則之間會巢狀保護——檔名先被規則2收成 piece[0]
+    // (原文位置變成佔位符)，包住它的「」引號再被規則3把「整段含佔位符的內容」收成 piece[1]。
+    // 單趟 replace 還原出 piece[1] 後，剛還原回來的內容不會被同一趟重掃，內層佔位符就字面留在
+    // 輸出裡——佔位符的頭尾是看不見的私有區字元，使用者看到的就只剩中間的索引數字(真實踩過：
+    // 建圖總結把桌面輸出檔名「XXX.xlsx」顯示成「0」，新手第一眼就看到一個講不通的檔名)。
+    // 迴圈上限防禦性地擋「piece 內容剛好長得像佔位符」造成的無窮迴圈，正常巢狀 2~3 層就收斂。
+    restore: (result: string) => {
+      let out = result;
+      for (let pass = 0; pass < 10; pass++) {
+        const next = out.replace(new RegExp(`${open}(\\d+)${close}`, "g"), (_match, index: string) => pieces[Number(index)] ?? "");
+        if (next === out) break;
+        out = next;
+      }
+      return out;
+    },
   };
 }
 
@@ -110,6 +148,43 @@ export function humanizePreviewPair(key: string, value: unknown): string {
   return `${humanizePreviewField(key)}＝${humanizePreviewValue(value)}`;
 }
 
+/**
+ * 真實踩過的 bug：節點設定表單的欄位標籤(configSchema 的 label)常帶完整說明的括號子句
+ * (例如「Apps Script 寫入網址（必須以 /exec 結尾；不是 Google 試算表網址）」)——這在表單裡
+ * 是有用的提示，但被直接拿去組「已實際套用到節點」這種一次改好幾個節點的對話摘要時，同一句
+ * 落落長的括號說明會逐節點重複出現 5 次，把原本該是清單一眼看完的摘要，撐成使用者得從頭讀到尾
+ * 才找得到重點的一大段文字。摘要只需要「這是哪個欄位」，說明留在展開設定卡時才看，這裡把
+ * 標籤裡的括號子句(全形或半形都算)去掉，只留欄位本身的名稱。
+ */
+export function shortFieldLabel(label: string): string {
+  return label.replace(/[（(][^）)]*[）)]\s*$/, "").trim() || label;
+}
+
+const PRIVATE_RUN_OUTPUT_KEY = /(?:secret|token|password|cookie|session|authorization|api[_-]?key|file(?:path|text|content)?|attachment|html|screenshot|stack|trace|code)/i;
+const USEFUL_RUN_OUTPUT_KEY = /(?:result|summary|total|sum|amount|count|answer|message|text|value|report|output|結果|合計|總計|筆數|金額|摘要|答案)/i;
+
+/**
+ * 執行完成後，對話應直接說出「算到了什麼」，而不是要小白再去翻執行紀錄。
+ * 這是瀏覽器端可用的純函式：只讀已經由 API 回傳、且不含帳密的 output_json，仍會再排除
+ * 檔案全文、路徑、Cookie、HTML 和程式碼等不適合放進對話的內容。
+ */
+export function formatSafeRunOutput(raw: string | null | undefined): string[] {
+  if (!raw || raw.length > 2_000_000) return [];
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { return []; }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([key, item]) => !PRIVATE_RUN_OUTPUT_KEY.test(key) && item !== undefined && item !== null && item !== "")
+    .filter(([, item]) => {
+      const text = typeof item === "string" ? item : "";
+      return text.length <= 800 && !/<(?:html|body|script|div)\b/i.test(text);
+    })
+    .sort(([a], [b]) => Number(USEFUL_RUN_OUTPUT_KEY.test(b)) - Number(USEFUL_RUN_OUTPUT_KEY.test(a)))
+    .slice(0, 6)
+    .map(([key, item]) => humanizePreviewPair(key, item));
+  return entries;
+}
+
 /** 寫入預覽保留要核對的實際值，但不把 JSON 與程式內部欄位名丟給使用者。 */
 export function formatPlannedWriteLines(items: { nodeLabel: string; destination: string; payload: unknown }[]): string[] {
   return items.map((item) => {
@@ -138,7 +213,12 @@ export function formatPlannedWriteLines(items: { nodeLabel: string; destination:
 function glossToken(token: string, paramLabels: Record<string, string>): string {
   const known = paramLabels[token] ?? TOKEN_GLOSS[token];
   if (known) return known;
-  if (/^[A-Za-z_$][\w$.-]*$/.test(token)) return "前面步驟提供的資料";
+  // 真實踩過的 bug：不認得的欄位名一律丟成同一句「前面步驟提供的資料」，同一則訊息裡若同時出現
+  // 好幾個不同的不認得欄位(例如自我檢查訊息列出的「上游會輸出的欄位：userId、replyToken、message」)，
+  // 全部塌成一模一樣的句子，使用者完全分不出是哪一個欄位——這種訊息的價值就是要讓人分得清楚是誰。
+  // 同樣的情況也發生在 AI 自己講解「去設定頁新增一個帳密欄位」時：那個欄位的真實名稱使用者一定要
+  // 知道才填得對，含糊帶過等於沒講。一律保留原始 token 名稱、只是用引號框起來(這個檔案本來就把
+  // 引號當「這是精確字面值」)，寧可讓使用者看到一個英文詞，也不要讓兩個不同的東西看起來一樣。
   return `前面步驟提供的「${token}」資料`;
 }
 
@@ -172,9 +252,28 @@ function hideTechnicalContracts(value: string, paramLabels: Record<string, strin
 
 /** 說明面板的最後一道白話過濾：模型寫的說明不能漏出程式碼或協定術語。 */
 export function plainLanguage(value: string, paramLabels: Record<string, string> = {}): string {
+  // 真實踩過的 bug(從真實使用者對話紀錄挖出來)：AI 說明改了哪個節點時，習慣在中文標籤後面
+  // 用括號附上節點自己的內部 id 當對照，例如「計算週增量、月累計與年累計」(extractNumbers)。
+  // 這個 id 不是「上游步驟傳來的資料欄位」，是這一步自己的名字，但下面 hideTechnicalContracts
+  // 的 camelCase 抓漏規則不分青紅皂白，把它當成未知資料欄位套上「前面步驟提供的「X」資料」的
+  // 框架，變成使用者看不懂的「「計算週增量、月累計與年累計」(前面步驟提供的「extractNumbers」
+  // 資料)」。使用者根本不需要看到內部 id——中文標籤本身就已經講清楚是哪一步，這種緊接在引號
+  // 標籤後面、括號裡只有純英數識別字的內容，整段拿掉即可，不必費工把它「翻譯」成什麼。
+  const withoutNodeIdRefs = String(value ?? "").replace(/([」』])[（(][A-Za-z_$][A-Za-z0-9_$]*[）)]/g, "$1");
   const h = makeHumanizer(paramLabels);
-  const protectedValue = protectLiteralPieces(String(value ?? ""));
-  const result = hideTechnicalContracts(h(protectedValue.text), paramLabels)
+  const protectedValue = protectLiteralPieces(withoutNodeIdRefs);
+  const humanized = h(protectedValue.text);
+  // glossToken 現在的 fallback 會自己產生「」引號包住的欄位名(如「lineChannelToken」)——這是
+  // humanizer 這一步「剛產生」的引號，不是原始輸入裡就有的，上面 protectedValue 那次保護在這之前
+  // 就已經掃過一輪，抓不到這些新引號。沒有這層保護的話，下面 hideTechnicalContracts 的 camelCase
+  // 抓漏規則會把這些剛加上引號的欄位名當成新的識別字再處理一次，變成雙重包裹的「前面步驟提供的
+  // 「前面步驟提供的「lineChannelToken」資料」資料」(實測在 LINE 觸發流程的自我檢查訊息裡踩到)。
+  // 標記要跟外層 protectedValue、以及 plainChatMessage 自己那層都不同，不然還原器的索引會互撞
+  // (跟 plainChatMessage 已經注解過的道理一樣——巢狀保護一定要用不同標記字元)；且要撐到整條
+  // .replace() 鏈的最後才還原(跟外層 protectedValue 同一種活法)，不能提早還原，不然後面其他規則
+  // 一樣有機會誤傷剛產生的引號內容。
+  const reprotected = protectLiteralPieces(humanized, "", "");
+  const result = hideTechnicalContracts(reprotected.text, paramLabels)
     .replace(/```[\s\S]*?```/g, "(背後的技術細節已隱藏)")
     .replace(/`([^`]+)`/g, "「$1」")
     .replace(/\bWebhook\b/gi, "專屬接收網址")
@@ -201,13 +300,13 @@ export function plainLanguage(value: string, paramLabels: Record<string, string>
     .replace(/公司信箱\s+網址/g, "公司信箱網址")
     .replace(/[{}]{2,}/g, "")
     .trim();
-  return protectedValue.restore(result);
+  return protectedValue.restore(reprotected.restore(result));
 }
 
 /** 對話顯示層也處理舊版已存下來的 key=value 結果，讓升級後不用清除舊對話才看得到白話。 */
 export function plainChatMessage(value: string): string {
   // 使用不同標記，避免內層 plainLanguage 的還原器把外層暫存片段誤當成自己的索引而刪掉。
-  const protectedValue = protectLiteralPieces(String(value ?? ""), "\uE100", "\uE101");
+  const protectedValue = protectLiteralPieces(String(value ?? ""), "", "");
   const humanizedPairs = protectedValue.text.replace(
     /([A-Za-z_$㐀-鿿][A-Za-z0-9_$㐀-鿿]*)\s*[=＝]\s*([^；，\n•]+)/g,
     (_match, key: string, raw: string) => {

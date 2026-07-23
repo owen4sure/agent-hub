@@ -2,6 +2,7 @@ import type { Workflow, WorkflowNode } from "./types";
 import { getNodeDef } from "./registry";
 import { parseSheetUrl } from "./nodes/googleSheet";
 import { humanizeTemplates, plainLanguage } from "./plainLanguage";
+import { nodeSummary } from "./nodeSummary";
 export { plainLanguage } from "./plainLanguage";
 
 export interface ExplainStep {
@@ -63,7 +64,7 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
       const pattern = str(c, "watchPattern").trim();
       if (watchPath) {
         return {
-          text: `流程的起點。監聽「${watchPath}」資料夾，有新檔案${pattern ? `(檔名含「${pattern}」)` : ""}丟進來就自動跑(也可手動執行/排程/Webhook 觸發)。`,
+          text: `流程的起點。監聽「${watchPath}」資料夾，有新檔案${pattern ? `(檔名含「${pattern}」)` : ""}丟進來就自動跑(也可手動執行、排程，或由其他服務通知啟動)。`,
           settings: [["監聽資料夾", watchPath], ["檔名條件", pattern || "（任何檔案）"]],
         };
       }
@@ -72,24 +73,24 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
         const from = str(c, "mailFromFilter").trim();
         const folder = str(c, "mailFolder").trim() || "收件匣";
         return {
-          text: `流程的起點。每分鐘檢查信箱(${folder})，收到${subject ? `主旨含「${subject}」` : ""}${subject && from ? "、" : ""}${from ? `寄件人含「${from}」` : ""}${!subject && !from ? "任何" : ""}的新信就自動跑——下游用 {{subject}}/{{body}} 拿信的內容，附件用 {{filePath}}。流程要「設為正式」才會開始收信；IMAP 帳密在設定頁填。`,
+          text: `流程的起點。每分鐘檢查信箱(${folder})，收到${subject ? `主旨含「${subject}」` : ""}${subject && from ? "、" : ""}${from ? `寄件人含「${from}」` : ""}${!subject && !from ? "任何" : ""}的新信就自動跑；後面的步驟會自動取得信件標題、內容和附件。流程要「設為正式」才會開始收信；登入資料在設定頁填。`,
           settings: [["主旨條件", subject || "（任何主旨）"], ["寄件人條件", from || "（任何人）"], ["信箱資料夾", folder]],
         };
       }
       if (str(c, "telegramWatch").trim() === "on") {
         const keyword = str(c, "telegramKeyword").trim();
         return {
-          text: `流程的起點。傳${keyword ? `含「${keyword}」的` : ""}訊息給你的 Telegram bot 就自動跑——下游用 {{message}} 拿訊息文字。只接受設定頁綁定的 Chat ID；流程要「設為正式」才會開始接收。`,
+          text: `流程的起點。傳${keyword ? `含「${keyword}」的` : ""}訊息給你的 Telegram 機器人就自動跑；後面的步驟會自動取得訊息內容。只接受你在設定頁綁定的帳號傳來的訊息；流程要「設為正式」才會開始接收。`,
           settings: [["訊息條件", keyword || "（任何訊息）"]],
         };
       }
       if (str(c, "lineWatch").trim() === "on") {
         return {
-          text: "流程的起點。有人傳訊息給你的 LINE 官方帳號就自動跑——下游用 {{message}} 拿訊息文字。webhook 網址在 ⚡ 觸發面板取得(要經隧道開成公網 HTTPS 再填進 LINE Developers)。",
+          text: "流程的起點。有人傳訊息給你的 LINE 官方帳號就自動跑；後面的步驟會自動取得訊息內容。到「觸發」面板依畫面指引完成 LINE 連接後即可啟用。",
           settings: [],
         };
       }
-      return { text: "流程的起點。手動按「執行」、排程時間到、或 Webhook 被呼叫，就從這裡開始跑(監聽/收信/Telegram/LINE/Webhook 都在 ⚡ 觸發面板設定)。", settings: [] };
+      return { text: "流程的起點。手動按「執行」、排程時間到，或其他服務通知時，就從這裡開始跑。自動啟動方式都在「觸發」面板，會有畫面指引。", settings: [] };
     }
 
     case "browser-login": {
@@ -244,20 +245,13 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
     }
 
     case "custom-code": {
-      const intent = str(c, "intent");
-      // 從背後的處理挖出它實際在動哪份 Google 試算表/哪些分頁,讓不同 workflow 分得出來、知道去哪改。
-      // 一律講白話:試算表用「可點的網址」呈現、分頁用「分頁名稱」,不出現任何程式術語。
-      const hints = extractSheetHints(str(c, "code"));
-      const settings: [string, string][] = intent ? [["這一步做什麼", intent]] : [];
-      if (hints.sheets.length) settings.push(["用到的 Google 試算表", hints.sheets.map((id) => `https://docs.google.com/spreadsheets/d/${id}`).join("、")]);
-      if (hints.tabs.length) settings.push(["會動到的分頁", hints.tabs.join("、")]);
-      if (!hints.sheets.length && hints.secrets.length) settings.push(["寫到哪份試算表", "看「設定」頁填的網址/資料"]);
-      const tabPhrase = hints.tabs.length ? `會更新「${hints.tabs.join("」「")}」分頁` : "";
+      // intent 與 code 是給產碼器的執行規格，常含 rows/headers、欄位代號、throw、輸出名稱等。
+      // 即使經過 plainLanguage 仍會變成又長又難懂的半技術說明；使用者只需要知道目的、是否
+      // 不猜資料，以及可直接用對話修改。實際資料來源／寫入位置由各自的讀寫節點負責顯示。
+      const purpose = nodeSummary("custom-code", c);
       return {
-        text: intent
-          ? `這一步：${intent}${tabPhrase ? `（${tabPhrase}）` : ""}。背後由 AI 自動幫你完成，你只要看這段白話；要調整直接跟 AI 說就好。`
-          : "這一步由 AI 依你的需求自動完成，要調整直接跟 AI 說。",
-        settings,
+        text: `${purpose}。這一步會依已確認的規則處理資料；資料不完整或對不起來時會停下來提醒，不會自行猜測。想改規則時，直接在對話說你要改成什麼即可。`,
+        settings: [["這一步的目的", purpose]],
       };
     }
 
@@ -325,7 +319,7 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
       const days = str(c, "sinceDays", "3").trim() || "3";
       const folder = str(c, "folder").trim() || "收件匣";
       return {
-        text: `直接連信箱(${folder})抓最近 ${days} 天內「最新一封」${subject ? `主旨含「${subject}」` : ""}${subject && from ? "、" : ""}${from ? `寄件人含「${from}」` : ""}${!subject && !from ? "的" : "的"}信(免開瀏覽器)，信的內文給後面步驟用，附件自動存檔(下游用 {{filePath}} 接)。IMAP 帳密要先在設定頁填好。`,
+        text: `直接連信箱(${folder})抓最近 ${days} 天內「最新一封」${subject ? `主旨含「${subject}」` : ""}${subject && from ? "、" : ""}${from ? `寄件人含「${from}」` : ""}${!subject && !from ? "的" : "的"}信(不用開瀏覽器)，信件內容會交給後面的步驟，附件也會自動保存。登入資料要先在設定頁填好。`,
         settings: [["主旨條件", subject || "（任何主旨）"], ["寄件人條件", from || "（任何人）"], ["找最近幾天", `${days} 天`], ["信箱資料夾", folder]],
       };
     }
@@ -382,7 +376,7 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
 
     case "slack-notify": {
       return {
-        text: "把訊息發到 Slack 頻道。Webhook 網址要先在設定頁「通知串接」填好(有測試發送)。",
+        text: "把訊息發到 Slack 頻道。第一次使用時，到設定頁的「通知串接」依畫面指引完成連接，並可先發一則測試訊息。",
         settings: [],
       };
     }

@@ -33,8 +33,9 @@ export function historyHasReusablePreviewFile(history: HistoryMessageLike[]): bo
 }
 
 /**
- * 建圖 API 的安全上限是 100 則；畫面可以保留完整聊天，但送模型時保留第一則需求、最近內容，
- * 再用剩餘名額補最近的附件訊息。如此長期修改同一 workflow 不會在第 101 則突然永遠不能再送。
+ * 建圖 API 的安全上限是 100 則；畫面可以保留完整聊天，但送模型時優先保留每一句「使用者已確認的
+ * 需求／修正」。以前只保留第一句與最近內容，聊久後「不要寫入」「改成另一份表」等中段決定會消失，
+ * AI 只好重問或照舊圖亂跑。再用剩餘名額補最近回覆與附件。
  */
 export function compactHistoryForRequest<T extends HistoryMessageLike>(history: T[], max = 96): T[] {
   if (history.length <= max) return history;
@@ -44,6 +45,10 @@ export function compactHistoryForRequest<T extends HistoryMessageLike>(history: 
   for (let i = recentStart; i < history.length; i++) keep.add(i);
   for (let i = history.length - 1; i >= 1 && keep.size < max; i--) {
     if ((history[i].parts ?? []).some((part) => (part.kind === "file" || part.kind === "image") && typeof part.assetId === "string")) keep.add(i);
+  }
+  // 使用者的話是需求的權威來源；助手的舊回答只是推論，不能比已確認的規則優先留下。
+  for (let i = 1; i < history.length && keep.size < max; i++) {
+    if (history[i].role === "user") keep.add(i);
   }
   for (let i = recentStart - 1; i >= 1 && keep.size < max; i--) keep.add(i);
   return [...keep].sort((a, b) => a - b).map((index) => history[index]);

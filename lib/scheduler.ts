@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
-import { startWorkflowRun } from "./workflow/engine";
+import { resumeRun, startWorkflowRun } from "./workflow/engine";
 import { getWorkflow } from "./workflow/store";
 import { resolveParams } from "./relativeDate";
 import { sweepExpiredApprovals } from "./approvals";
@@ -186,6 +186,47 @@ export function deleteSchedule(id: string): boolean {
   return db.prepare(`DELETE FROM schedules WHERE id = ?`).run(id).changes > 0;
 }
 
+interface PendingRetryRow {
+  id: string;
+  workflow_id: string;
+  trigger_params_json: string | null;
+  attempt: number;
+  retry_at: string;
+  original_trigger: string;
+  created_at: string;
+  run_id: string | null;
+}
+
+/**
+ * 掃到期的「失敗自動重跑」：無人值守正式流程失敗、判定為外部服務暫時性問題(見 engine.ts 的
+ * classifyFailure 的 transient)時，engine.ts 會排一筆到期時間到 pending_retries。這裡跟
+ * 排程的每分鐘心跳一起檢查，到期就用同一份觸發參數重新執行一次；用「條件式 DELETE」的
+ * changes 數當原子性搶佔鎖，多進程同時掃到同一筆也只會有一邊真的觸發。這次執行若又失敗，
+ * 是否再排一次由 engine.ts 依同一套 transient 判斷+次數上限決定，這裡不重複判斷。
+ */
+function sweepDueRetries() {
+  const db = getDb();
+  const due = db.prepare(`SELECT * FROM pending_retries WHERE retry_at <= datetime('now')`).all() as PendingRetryRow[];
+  for (const row of due) {
+    const claimed = db.prepare(`DELETE FROM pending_retries WHERE id = ?`).run(row.id);
+    if (claimed.changes !== 1) continue;
+    try {
+      const wf = getWorkflow(row.workflow_id);
+      if (!wf || wf.status !== "official") continue; // 流程被刪除或改回草稿就不再自動重跑
+      const params = row.trigger_params_json ? JSON.parse(row.trigger_params_json) : {};
+      // 優先從當初失敗的那個 run 續跑：失敗前已經成功的步驟(可能已經寫入試算表/寄出通知)沿用
+      // 上次結果，不重跑一遍。真實顧慮：一律 startWorkflowRun 從頭跑的話，若失敗前已有步驟產生
+      // 外部副作用，自動重跑會讓那些副作用重新發生一次。resumeRun 本身啟動不了(run 已被清理、
+      // 圖改過找不到失敗節點等)才退回從頭執行；沒有 run_id 的舊資料(欄位剛加，既有紀錄是 NULL)
+      // 也一樣退回從頭執行，行為跟改動前相同，不會出錯。
+      const resumed = row.run_id ? resumeRun(row.run_id, { headed: false }) : { ok: false as const };
+      if (!resumed.ok) startWorkflowRun(row.workflow_id, params, { trigger: "retry", headed: false });
+    } catch (err) {
+      console.error(`[scheduler] 失敗自動重跑 ${row.id} 觸發失敗:`, err);
+    }
+  }
+}
+
 let tickTimer: ReturnType<typeof setInterval> | null = null;
 
 function tick() {
@@ -196,6 +237,11 @@ function tick() {
     sweepExpiredApprovals();
   } catch (err) {
     console.error("[scheduler] 簽核逾時掃描失敗:", err);
+  }
+  try {
+    sweepDueRetries();
+  } catch (err) {
+    console.error("[scheduler] 失敗自動重跑掃描失敗:", err);
   }
   const dt = taipeiParts(now);
   const minuteKey = `${dt.year}-${pad(dt.month)}-${pad(dt.day)}T${pad(dt.hour)}:${pad(dt.minute)}`;
