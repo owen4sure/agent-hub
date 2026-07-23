@@ -23,6 +23,9 @@ export interface ReplacePair {
 export interface ReplaceDetail {
   nodeLabel: string;
   count: number;
+  /** 這個節點裡實際被改到的欄位鍵名(含 "label" 代表節點名稱本身)——讓呼叫方能判斷這次全域
+   * 替換有沒有波及使用者意料之外的範圍(例如程式碼、節點名稱)，不能只回報「改了幾處」。 */
+  touchedFields: string[];
 }
 
 export interface ReplaceResult {
@@ -86,24 +89,28 @@ function replaceAll(s: string, from: string, to: string): { out: string; count: 
   return count > 0 ? { out: s.split(from).join(to), count } : { out: s, count: 0 };
 }
 
-/** 遞迴走訪一個 config 物件的所有字串值做替換，回傳總次數(物件是新的，不改原件) */
-function replaceInConfig(cfg: Record<string, unknown>, pairs: ReplacePair[]): { cfg: Record<string, unknown>; count: number } {
+/** 遞迴走訪一個 config 物件的所有字串值做替換，回傳總次數與實際被改到的欄位鍵名(物件是新的，不改原件) */
+function replaceInConfig(cfg: Record<string, unknown>, pairs: ReplacePair[]): { cfg: Record<string, unknown>; count: number; touchedKeys: string[] } {
   let count = 0;
+  const touchedKeys: string[] = [];
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(cfg)) {
     if (typeof v === "string") {
       let s = v;
+      let keyCount = 0;
       for (const p of pairs) {
         const r = replaceAll(s, p.from, p.to);
         s = r.out;
-        count += r.count;
+        keyCount += r.count;
       }
+      if (keyCount > 0) touchedKeys.push(k);
+      count += keyCount;
       out[k] = s;
     } else {
       out[k] = v;
     }
   }
-  return { cfg: out, count };
+  return { cfg: out, count, touchedKeys };
 }
 
 /**
@@ -135,17 +142,23 @@ export function syncLabelForDestinationChange(label: string, config: Record<stri
 /**
  * 對整張 workflow(名稱/節點名稱/所有設定字串/程式碼/repeat-steps 內嵌步驟/觸發參數)做替換並存檔。
  * 存檔前自動備份(可從「🕓 版本」一鍵還原)。以磁碟最新版為底(AGENTS 存檔鐵則2)。
+ *
+ * `opts.apply === false`：只計算「如果真的替換，會改到哪裡、幾處」，不備份、不存檔——
+ * 用於使用者明確說「先不要改」時，先讓使用者看到範圍再決定要不要真的做(2026-07 第三輪外部
+ * 審查抓到的 P0：這條路以前不管使用者有沒有叫停都會無條件立即寫入)。
  */
-export function applyTextReplace(workflowId: string, pairs: ReplacePair[]): Omit<ReplaceResult, "pairs" | "remainder"> {
+export function applyTextReplace(workflowId: string, pairs: ReplacePair[], opts: { apply?: boolean } = {}): Omit<ReplaceResult, "pairs" | "remainder"> {
+  const apply = opts.apply !== false;
   const wf = getWorkflow(workflowId);
   if (!wf) throw new Error("workflow 不存在");
-  backupWorkflow(workflowId);
+  if (apply) backupWorkflow(workflowId);
 
   let totalCount = 0;
   const details: ReplaceDetail[] = [];
 
   const nodes = wf.nodes.map((n) => {
     let nodeCount = 0;
+    const touchedFields: string[] = [];
     // 節點名稱
     let label = n.label;
     for (const p of pairs) {
@@ -153,11 +166,14 @@ export function applyTextReplace(workflowId: string, pairs: ReplacePair[]): Omit
       label = r.out;
       nodeCount += r.count;
     }
+    if (label !== n.label) touchedFields.push("label");
     // 一般設定值(含 intent/code 等所有字串欄位)
-    const { cfg, count } = replaceInConfig(n.config ?? {}, pairs);
+    const { cfg, count, touchedKeys } = replaceInConfig(n.config ?? {}, pairs);
     nodeCount += count;
+    touchedFields.push(...touchedKeys);
     let config = cfg;
     const syncedLabel = syncLabelForDestinationChange(label, n.config ?? {}, pairs);
+    if (syncedLabel.count > 0 && syncedLabel.label !== label) touchedFields.push("label");
     label = syncedLabel.label;
     nodeCount += syncedLabel.count;
     // repeat-steps 的 steps 是一包 JSON 字串——必須「解析後對內部字串值替換、再序列化」，
@@ -173,8 +189,10 @@ export function applyTextReplace(workflowId: string, pairs: ReplacePair[]): Omit
               stepLabel = r.out;
               nodeCount += r.count;
             }
+            if (stepLabel !== (s.label ?? "")) touchedFields.push("steps[].label");
             const rc = replaceInConfig(s.config ?? {}, pairs);
             nodeCount += rc.count;
+            touchedFields.push(...rc.touchedKeys.map((k) => `steps[].${k}`));
             return { ...s, ...(s.label !== undefined ? { label: stepLabel } : {}), config: rc.cfg };
           });
           config = { ...config, steps: JSON.stringify(newSteps, null, 0) };
@@ -182,7 +200,7 @@ export function applyTextReplace(workflowId: string, pairs: ReplacePair[]): Omit
       } catch { /* steps 不是合法 JSON 就跳過內部替換(外層欄位已處理) */ }
     }
     if (nodeCount > 0) {
-      details.push({ nodeLabel: n.label, count: nodeCount });
+      details.push({ nodeLabel: n.label, count: nodeCount, touchedFields: [...new Set(touchedFields)] });
       totalCount += nodeCount;
     }
     return { ...n, label, config };
@@ -224,6 +242,6 @@ export function applyTextReplace(workflowId: string, pairs: ReplacePair[]): Omit
   });
 
   const next: Workflow = { ...wf, name, nodes, triggerParams };
-  saveWorkflow(next);
+  if (apply) saveWorkflow(next);
   return { totalCount, details, nameChanged };
 }

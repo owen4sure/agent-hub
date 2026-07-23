@@ -23,6 +23,8 @@ export async function register() {
     const engine = await import("./lib/workflow/engine");
     engine.recoverCrashedRuns();
     engine.pruneOrphanOutputs();
+    const { recoverCrashedRepairs } = await import("./lib/workflow/repairSessions");
+    recoverCrashedRepairs();
     const { cleanupStaleProposals } = await import("./lib/workflow/fixProposals");
     cleanupStaleProposals();
     const approvals = await import("./lib/approvals");

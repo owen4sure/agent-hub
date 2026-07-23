@@ -4,6 +4,14 @@ import { DATE_TOKENS } from "../relativeDate";
 import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
 
 /**
+ * 草稿可以暫時是空白的，卻絕不能把「還沒有任何工作要做」當成一條已能執行的流程。
+ * 這個判斷刻意不放進 lintGraph：建圖過程中的空白畫布仍合法；只有執行／自動測試入口要擋。
+ */
+export function hasExecutableSteps(nodes: WorkflowNode[]): boolean {
+  return nodes.some((node) => node.type !== "trigger");
+}
+
+/**
  * 確定性的節點圖 lint(零模型、純規則)。
  *
  * 為什麼是整個建圖迴圈的核心：裡面的模型是可換的(Sonnet/Gemini/地端弱模型)，圖的正確性
@@ -38,6 +46,15 @@ export function lintGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): string[
     errors.push(...validateConfigTypes(n.id, n.config ?? {}, def.configSchema));
     if (n.type === "custom-code" && !String(n.config?.code ?? "").trim() && !String(n.config?.intent ?? "").trim()) {
       errors.push(`節點 "${n.id}"(自訂步驟)沒有白話 intent，也沒有可執行內容——至少要說清楚這一步要做什麼。`);
+    }
+    // 佔位符路徑攔截：模型愛寫「/Users/[使用者名稱]/Desktop/…」這種要人自己代換的教學式路徑，
+    // 但這個產品的使用者是不會改設定的新手——字面存進去的佔位符路徑永遠不會存在，監聽/讀檔
+    // 就靜默失效(真實踩過：新手實測 watchPath 被填成含 [使用者名稱] 的字面路徑)。這裡把它變成
+    // lint 錯誤餵回自我修正迴圈，模型會自己換成真實路徑(建圖 prompt 已注入這台電腦的實際家目錄)。
+    for (const [key, value] of Object.entries(n.config ?? {})) {
+      if (typeof value === "string" && /\[(?:使用者名稱|你的[^\]]{1,12}|USERNAME|username|user ?name|帳號名稱)\]/i.test(value)) {
+        errors.push(`節點 "${n.id}" 的 "${key}" 填了佔位符「${value.slice(0, 80)}」——要填這台電腦的真實路徑/值，不能留 [使用者名稱] 這種要人自己代換的寫法。`);
+      }
     }
   }
 
@@ -322,6 +339,99 @@ export function withSchemaDefaults(
   return out;
 }
 
+export interface CustomCodeOutputAnalysis {
+  /** return 物件字面量裡明確以字面鍵名新增的欄位(展開/計算鍵不算，因為不是靜態可列舉的名稱) */
+  declaredFields: string[];
+}
+
+/** 從某個 return{...} 物件字面量的原始碼位置抽出它「這一層」的分句(逗號分隔，考慮巢狀 {}/[]/() 深度、字串跳脫)。回傳 null 代表括號沒能正常配對。 */
+function extractObjectLiteralSegments(code: string, openBraceIdx: number): string[] | null {
+  let depth = 0;
+  let end = -1;
+  for (let i = openBraceIdx; i < code.length; i++) {
+    const c = code[i];
+    if (c === "'" || c === '"' || c === "`") {
+      // 跳過字串/模板字面量整段內容，避免字串裡剛好出現的 { } 干擾括號配對深度
+      const quote = c;
+      i++;
+      while (i < code.length && code[i] !== quote) { if (code[i] === "\\") i++; i++; }
+      continue;
+    }
+    if (c === "{") depth++;
+    else if (c === "}") { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end < 0) return null; // 括號沒能正常配對，放棄(語法健檢理論上已擋過壞語法，這裡是保底)
+  const body = code.slice(openBraceIdx + 1, end);
+  const segments: string[] = [];
+  let seg = "";
+  let depth2 = 0;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === "'" || c === '"' || c === "`") {
+      const quote = c;
+      seg += c; i++;
+      while (i < body.length && body[i] !== quote) { seg += body[i]; if (body[i] === "\\") { i++; seg += body[i] ?? ""; } i++; }
+      if (i < body.length) seg += body[i];
+      continue;
+    }
+    if (c === "{" || c === "[" || c === "(") depth2++;
+    else if (c === "}" || c === "]" || c === ")") depth2--;
+    if (c === "," && depth2 === 0) { segments.push(seg); seg = ""; continue; }
+    seg += c;
+  }
+  if (seg.trim()) segments.push(seg);
+  return segments;
+}
+
+/**
+ * 對 custom-code 節點的程式碼做「純字串掃描」的輕量靜態分析(不是完整 JS parser，也不執行程式碼)，
+ * 抽出程式碼裡每一個 `return { ... }` 物件字面量的「這一層」明確具名欄位並聯集起來——這些是這個
+ * 節點自己「新增」的欄位。注意：engine.ts 執行期一律 `nodeOutputs.set(node.id, {...input,
+ * ...result.output})`(不管 custom-code 自己的 return 有沒有寫 `...ctx.input`)，上游欄位一定會
+ * 沿用不遺失，所以呼叫端(lintVarRefWarnings)不能只看這裡回傳的 declaredFields 就當作「這個節點
+ * 的完整輸出」，一定要再疊加它自己上游的可用欄位——這裡回傳的只是「新增」的部分。
+ *
+ * 為什麼是「所有 return」的聯集、不是只看最後一個：早期分支(如 if(!ok) return {error:'x'})
+ * 也是合法的執行路徑之一，只看主線的最後一個 return 會漏掉這些分支才有的欄位，讓下游引用它們
+ * 時被誤判成不存在(第四輪外部審查抓到：多個條件分支只看最後一個可能漏掉合法輸出)。
+ *
+ * 任何看起來不像能安全解析、或含有「展開了 ctx.input 以外的未知來源」(如 `return {...out}`，
+ * out 是本地變數，無法知道它實際有哪些欄位)或「計算鍵」(`[dynamicKey]: value`)的情況，一律回傳
+ * null——這代表「這裡沒有把握」，呼叫端要維持原本「無法列舉就不擋下游」的保守行為，不能因為
+ * 這個掃描器誤判而生出錯誤或不完整的欄位清單去擋住合法的下游引用(第四輪外部審查抓到：以前
+ * 把「展開未知變數」當成「沒有新增欄位」而非「無法判斷」，會讓下游的合法引用被誤判成不存在)。
+ */
+export function analyzeCustomCodeOutput(code: string): CustomCodeOutputAnalysis | null {
+  const returnMatches = [...code.matchAll(/\breturn\s*\{/g)];
+  if (returnMatches.length === 0) return null;
+  const declaredFields = new Set<string>();
+  for (const match of returnMatches) {
+    const braceStart = match.index! + match[0].length - 1; // 指向那個開括號 '{'
+    const segments = extractObjectLiteralSegments(code, braceStart);
+    if (segments === null) return null;
+    for (const rawSeg of segments) {
+      const s = rawSeg.trim();
+      if (!s) continue;
+      if (s.startsWith("...")) {
+        // ...ctx.input 是已知安全、契約規定的慣例寫法，呼叫端會另外處理上游欄位的沿用；
+        // 展開其他任何來源(本地變數、其他物件)都無法靜態得知它實際攤開了哪些欄位，
+        // 與其假裝「這個分支沒有新增欄位」，不如整體承認分析不出來，回退成不擋檢查。
+        if (/^\.\.\.\s*ctx\.input\b/.test(s)) continue;
+        return null;
+      }
+      if (s.startsWith("[")) return null; // 計算鍵(如 [dynamicKey]: value)，實際欄位名無法靜態得知
+      // 真實踩過的雷：JS 識別字合法包含中文字(這個codebase的 custom-code 大量用中文欄位名當
+      // 簡寫屬性，如 `return { A通路週, B通路週 }`)，只認 [A-Za-z0-9_$] 的話「A通路週」會在
+      // 「通」這個非 ASCII 字元前被截斷成「A」，兩個不同通路的欄位就會被誤判成同一個欄位名。
+      // 改用 \p{L}(任何語言的字母)+\p{Nd}(數字)的 Unicode 屬性比對。
+      const m = s.match(/^(?:"([^"]*)"|'([^']*)'|([\p{L}_$][\p{L}\p{Nd}_$]*))\s*:?/u);
+      const key = m?.[1] ?? m?.[2] ?? m?.[3];
+      if (key) declaredFields.add(key);
+    }
+  }
+  return { declaredFields: [...declaredFields] };
+}
+
 /** 從 outputs 宣告字串("attachmentPath(說明), filename(說明)")抽出欄位名 */
 function outputFieldNames(outputs: string | undefined): string[] {
   if (!outputs) return [];
@@ -370,7 +480,21 @@ export function lintVarRefWarnings(
     for (const pid of parents.get(id) ?? []) {
       const parent = byId.get(pid);
       if (!parent) continue;
-      if (parent.type === "custom-code") { memo.set(id, null); return null; } // 輸出無法靜態得知
+      if (parent.type === "custom-code") {
+        // 2026-07 第三輪外部審查抓到的 P1：以前只要上游鏈裡有 custom-code 就整個放棄檢查，
+        // 下游引用了不存在的欄位也不會被抓到(全綠但語意錯誤)。現在先靜態掃描這個節點實際的
+        // return{...}物件字面量(見 analyzeCustomCodeOutput)取得它「新增」的欄位；只有掃描不出來
+        // 時才維持舊行為(放棄檢查)。engine.ts 執行期一律 {...input, ...result.output}(不管
+        // custom-code 自己的 return 是否寫了 ...ctx.input)，所以這個節點自己的上游欄位一定會
+        // 沿用，這裡永遠都要疊加它自己的可用欄位集合，不能只看這個節點宣告了什麼新欄位。
+        const analysis = analyzeCustomCodeOutput(String(parent.config?.code ?? ""));
+        if (!analysis) { memo.set(id, null); return null; }
+        for (const f of analysis.declaredFields) acc.add(f);
+        const up = availableFor(pid, seen);
+        if (up === null) { memo.set(id, null); return null; }
+        for (const f of up) acc.add(f);
+        continue; // custom-code 沒有 def.outputs/outputKey 這類靜態宣告，其餘共用邏輯不適用
+      }
       if (parent.type === "trigger") {
         for (const k of triggerParamKeys) acc.add(k); // 觸發參數(如期間衍生欄位)
         // 監聽觸發執行時會注入 {{filePath}}/{{fileName}}(watchers.ts);手動執行時 RunForm 也會
@@ -432,9 +556,12 @@ export function lintVarRefWarnings(
         if (secretKeys.has(head)) continue; // 帳密欄位(執行期由設定頁提供)
         // 帳密/觸發參數是執行期才知道的集合，這裡放行「常見命名」以外一律不猜——
         // 但 llm-decide 的 prompt、template-text 的 template 本來就可能要字面 {{}}，只提醒不擋。
+        // 逐一把欄位名框上「」——這個清單的價值就是讓人分得清楚有哪幾個不同的欄位，
+        // 每個名字外面加引號後，白話過濾器(plainLanguage 的既有慣例)就不會再去动它，
+        // 不然好幾個不同欄位名字都會被同一句「前面步驟提供的資料」蓋掉、看起來像同一個東西。
         errors.push(
           `節點 "${n.id}" 的設定「${key}」引用了 {{${token}}}，但它的上游節點都不會輸出這個欄位` +
-            `（上游會輸出的欄位：${[...avail].join("、") || "（沒有上游）"}）。` +
+            `（上游會輸出的欄位：${[...avail].map((f) => `「${f}」`).join("、") || "（沒有上游）"}）。` +
             `若要引用上游資料請改成正確的欄位名；若要今天日期用 {{today}}；若這是要字面輸出的文字可忽略此條。`,
         );
       }

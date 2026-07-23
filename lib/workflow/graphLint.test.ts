@@ -1,16 +1,155 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertRunnableGraph, lintGraph, lintVarRefWarnings, validateConfigTypes, withSchemaDefaults } from "./graphLint";
+import { analyzeCustomCodeOutput, assertRunnableGraph, hasExecutableSteps, lintGraph, lintVarRefWarnings, validateConfigTypes, withSchemaDefaults } from "./graphLint";
+import { plainChatMessage } from "./plainLanguage";
 import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
 
 function node(id: string, type: string, config: Record<string, unknown> = {}): WorkflowNode {
   return { id, type, label: id, config, position: { x: 0, y: 0 } };
 }
 
+// 2026-07 第三輪外部審查抓到的 P1：custom-code 節點沒有可驗證的輸出契約，下游引用不存在的欄位
+// 完全不會被抓到(全綠但語意錯誤)。analyzeCustomCodeOutput 對已產生的程式碼做輕量靜態掃描，
+// 抽出 return{...} 物件字面量裡明確具名的欄位——不執行程式碼，只在「有把握」時給出結果。
+test("analyzeCustomCodeOutput：抽出明確新欄位，展開(...ctx.input 或其他)不算欄位名", () => {
+  const result = analyzeCustomCodeOutput("const x = 1;\nreturn { ...ctx.input, monthlyTotal: x, note: '備註' };");
+  assert.ok(result);
+  assert.deepEqual(result!.declaredFields.sort(), ["monthlyTotal", "note"]);
+});
+
+test("analyzeCustomCodeOutput：沒有展開時，一樣正確抽出明確列出的欄位", () => {
+  const result = analyzeCustomCodeOutput("return { total: 100, label: 'x' };");
+  assert.ok(result);
+  assert.deepEqual(result!.declaredFields.sort(), ["label", "total"]);
+});
+
+test("analyzeCustomCodeOutput：巢狀物件、字串裡的逗號/大括號不會把巢狀鍵誤判成頂層欄位", () => {
+  const result = analyzeCustomCodeOutput(
+    "return { summary: { a: 1, b: 2 }, note: 'a, b, {c}', total: 3 };",
+  );
+  assert.ok(result);
+  assert.deepEqual(result!.declaredFields.sort(), ["note", "summary", "total"]);
+});
+
+// 第四輪外部審查抓到的真實bug：計算鍵的實際欄位名執行期才知道，以前只是「跳過不算」，
+// 等於默默宣稱「這個節點只有 fixedField 這個欄位」——下游若真的引用了計算鍵實際算出的欄位名，
+// 會被誤判成不存在。計算鍵代表這個節點的輸出形狀本來就無法靜態確定，整體要回傳 null，
+// 不能只跳過那一項、假裝其餘欄位清單仍然完整可信。
+test("analyzeCustomCodeOutput：含計算鍵([x]: y)代表輸出形狀無法靜態確定，整體回傳 null(不能假裝其餘欄位清單完整)", () => {
+  const result = analyzeCustomCodeOutput("const key = 'x';\nreturn { ...ctx.input, [key]: 1, fixedField: 2 };");
+  assert.equal(result, null);
+});
+
+// 第四輪外部審查抓到的真實bug：展開一個「本地變數」(而非 ctx.input)時，那個變數實際有哪些
+// 欄位無從得知，以前當成「沒有新增欄位」處理，等於假裝這個節點只沿用上游、沒有任何新增——
+// 下游若真的引用了 out 裡的欄位(如 {{answer}})，會被誤判成不存在。這種情況要老實承認
+// 分析不出來、回傳 null，而不是自信地宣稱一份不完整的清單。
+test("analyzeCustomCodeOutput：展開 ctx.input 以外的未知來源(本地變數)時，整體形狀無法確定，回傳 null", () => {
+  const result = analyzeCustomCodeOutput("const out = { answer: 1 };\nreturn { ...out };");
+  assert.equal(result, null);
+});
+
+test("analyzeCustomCodeOutput：多個 return 是所有分支的聯集，不只看最後一個(避免漏掉早期分支的合法輸出)", () => {
+  const result = analyzeCustomCodeOutput("if (!ok) return { error: 'x' };\nreturn { ...ctx.input, result: 1 };");
+  assert.ok(result);
+  assert.deepEqual(result!.declaredFields.sort(), ["error", "result"]);
+});
+
+// 真實踩過的雷(對照一條真實生產流程跑出來的假警告才發現)：JS 識別字合法包含中文字，這個
+// codebase 的 custom-code 大量用中文欄位名當簡寫屬性(`return { A通路週, B通路週, C通路週 }`)。
+// 若只認 ASCII 字元，「A通路週」會在「通」被截斷成「A」，導致「A通路週」「A通路月累計」
+// 「A通路上月餘額」全部被誤判成同一個欄位「A」，其餘中文欄位名整個消失。
+test("analyzeCustomCodeOutput：中文欄位名(含簡寫屬性)要完整保留，不能在非 ASCII 字元被截斷", () => {
+  const result = analyzeCustomCodeOutput(
+    "const A通路週 = 1, B通路週 = 2, A通路月累計 = 3;\nreturn { A通路週, B通路週, A通路月累計 };",
+  );
+  assert.ok(result);
+  assert.deepEqual(result!.declaredFields.sort(), ["A通路月累計", "A通路週", "B通路週"].sort());
+});
+
+test("analyzeCustomCodeOutput：找不到 return{ 或括號沒配對時回傳 null，維持保守放行", () => {
+  assert.equal(analyzeCustomCodeOutput("throw new Error('永遠失敗');"), null);
+  assert.equal(analyzeCustomCodeOutput("return { broken: "), null);
+  // 直接 return 一個裸識別字(不是物件字面量)同樣無法靜態知道它有哪些欄位
+  assert.equal(analyzeCustomCodeOutput("const out = { answer: 1 };\nreturn out;"), null);
+});
+
+test("lintVarRefWarnings：custom-code 可以靜態分析時，下游能引用它自己上游的欄位；引用真的不存在的欄位要警告", () => {
+  const nodes = [
+    node("trigger", "trigger"),
+    node("calc", "custom-code", { intent: "算總額", code: "return { ...ctx.input, monthlyTotal: 100 };" }),
+    node("notify", "notify", { message: "{{monthlyTotal}} 跟 {{filePath}}" }),
+  ];
+  const edges: WorkflowEdge[] = [{ from: "trigger", to: "calc" }, { from: "calc", to: "notify" }];
+  // filePath 是 trigger 節點的事實變數(監聽觸發會注入)，經過有展開的 custom-code 應該還在可用集合裡
+  assert.deepEqual(lintVarRefWarnings(nodes, edges, []), []);
+
+  const badNodes = [
+    node("trigger", "trigger"),
+    node("calc", "custom-code", { intent: "算總額", code: "return { ...ctx.input, monthlyTotal: 100 };" }),
+    node("notify", "notify", { message: "{{typoField}}" }),
+  ];
+  const warnings = lintVarRefWarnings(badNodes, edges, []);
+  assert.equal(warnings.length, 1, "以前上游有 custom-code 就整個放棄檢查，現在能靜態分析時要抓出真的不存在的欄位");
+});
+
+// engine.ts 執行期一律 nodeOutputs.set(node.id, {...input, ...result.output})，不管 custom-code
+// 自己的 return 裡有沒有寫 ...ctx.input，上游欄位都會沿用不遺失——靜態分析要跟這個真實行為一致，
+// 不能只因為程式碼「看起來」沒展開，就誤判上游欄位在這裡被截斷(這是修這個功能過程中真的踩到、
+// 靠對照真實生產流程 wf-917a7777-copy-523d71-copy-9cad26 的執行語意才發現並修正的錯誤設計)。
+test("lintVarRefWarnings：custom-code 的程式碼即使沒寫 ...ctx.input，上游(更早)的欄位仍會沿用(對應引擎的合併語意)", () => {
+  const nodes = [
+    node("trigger", "trigger"),
+    node("sheet", "google-sheet-read", { sheetUrl: "https://x" }),
+    node("calc", "custom-code", { intent: "只回總額", code: "return { total: 100 };" }),
+    node("notify", "notify", { message: "{{rows}}" }), // rows 是 sheet 節點的輸出，engine.ts 會讓它沿用到 calc 之後
+  ];
+  const edges: WorkflowEdge[] = [{ from: "trigger", to: "sheet" }, { from: "sheet", to: "calc" }, { from: "calc", to: "notify" }];
+  assert.deepEqual(lintVarRefWarnings(nodes, edges, []), []);
+});
+
+test("lintVarRefWarnings：custom-code 的程式碼靜態分析不出來時，維持原本『無法列舉就不擋』的行為", () => {
+  const nodes = [
+    node("trigger", "trigger"),
+    node("calc", "custom-code", { intent: "動態產生", code: "throw new Error('尚未實作');" }),
+    node("notify", "notify", { message: "{{anythingGoes}}" }),
+  ];
+  const edges: WorkflowEdge[] = [{ from: "trigger", to: "calc" }, { from: "calc", to: "notify" }];
+  assert.deepEqual(lintVarRefWarnings(nodes, edges, []), []);
+});
+
 test("lintGraph：合法的最小圖(trigger + custom-code)沒有錯誤", () => {
   const nodes = [node("n1", "trigger"), node("n2", "custom-code", { intent: "test" })];
   const edges: WorkflowEdge[] = [{ from: "n1", to: "n2" }];
   assert.deepEqual(lintGraph(nodes, edges), []);
+});
+
+test("lintVarRefWarnings：欄位不存在的警告訊息經過白話過濾後，不同的上游欄位名不能被壓成同一句看不出差異的話", () => {
+  // 真實踩過的 bug：LINE 觸發流程裡 userId/replyToken 這兩個不同的觸發參數，被 plainChatMessage
+  // 一起壓成同一句「前面步驟提供的資料」，使用者(或AI自己)完全看不出這則警告到底在講哪個欄位缺漏。
+  const triggerParams: ParamField[] = [
+    { key: "userId", label: "傳訊者", type: "text" },
+    { key: "replyToken", label: "回覆用token", type: "text" },
+  ];
+  const nodes = [
+    node("trigger", "trigger"),
+    node("reply", "custom-code", { intent: "回覆", headers: "{{typoField}}" }),
+  ];
+  const edges: WorkflowEdge[] = [{ from: "trigger", to: "reply" }];
+  const warnings = lintVarRefWarnings(nodes, edges, triggerParams);
+  assert.equal(warnings.length, 1);
+  const rendered = plainChatMessage(warnings[0]);
+  assert.match(rendered, /「userId」/, "userId 這個欄位名要在白話訊息裡保持看得出來");
+  assert.match(rendered, /「replyToken」/, "replyToken 這個欄位名要在白話訊息裡保持看得出來，且要跟 userId 不一樣");
+  // 兩個不同欄位轉換後的文字不能相等——這才是真正在防的事：不同東西不能看起來一樣
+  const userIdPhrase = rendered.match(/「userId」[^、）。]*/)?.[0];
+  const replyTokenPhrase = rendered.match(/「replyToken」[^、）。]*/)?.[0];
+  assert.ok(userIdPhrase && replyTokenPhrase && userIdPhrase !== replyTokenPhrase);
+});
+
+test("hasExecutableSteps：空白草稿可保存但不能被當成可執行流程", () => {
+  assert.equal(hasExecutableSteps([node("trigger", "trigger")]), false);
+  assert.equal(hasExecutableSteps([node("trigger", "trigger"), node("n1", "template-text", { template: "內容" })]), true);
 });
 
 test("lintGraph：沒有 trigger 節點要報錯", () => {

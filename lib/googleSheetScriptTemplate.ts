@@ -5,20 +5,50 @@
 export const GOOGLE_SHEET_SCRIPT_TEMPLATE = `function doPost(e) {
   try {
     var body = JSON.parse(e.postData.contents);
-    if (body.action === "capabilities") {
-      return out({ ok: true, agentHubVersion: 2, actions: ["append", "updateTable"] });
-    }
     var ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (!ss) return out({ ok: false, error: "Cannot read properties of null (reading 'getSheetByName')" });
+    if (body.action === "capabilities") {
+      // 真實踩過的事故：這個安全檢查只驗證「有沒有綁定某份試算表」(ss 不是 null)，驗不出
+      // 「綁定的是不是正確的那份」——腳本專案剛好綁在一份空白的 Untitled spreadsheet 上
+      // (不是使用者真正要寫入的那份表)，這個檢查照樣回 ok:true，使用者看到綠燈以為部署好了，
+      // 真的執行才發現寫錯地方，重新部署好幾次都因為同一個誤綁而沒有解決。回傳目前綁定的試算表
+      // 名稱，讓使用者在按下「檢查並套用」的當下就能肉眼核對「這是不是我要的那份」，不用等到
+      // 真的寫入失敗才發現。
+      return out({ ok: true, agentHubVersion: 4, actions: ["append", "updateTable", "readCells", "writeCells"], spreadsheetName: ss.getName() });
+    }
     var sheet = body.sheet ? ss.getSheetByName(body.sheet) : ss.getSheets()[0];
-    if (!sheet) return out({ ok: false, error: "找不到分頁: " + body.sheet });
+    if (!sheet) {
+      var actualSheetNames = ss.getSheets().map(function (s) { return s.getName(); }).join("、");
+      return out({ ok: false, error: "找不到分頁: " + body.sheet + "；這支腳本目前綁定的試算表叫「" + ss.getName() + "」，裡面實際的分頁有：" + actualSheetNames });
+    }
 
     if (body.action === "updateTable") return updateTable(sheet, body);
+    if (body.action === "readCells") return readCells(sheet, body);
+    if (body.action === "writeCells") return writeCells(sheet, body);
     if (!Array.isArray(body.cells)) return out({ ok: false, error: "沒有收到要新增的欄位" });
     sheet.appendRow(body.cells);
     return out({ ok: true, row: sheet.getLastRow() });
   } catch (err) {
     return out({ ok: false, error: String(err && err.message ? err.message : err) });
   }
+}
+
+function readCells(sheet, body) {
+  if (!Array.isArray(body.cells) || body.cells.length === 0) return out({ ok: false, error: "沒有指定要讀回的儲存格" });
+  var cells = body.cells.map(function(a1) {
+    var range = sheet.getRange(String(a1));
+    return { a1: range.getA1Notation(), value: range.getDisplayValue() };
+  });
+  return out({ ok: true, cells: cells });
+}
+
+function writeCells(sheet, body) {
+  if (!Array.isArray(body.cells) || body.cells.length === 0) return out({ ok: false, error: "沒有指定要寫入的儲存格" });
+  body.cells.forEach(function(item) {
+    sheet.getRange(String(item.a1)).setValue(item.value);
+  });
+  SpreadsheetApp.flush();
+  return out({ ok: true, updated: body.cells.length });
 }
 
 function updateTable(sheet, body) {

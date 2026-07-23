@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { formatDate, humanizeCron } from "@/components/ui";
+import { formatScheduleNextRun, humanizeCron } from "@/components/ui";
 import { SCHEDULE_MODES, WEEKDAY_NAMES, buildCron, timeValid } from "@/lib/cron";
 import { MailSection, TelegramSection, LineSection } from "./TriggerSections";
 
@@ -111,7 +111,7 @@ function ScheduleSection({ workflowId }: { workflowId: string }) {
             <button onClick={() => toggle(s)} aria-label={s.enabled ? "停用這個排程" : "啟用這個排程"} title={s.enabled ? "已啟用，點一下停用" : "已停用，點一下啟用"}>{s.enabled ? "🟢" : "⚪️"}</button>
             <div className="min-w-0">
               <div className="truncate">{humanizeCron(s.cron)}</div>
-              {s.next_run_at && <div className="text-xs faint">下次 {formatDate(s.next_run_at)}</div>}
+              {s.next_run_at && <div className="text-xs faint">下次 {formatScheduleNextRun(s.next_run_at)}</div>}
             </div>
             <button onClick={() => remove(s.id)} className="ml-auto text-xs" style={{ color: "var(--red)" }}>刪除</button>
           </div>
@@ -234,7 +234,7 @@ function WatchSection({ workflowId }: { workflowId: string }) {
   return (
     <section className="border-t pt-4">
       <SectionTitle icon="📁" title="資料夾監聽" badge={<StateBadge on={active && wfStatus === "official"} onText="監聽中" offText={active ? "待設為正式" : "未設定"} />} />
-      <p className="text-xs muted leading-relaxed mb-2">盯著一個資料夾，有新檔案丟進來就自動跑這條流程。檔案路徑會變成 <code className="font-mono">{"{{filePath}}"}</code>、檔名是 <code className="font-mono">{"{{fileName}}"}</code>，流程裡直接引用。</p>
+      <p className="text-xs muted leading-relaxed mb-2">盯著一個資料夾；有新檔案放進去時，就把那份檔案交給這條流程處理。</p>
       <div className="space-y-2">
         <div>
           <div className="text-xs faint mb-1.5">要監聽哪個資料夾？（完整路徑）</div>
@@ -309,26 +309,23 @@ function WebhookSection({ workflowId }: { workflowId: string }) {
 
   return (
     <section className="border-t pt-4">
-      <SectionTitle icon="🔗" title="Webhook" badge={<StateBadge on={enabled} onText="啟用中" offText="未啟用" />} />
-      <p className="text-xs muted leading-relaxed mb-2">給外部工具一個專屬網址（手機捷徑、別的程式、另一條流程），對它 POST 一下就觸發。送來的 JSON 欄位會變成流程裡的 <code className="font-mono">{"{{欄位}}"}</code>。</p>
+      <SectionTitle icon="🔗" title="由另一個工具開始" badge={<StateBadge on={enabled} onText="啟用中" offText="未啟用" />} />
+      <p className="text-xs muted leading-relaxed mb-2">如果你有手機捷徑、另一個程式或另一條流程要啟動這條流程，開啟後把下面的專屬網址貼給它即可。不確定要不要用這個功能時，直接在對話問 AI。</p>
       {!enabled ? (
-        <button onClick={() => call("POST")} disabled={busy} className="btn btn-primary w-full justify-center">{busy ? "啟用中…" : "啟用 Webhook"}</button>
+        <button onClick={() => call("POST")} disabled={busy} className="btn btn-primary w-full justify-center">{busy ? "啟用中…" : "建立專屬啟動網址"}</button>
       ) : (
         <div className="space-y-2">
           <div className="flex gap-1.5">
             <input readOnly value={url ?? ""} className="input font-mono text-xs flex-1 min-w-0" onFocus={(e) => e.currentTarget.select()} />
             <button onClick={copy} className="btn btn-ghost shrink-0 text-sm">{copied ? "✓ 已複製" : "複製"}</button>
           </div>
-          <pre className="card p-2 text-xs font-mono overflow-x-auto" style={{ background: "var(--surface-2)" }}>{`curl -X POST '${url}' \\
-  -H 'Content-Type: application/json' \\
-  -d '{"備註":"hello"}'`}</pre>
           <div className="pt-1">
             <div className="text-xs faint mb-1">📝 表單網址(同一把鑰匙的「人類版」——用瀏覽器開，填表送出即觸發)</div>
             <div className="flex gap-1.5">
               <input readOnly value={url ? url.replace("/api/hooks/", "/form/") : ""} className="input font-mono text-xs flex-1 min-w-0" onFocus={(e) => e.currentTarget.select()} />
               <button onClick={async () => { if (url) { await navigator.clipboard.writeText(url.replace("/api/hooks/", "/form/")); setCopied(true); setTimeout(() => setCopied(false), 1500); } }} className="btn btn-ghost shrink-0 text-sm">複製</button>
             </div>
-            <p className="text-xs faint mt-1">表單欄位＝這條流程的觸發參數；沒宣告參數就給一個通用「備註」欄。</p>
+            <p className="text-xs faint mt-1">用瀏覽器打開這個網址，填完表單送出後就會開始執行。沒有特別需要時不必使用它。</p>
           </div>
           <p className="text-xs faint leading-relaxed">網址本身就是鑰匙，別貼到公開的地方；不小心外流就按「重新產生」，舊網址立刻失效。伺服器只聽本機，所以只有這台電腦上的程式打得到。</p>
           <div className="flex gap-1.5">

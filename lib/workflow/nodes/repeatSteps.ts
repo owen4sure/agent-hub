@@ -2,6 +2,7 @@ import type { NodeDefinition, NodeContext } from "../types";
 import { PermanentError } from "../types";
 import { getWorkflow, saveWorkflow } from "../store";
 import { generateCustomCode, isPlaceholderCode } from "../codegen";
+import { scanSecretKeys } from "../secretScan";
 import { DATE_TOKENS, resolveValue } from "../../relativeDate";
 import { dryRunSkipKind, DRY_RUN_SKIPPED_WRITES_KEY, type DryRunSkippedWrite } from "../dryRun";
 // ⚠️ 不能在頂層 import registry：registry 的節點清單 import 這個檔案，形成循環——哪個先被載入，
@@ -107,6 +108,11 @@ export const repeatStepsNode: NodeDefinition = {
     },
     { key: "outputKey", label: "彙整結果要輸出到哪個欄位(預設 results)", type: "text", default: "results" },
   ],
+  // 容器鐵則③:任何「walk 整張圖處理 config」的機制都要涵蓋內嵌 steps——裡面的 custom-code 一樣
+  // 可能用 ctx.secrets.X,漏掃的話設定頁長不出欄位。直接掃 steps 的原始 JSON 字串即可(regex 不用解析)。
+  secretFields(config) {
+    return scanSecretKeys(String(config.steps ?? ""));
+  },
   retryable: true,
   // 一個節點做 N 輪工作(每輪含瀏覽器操作,第一次執行還可能要產程式碼30-120秒),引擎預設的3分鐘必然不夠——
   // 逾時被砍掉重試等於前面成功的輪次全部白做。步驟層有自己的重試(見下),整個節點給足空間。

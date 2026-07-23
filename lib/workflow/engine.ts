@@ -4,18 +4,22 @@ import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { chromium, type Browser, type Page, type BrowserContextOptions } from "playwright";
 import { getDb } from "../db";
-import { getGlobalSettings, getWorkflowModel, getWorkflowSecrets, getMaxConcurrent } from "../settingsStore";
+import { decryptSecret, encryptSecret } from "../secretVault";
+import { getGlobalSettings, getWorkflowModel, getWorkflowSecretsForKeys, getMaxConcurrent } from "../settingsStore";
 import { resolveValue, DATE_TOKENS } from "../relativeDate";
 import { notifyDesktop } from "../notify";
 import { getClient } from "../modelClient";
-import { aiRepairNode } from "./repair";
+import { aiRepairGraph } from "./graphRepair";
 import { createProposal } from "./fixProposals";
-import { assertRunnableGraph, withSchemaDefaults } from "./graphLint";
-import { getWorkflow, findWorkflowByRef } from "./store";
+import { assertRunnableGraph, hasExecutableSteps, withSchemaDefaults } from "./graphLint";
+import { getWorkflow, findWorkflowByRef, deriveRequiresSecrets } from "./store";
 import { getNodeDef } from "./registry";
-import { dryRunSkipKind } from "./dryRun";
+import { dryRunSkipKind, DRY_RUN_SKIPPED_WRITES_KEY } from "./dryRun";
 import { markPendingNodeRunsSkipped } from "./runState";
+import { workflowExecutionFingerprint } from "./fingerprint";
+import { collectRunSeeds, downstreamNodeIds, type RunSeedRow } from "./partialRun";
 import { ExternalPreflightError, preflightExternalIntegrations } from "./preflight";
+import { isPlaceholderCode } from "./codegen";
 import { PermanentError, RetryableError, WaitingForHuman } from "./types";
 import type { Workflow, WorkflowNode, RunSession, NodeContext } from "./types";
 
@@ -25,10 +29,14 @@ export function defaultMaxConcurrent() { return DEFAULT_MAX_CONCURRENT; }
 const RETRY_BACKOFF_MS = [3000, 9000];
 const MAX_ATTEMPTS = 3;
 const NODE_TIMEOUT_MS = 3 * 60 * 1000;
+// 無人值守正式流程失敗、且判定為外部服務暫時性問題(見 classifyFailure 的 transient)時，
+// 延後自動重跑的等待時間與最多重試次數——避免真的卡死的東西被無限重試下去。
+const AUTO_RETRY_DELAY_MINUTES = 5;
+const MAX_AUTO_RETRIES = 2;
 
 /** manual=使用者按執行；其餘都是無人值守的自動觸發(結果要靠桌面通知讓人知道) */
-export type TriggerSource = "manual" | "schedule" | "watch" | "webhook" | "form" | "error" | "email" | "telegram" | "line";
-const TRIGGER_LABEL: Record<TriggerSource, string> = { manual: "手動", schedule: "排程", watch: "資料夾監聽", webhook: "Webhook", form: "表單", error: "錯誤觸發", email: "收信觸發", telegram: "Telegram 訊息", line: "LINE 訊息" };
+export type TriggerSource = "manual" | "schedule" | "watch" | "webhook" | "form" | "error" | "email" | "telegram" | "line" | "retry";
+const TRIGGER_LABEL: Record<TriggerSource, string> = { manual: "手動", schedule: "排程", watch: "資料夾監聽", webhook: "Webhook", form: "表單", error: "錯誤觸發", email: "收信觸發", telegram: "Telegram 訊息", line: "LINE 訊息", retry: "失敗自動重跑" };
 
 /** 續跑規格：從某個節點接著跑，之前成功的節點沿用結果不重跑(修好一步不用整條從頭來、簽核恢復也靠它) */
 export interface ResumeSpec {
@@ -40,6 +48,9 @@ export interface ResumeSpec {
   rerunNodeIds: string[];
   /** 簽核恢復用：這個節點不執行，直接視為成功、輸出指定資料並走指定分支 */
   preResolved?: { nodeId: string; output: Record<string, unknown>; activePort?: string };
+  /** 「從這一步開始測」用：不在重跑清單又沒有 seed 的節點一律標 skipped、絕不默默正常執行——
+   * 使用者就是要略過前面登入/抓資料/寫入那段;缺資料會以 {{變數}} 警告老實浮出,不是假裝跑過。 */
+  skipUnseeded?: boolean;
 }
 
 interface QueueItem {
@@ -69,14 +80,21 @@ export class QueueCapacityError extends Error {}
 export interface MissingWorkflowSetting {
   key: string;
   label: string;
+  /** 節點自己宣告的欄位型別(text/password)——前端安全輸入卡要用這個決定要不要用密碼框遮住，
+   * 不能靠猜 key 名稱像不像密碼(Slack webhook 網址這類敏感值 key 名稱完全不含 pass/token/secret，
+   * 猜錯就會讓機密網址明文顯示在畫面上)。 */
+  type: "text" | "password";
 }
 
-/** 所有觸發來源共用的執行前檢查；別等登入、抓信、下載都做完才在最後一步發現少一個寫入網址。 */
+/** 所有觸發來源共用的執行前檢查；別等登入、抓信、下載都做完才在最後一步發現少一個寫入網址。
+ * 帳密清單「每次都重新推導」，不用磁碟上存的舊 requiresSecrets——custom-code 的帳密需求(ctx.secrets.X)
+ * 是掃文字推導的，舊清單沒有它，會放行一個必然在半路炸 undefined 的執行(踩過:Google 登入自訂步驟)。 */
 export function getMissingWorkflowSettings(wf: Workflow, trustedOverrides: Record<string, string> = {}): MissingWorkflowSetting[] {
-  const secrets = { ...getWorkflowSecrets(wf.id), ...trustedOverrides };
-  return (wf.requiresSecrets ?? [])
+  const required = deriveRequiresSecrets(wf) ?? [];
+  const secrets = { ...getWorkflowSecretsForKeys(wf.id, required.map((field) => field.key)), ...trustedOverrides };
+  return required
     .filter((field) => !String(secrets[field.key] ?? "").trim())
-    .map((field) => ({ key: field.key, label: field.label }));
+    .map((field) => ({ key: field.key, label: field.label, type: field.type }));
 }
 
 export class MissingWorkflowSettingsError extends Error {
@@ -100,6 +118,8 @@ const cancelSignals = new Map<string, AbortController>();
 /** 這次失敗是不是使用者自己按停止造成的(用來跳過失敗分類/排程失敗通知，顯示成中性的「已停止」)。
  * export 出去讓 autofix/autorun 等呼叫端能判斷「這不是真的壞掉，是使用者主動停的」，不要拿去餵 AI 修。 */
 export const USER_CANCELLED = "USER_CANCELLED";
+/** 系統為避免無限等待而停止，和使用者主動按停止完全不同，UI 必須如實區分。 */
+export const SYSTEM_TIMEOUT = "SYSTEM_TIMEOUT";
 export function isUserCancelled(error: string | null | undefined): boolean {
   return error === USER_CANCELLED;
 }
@@ -108,6 +128,29 @@ function log(runId: string, nodeId: string | null, line: string) {
   getDb()
     .prepare(`INSERT INTO run_logs (run_id, node_id, ts, line) VALUES (?, ?, datetime('now'), ?)`)
     .run(runId, nodeId, line);
+}
+
+/** JSON.stringify 但物件 key 先排序——比較兩份「內容相同、鍵值順序不保證相同」的參數物件是否相等時用，
+ * 單純 JSON.stringify 會因鍵值順序不同而誤判不相等。 */
+export function stableJson(value: unknown): string {
+  const sort = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sort);
+    if (v && typeof v === "object") {
+      return Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([k, vv]) => [k, sort(vv)]));
+    }
+    return v;
+  };
+  return JSON.stringify(sort(value));
+}
+
+export function safeParseJson(raw: string | null): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
 }
 
 function makeSession(headed: boolean, workflowId: string): RunSession {
@@ -124,7 +167,9 @@ function makeSession(headed: boolean, workflowId: string): RunSession {
   };
   return {
     async getBrowser() {
-      if (!browser) browser = await chromium.launch({ headless: !headed });
+      // AutomationControlled 特徵(navigator.webdriver=true)是 Google 這類網站判定機器人的主要訊號之一,
+      // 拿掉它讓「手動登入一次存下的 session」在自動化執行時比較不會被重新盤查。
+      if (!browser) browser = await chromium.launch({ headless: !headed, args: ["--disable-blink-features=AutomationControlled"] });
       return browser;
     },
     async getPage() {
@@ -134,6 +179,9 @@ function makeSession(headed: boolean, workflowId: string): RunSession {
         const context = await b.newContext({ acceptDownloads: true, ...(storageState ? { storageState } : {}) });
         page = await context.newPage();
       }
+      return page;
+    },
+    currentPage() {
       return page;
     },
     async resetPage() {
@@ -209,20 +257,34 @@ function topoOrder(wf: Workflow): WorkflowNode[] {
 export function startWorkflowRun(
   workflowId: string,
   triggerParams: Record<string, unknown> = {},
-  options: { headed?: boolean; trigger?: TriggerSource; dryRun?: boolean; secretOverrides?: Record<string, string>; nodeConfigOverrides?: Record<string, Record<string, unknown>>; confirmedPreview?: boolean } = {},
+  options: { headed?: boolean; trigger?: TriggerSource; dryRun?: boolean; secretOverrides?: Record<string, string>; nodeConfigOverrides?: Record<string, Record<string, unknown>>; confirmedPreview?: boolean; startAtNodeId?: string; onlyNodeIds?: string[] } = {},
 ): string {
   const db = getDb();
   const wf = getWorkflow(workflowId);
   if (!wf) throw new Error("workflow 不存在");
+  if (!hasExecutableSteps(wf.nodes)) {
+    throw new Error("這條流程還沒有要執行的步驟。直接在右側說你想完成什麼，AI 會先幫你建立流程；目前沒有開始任何外部操作。");
+  }
+  if (options.startAtNodeId && !wf.nodes.some((n) => n.id === options.startAtNodeId)) {
+    throw new Error("找不到要當起點的那一步(流程可能剛被改過)，請重新整理頁面再試一次");
+  }
+  if (options.onlyNodeIds?.length && options.onlyNodeIds.some((nid) => !wf.nodes.some((n) => n.id === nid))) {
+    throw new Error("選取的步驟有的不在這條流程裡(流程可能剛被改過)，請重新整理頁面再試一次");
+  }
   if (wf.importedUntrusted) {
     throw new Error("這是尚未確認的外部匯入流程，請先在流程頁手動執行並確認安全提醒");
   }
+  // 部分執行(框選幾步/從某步開始)的語意由使用者拍板(2026-07-16)：「圈起來執行的，那就執行到底，
+  // 除非我有說只測試不更改任何資料」——所以這裡尊重呼叫端的 dryRun，預設是「真的執行」(含寫入/發送)；
+  // UI 上有明確的「只測試」勾選，勾了才傳 dryRun:true 走安全排練。曾經一度改成部分執行一律強制
+  // dryRun，結果使用者框選的互動步驟(點簡報重新整理)永遠不會真的執行、也沒說明，比危險更糟的是不可用。
+  const dryRun = options.dryRun;
   // 不相信「建圖當下驗過」：手動編輯、版本還原、舊資料或其他 API 都可能在之後把圖改壞。
   // 這裡是 manual/schedule/watch/webhook/form/email/Telegram/LINE/子流程共同會經過的唯一入口。
   assertRunnableGraph(wf.nodes, wf.edges);
   // 只讀驗證會刻意略過寫入步驟，並把缺少設定列在預覽結果，所以不能在這裡擋；正式執行則一律
   // 在任何外部操作之前失敗，避免跑完前面幾分鐘才發現最後一個必要設定沒填。
-  if (!options.dryRun) {
+  if (!dryRun) {
     const missing = getMissingWorkflowSettings(wf, options.confirmedPreview ? options.secretOverrides : undefined);
     if (missing.length > 0) throw new MissingWorkflowSettingsError(missing);
   }
@@ -236,19 +298,23 @@ export function startWorkflowRun(
   const runId = randomUUID();
   const headed = options.headed ?? wf.status === "draft";
   const trigger = options.trigger ?? "manual";
+  // 這次執行當下的圖版本指紋——存下來讓未來的部分執行知道「哪些舊 run 的輸出還能安全沿用」
+  // (圖被改過之後的舊 run，節點設定/接線都可能不一樣了，不能拿它的輸出當這次的種子)。
+  const graphFingerprint = workflowExecutionFingerprint(wf);
 
   // owner_pid 記下「這個 run 是哪個進程在跑」——執行佇列/瀏覽器 session 全是進程內記憶體，
   // DB 裡的 running/queued 若不記進程歸屬，另一個進程(daemon + dev 同時開)開機做崩潰復原時
   // 會把「別的進程其實還在跑的 run」一起誤標失敗。見 recoverCrashedRuns。
   db.prepare(
-    `INSERT INTO runs (id, workflow_id, status, trigger_type, headed, trigger_params_json, secret_overrides_json, node_config_overrides_json, dry_run, owner_pid, started_at)
-     VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+    `INSERT INTO runs (id, workflow_id, status, trigger_type, headed, trigger_params_json, secret_overrides_json, node_config_overrides_json, dry_run, owner_pid, graph_fingerprint, started_at)
+     VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
   ).run(
     runId, workflowId, trigger, headed ? 1 : 0, JSON.stringify(triggerParams),
-    options.confirmedPreview && options.secretOverrides ? JSON.stringify(options.secretOverrides) : null,
+    options.confirmedPreview && options.secretOverrides ? encryptSecret(JSON.stringify(options.secretOverrides)) : null,
     options.confirmedPreview && options.nodeConfigOverrides ? JSON.stringify(options.nodeConfigOverrides) : null,
-    options.dryRun ? 1 : 0,
+    dryRun ? 1 : 0,
     process.pid,
+    graphFingerprint,
   );
 
   for (const node of wf.nodes) {
@@ -259,11 +325,58 @@ export function startWorkflowRun(
 
   pruneRuns(workflowId);
 
+  // ── 部分執行：「從這一步開始測」(startAtNodeId=起點+它的所有下游) 或「只測選取的幾步」
+  // (onlyNodeIds=畫布框選的集合,像 n8n 那樣)。只執行 rerunNodeIds 裡的節點，其餘有最近一次結果
+  // 就沿用、沒有就老實標 skipped——驗證新段落/單一步驟時,不用每次都把登入/抓信/填表整條重跑。
+  // 注意這裡「不」像 resumeRun 那樣自動把上游瀏覽器鏈排進重跑：那個機制會把 google-sheet 寫入這類
+  // 有副作用的瀏覽器節點一起重跑,正好違背「只測後段、不要動前面」的本意。若這段真的依賴前面步驟
+  // 建立的登入狀態,會老實失敗並顯示在紀錄裡,使用者再改用完整執行即可。
+  let resume: ResumeSpec | undefined;
+  const partialIds = options.onlyNodeIds?.length
+    ? [...new Set(options.onlyNodeIds)]
+    : options.startAtNodeId
+      ? downstreamNodeIds(wf.edges, options.startAtNodeId)
+      : undefined;
+  if (partialIds) {
+    // 種子只能來自「圖版本相同 + 這次執行參數相同」的舊 run——不能只挑「最近一次成功過的執行」就沿用。
+    // 使用者常常會在部分執行前改了篩選日期/期間、或改過節點設定，若這裡不核對，會把舊日期/舊邏輯
+    // 算出的資料靜默當成這次的種子餵給下游寫入節點，而畫面只顯示「沿用最近一次的結果」——
+    // 這是會讓使用者拿過期資料覆蓋正式資料的真實風險，不是理論上的邊界案例。
+    // 只掃最近 20 筆(有成功節點的)候選，找「圖版本 + 執行參數都吻合」裡最新的一筆；一律不比對
+    // dry_run(安全排練也是同一套邏輯算出來的合法結果，值得沿用，只是不能拿它去覆寫正式資料——
+    // 而正式寫入節點本身自然會照 dryRun 旗標決定要不要真的送出，這裡只是挑「輸入資料」的來源)。
+    const candidates = db
+      .prepare(
+        `SELECT r.id, r.trigger_params_json FROM runs r WHERE r.workflow_id=? AND r.id!=? AND r.status NOT IN ('queued','running')
+           AND EXISTS (SELECT 1 FROM node_runs nr WHERE nr.run_id = r.id AND nr.status='success')
+           AND r.graph_fingerprint = ?
+         ORDER BY r.started_at DESC, r.rowid DESC LIMIT 20`,
+      )
+      .all(workflowId, runId, graphFingerprint) as { id: string; trigger_params_json: string | null }[];
+    const currentParamsKey = stableJson(triggerParams);
+    const prior = candidates.find((c) => stableJson(safeParseJson(c.trigger_params_json)) === currentParamsKey);
+    const rows = prior
+      ? (db.prepare(`SELECT node_id, status, input_json, output_json, active_ports FROM node_runs WHERE run_id = ?`).all(prior.id) as RunSeedRow[])
+      : [];
+    const { seeds, seedPorts } = collectRunSeeds(wf.nodes, rows);
+    resume = { seeds, seedPorts, rerunNodeIds: partialIds, skipUnseeded: true };
+    const label = (nid: string) => wf.nodes.find((n) => n.id === nid)?.label ?? nid;
+    // 「執行」vs「只測」是兩種模式,開場橫幅要講對:預設是真的執行(含寫入/發送),勾了「只測試」才是安全排練
+    const mode = dryRun ? "只測" : "執行";
+    const banner = options.onlyNodeIds?.length
+      ? `▶ ${mode}選取的 ${partialIds.length} 步：${partialIds.map(label).join("、")}——其餘步驟不會重新執行(有相同版本、相同參數的最近結果就沿用，沒有就跳過)${dryRun ? "" : "。這是正式執行:選到的步驟會真的寫入/發送。"}`
+      : `▶ ${mode}「${label(options.startAtNodeId!)}」開始的後段——前面的步驟不會重新執行(有相同版本、相同參數的最近結果就沿用，沒有就跳過)${dryRun ? "" : "。這是正式執行:跑到的步驟會真的寫入/發送。"}`;
+    log(runId, null, banner);
+    if (!prior && candidates.length > 0) {
+      log(runId, null, `⚠️ 找到 ${candidates.length} 筆這條流程的先前執行紀錄，但都是用不同的執行參數(例如不同的期間/日期)跑的——為了不把舊參數算出的資料當成這次的結果，沒有拿它們當種子；沒有種子的步驟會標記跳過。`);
+    }
+  }
+
   queue.push({
-    runId, workflowId, triggerParams, headed, trigger, dryRun: options.dryRun,
+    runId, workflowId, triggerParams, headed, trigger, dryRun, resume,
     // 正式執行只接受 server 端從一次性 preview token 取回的覆寫；API body 不能直接塞。
-    secretOverrides: options.dryRun || options.confirmedPreview ? options.secretOverrides : undefined,
-    nodeConfigOverrides: options.dryRun || options.confirmedPreview ? options.nodeConfigOverrides : undefined,
+    secretOverrides: dryRun || options.confirmedPreview ? options.secretOverrides : undefined,
+    nodeConfigOverrides: dryRun || options.confirmedPreview ? options.nodeConfigOverrides : undefined,
   });
   processQueue();
   return runId;
@@ -306,23 +419,9 @@ export function resumeRun(
   const parse = (s: string | null): Record<string, unknown> => {
     try { return s ? (JSON.parse(s) as Record<string, unknown>) : {}; } catch { return {}; }
   };
-  const seeds: Record<string, Record<string, unknown>> = {};
-  const seedPorts: Record<string, string[]> = {};
   const nodeTypeById = new Map(wf.nodes.map((n) => [n.id, n.type]));
-  for (const r of rows) {
-    if (r.status === "success") {
-      seeds[r.node_id] = { ...parse(r.input_json), ...parse(r.output_json) };
-      if (r.active_ports) {
-        try { seedPorts[r.node_id] = JSON.parse(r.active_ports) as string[]; } catch { /* 壞資料當沒有 */ }
-      } else {
-        // 舊資料沒存 active_ports：分支節點從輸出反推(if 的 result / switch 的 matched)，反推不出就不放
-        const out = parse(r.output_json);
-        const t = nodeTypeById.get(r.node_id);
-        if (t === "if-condition" && typeof out.result === "boolean") seedPorts[r.node_id] = [out.result ? "true" : "false"];
-        if (t === "switch" && typeof out.matched === "string") seedPorts[r.node_id] = [out.matched];
-      }
-    }
-  }
+  // 成功節點的合併輸出+分支重放,與「從這一步開始測」共用同一套萃取規則(partialRun.ts)
+  const { seeds, seedPorts } = collectRunSeeds(wf.nodes, rows);
   // 簽核節點自己沒有「成功輸出」(它是 waiting)——把它上次收到的 input 當 seed，
   // preResolved 的簽核結果會疊在上面，下游才拿得到上游算好的欄位+簽核結果。
   if (opts.preResolved) {
@@ -387,7 +486,7 @@ export function resumeRun(
   try { triggerParams = run.trigger_params_json ? JSON.parse(run.trigger_params_json) : {}; } catch { /* 壞資料當空 */ }
   let secretOverrides: Record<string, string> | undefined;
   let nodeConfigOverrides: Record<string, Record<string, unknown>> | undefined;
-  try { secretOverrides = run.secret_overrides_json ? JSON.parse(run.secret_overrides_json) : undefined; } catch { /* 壞資料不用 */ }
+  try { secretOverrides = run.secret_overrides_json ? JSON.parse(decryptSecret(run.secret_overrides_json)) : undefined; } catch { /* 壞資料不用 */ }
   try { nodeConfigOverrides = run.node_config_overrides_json ? JSON.parse(run.node_config_overrides_json) : undefined; } catch { /* 壞資料不用 */ }
   queue.push({
     runId,
@@ -502,20 +601,13 @@ function notifyFinished(runId: string) {
 const RUN_WAIT_TIMEOUT_MS = 25 * 60 * 1000;
 
 /** 觸發一次執行並等它跑完，回傳最終結果(給自動修復迴圈用) */
-export function runWorkflowAndWait(
-  workflowId: string,
-  triggerParams: Record<string, unknown>,
-  options: { headed?: boolean; timeoutMs?: number; dryRun?: boolean; secretOverrides?: Record<string, string>; nodeConfigOverrides?: Record<string, Record<string, unknown>>; signal?: AbortSignal } = {},
-): Promise<RunFinal> {
-  const runId = startWorkflowRun(workflowId, triggerParams, {
-    headed: options.headed,
-    trigger: "manual",
-    dryRun: options.dryRun,
-    secretOverrides: options.secretOverrides,
-    nodeConfigOverrides: options.nodeConfigOverrides,
-  });
-  // 呼叫端(autofix 的總時間預算)可以給更短的上限，但不能超過引擎預設的天花板
-  const timeoutMs = Math.min(Math.max(options.timeoutMs ?? RUN_WAIT_TIMEOUT_MS, 10_000), RUN_WAIT_TIMEOUT_MS);
+/**
+ * runWorkflowAndWait 與 resumeRunAndWait 共用的等待邏輯：run 已經被排進 queue 之後，
+ * 掛一個 completions 項目，讓 notifyFinished(runId)(引擎跑到終態時呼叫)能解出這個 Promise。
+ * 抽出來是因為兩者的差異只在「怎麼把 run 排進 queue」(全新觸發 vs 從失敗處續跑)，等待/逾時/
+ * 取消這段邏輯完全一樣，不應該維護兩份。
+ */
+function waitForRunCompletion(runId: string, timeoutMs: number, signal?: AbortSignal): Promise<RunFinal> {
   return new Promise((resolve) => {
     const finishWait = (result: RunFinal) => {
       const entry = completions.get(runId);
@@ -536,16 +628,60 @@ export function runWorkflowAndWait(
     }, timeoutMs);
     const onAbort = () => {
       if (!completions.has(runId)) return;
-      const reason = options.signal?.reason;
+      const reason = signal?.reason;
       const message = reason instanceof Error ? reason.message : "這次驗證已被停止";
       cancelRun(runId, message);
       finishWait({ runId, status: "failed", failedNode: null, error: message, varWarnings: 0 });
     };
-    const cleanup = () => options.signal?.removeEventListener("abort", onAbort);
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
     completions.set(runId, { resolve, timer, cleanup });
-    if (options.signal?.aborted) onAbort();
-    else options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+export function runWorkflowAndWait(
+  workflowId: string,
+  triggerParams: Record<string, unknown>,
+  options: { headed?: boolean; timeoutMs?: number; dryRun?: boolean; secretOverrides?: Record<string, string>; nodeConfigOverrides?: Record<string, Record<string, unknown>>; signal?: AbortSignal } = {},
+): Promise<RunFinal> {
+  const runId = startWorkflowRun(workflowId, triggerParams, {
+    headed: options.headed,
+    trigger: "manual",
+    dryRun: options.dryRun,
+    secretOverrides: options.secretOverrides,
+    nodeConfigOverrides: options.nodeConfigOverrides,
+  });
+  // 呼叫端(autofix 的總時間預算)可以給更短的上限，但不能超過引擎預設的天花板
+  const timeoutMs = Math.min(Math.max(options.timeoutMs ?? RUN_WAIT_TIMEOUT_MS, 10_000), RUN_WAIT_TIMEOUT_MS);
+  return waitForRunCompletion(runId, timeoutMs, options.signal);
+}
+
+/**
+ * 續跑失敗的那次執行並等它跑完(給「套用修復提案後重跑驗證」這類需要同步結果的呼叫端用)——
+ * 之前成功的步驟(含已經寫入/寄出的副作用)沿用上次結果，不會重跑一遍，只重跑失敗那步和它的下游。
+ * 真實顧慮：不用這個、改叫 runWorkflowAndWait 從頭跑一次的話，若失敗前已經有步驟寫入試算表/
+ * 寄出通知，從頭重跑會讓那些副作用重演一次(這正是 resumeRun 存在的理由，套用修復提案後
+ * 卻沒有走這條路，是同一類問題在另一個呼叫端重演)。
+ *
+ * 回傳多帶一個 resumed 欄位，區分兩種完全不同的「失敗」：
+ * - resumed:false = resumeRun 這個機制本身就啟動不了(run 已被清理／圖改過找不到失敗節點／
+ *   run 還在跑)——呼叫端這時應該自行決定要不要退回 runWorkflowAndWait 從頭跑一次。
+ * - resumed:true 但 status:"failed" = 續跑機制正常啟動、也真的重新跑了失敗節點及其下游，
+ *   結果還是失敗——這是誠實的「修復沒有生效」，呼叫端不該因此又疊加一輪從頭的全新執行
+ *   (那會讓已經成功過的副作用重演，正是這個函式想避免的事)。
+ */
+export async function resumeRunAndWait(
+  runId: string,
+  opts: { preResolved?: ResumeSpec["preResolved"]; headed?: boolean; timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<RunFinal & { resumed: boolean }> {
+  const started = resumeRun(runId, { preResolved: opts.preResolved, headed: opts.headed });
+  if (!started.ok) {
+    return { runId, status: "failed", failedNode: null, error: started.error ?? "無法從失敗處續跑", varWarnings: 0, resumed: false };
+  }
+  const timeoutMs = Math.min(Math.max(opts.timeoutMs ?? RUN_WAIT_TIMEOUT_MS, 10_000), RUN_WAIT_TIMEOUT_MS);
+  const result = await waitForRunCompletion(runId, timeoutMs, opts.signal);
+  return { ...result, resumed: true };
 }
 
 const KEEP_RUNS = 20;
@@ -602,35 +738,79 @@ export function pruneOrphanOutputs() {
  *     因為很多 Playwright 英文錯誤(Target closed / net::ERR…)其實是選擇器/暫時性問題，值得讓 AI 看一眼。
  */
 export type FailureCategory = "credentials" | "configuration" | "data" | "ai-fixable" | "unknown";
-export function classifyFailure(error: string): { reason: string; resolution: "ai-fixable" | "needs-human"; category: FailureCategory } {
+export function classifyFailure(error: string): { reason: string; resolution: "ai-fixable" | "needs-human"; category: FailureCategory; transient: boolean } {
   const e = error || "未知錯誤";
   // ① 帳號/密碼類最優先當「需人工」——AI 無法憑空生出正確帳密，重試也沒用，直接請使用者處理。
   //    (但要排除「認證資訊檢查失敗」這種驗證碼打錯也會出現的通用訊息——那個歸 ai-fixable)
-  if (/帳號.{0,4}密碼.{0,4}錯誤|密碼錯誤|帳號不存在|使用者不存在|帳號已被停用|帳號已鎖定|尚未.*填.*帳|沒有設定.*帳|請到設定.*帳|未設定.*帳|[Tt]oken 不正確|不正確\(API 回 401\)/.test(e)) {
-    return { reason: `${e}｜需人工：請到「設定」頁確認並填入正確的帳號密碼後重跑。`, resolution: "needs-human", category: "credentials" };
+  //    Chat ID／傳送對象 ID 錯誤跟 Token 錯誤是同一類「只有使用者能取得的識別碼」，但這兩則
+  //    訊息沒有出現「Token」字樣(是 Telegram/LINE 各自的說法)，原本只認 Token 抓不到，會掉到
+  //    預設的 ai-fixable，讓修復迴圈對著使用者自己才能取得的值一直空轉重試。
+  if (/帳號.{0,4}密碼.{0,4}錯誤|密碼錯誤|帳號不存在|使用者不存在|帳號已被停用|帳號已鎖定|尚未.*填.*帳|沒有設定.*帳|請到設定.*帳|未設定.*帳|[Tt]oken 不正確|不正確\(API 回 401\)|Chat ID 不正確|傳送對象.{0,4}ID 不正確/.test(e)) {
+    return { reason: `${e}｜需人工：請到「設定」頁確認並填入正確的帳號密碼後重跑。`, resolution: "needs-human", category: "credentials", transient: false };
+  }
+  // Google/Microsoft 這類平台「擋自動化登入」或登入狀態過期——帳密全對也照擋,AI 重試/改設定都無解,
+  // 唯一解是使用者本人到流程頁「⋯→🔐 手動登入一次」。絕不能歸 ai-fixable,否則修復迴圈會開開關關空轉。
+  if (/無法登入帳戶|安全疑慮|機器人偵測|兩步驟驗證|登入卡在|手動登入一次|登入狀態不存在|登入狀態.{0,6}(?:過期|失效)/i.test(e)) {
+    return { reason: `${e}｜需人工：這類網站會擋「自動化登入」(帳密正確也一樣)，重試無效。請到流程頁右上「⋯ → 🔐 手動登入一次」親手登入，之後執行會自動帶入登入狀態、不再經過登入頁。`, resolution: "needs-human", category: "credentials", transient: false };
+  }
+  // Google OAuth(API 直連類節點，如重新整理簡報圖表)的憑證問題跟上面的瀏覽器登入是不同機制——
+  // invalid_grant(refresh token 被撤銷/過期)要重新走一次 OAuth 流程拿新 token；invalid_client
+  // (Client ID/Secret 貼錯或不成對)要回 Google Cloud Console 重新核對——兩種都只有使用者本人
+  // 能解，AI 改設定或重試都沒用。真實踩過的漏網之魚：一開始只寫了 invalid_grant 這條規則，
+  // invalid_client 沒被歸類到，就掉到預設的 ai-fixable，讓修復迴圈對著「憑證本身就貼錯」這種
+  // 只有使用者能修的事一直空轉重試，使用者也永遠不會被主動提醒去檢查 Client ID/Secret。
+  if (/Google OAuth 憑證已失效|invalid_grant|Google OAuth 用戶端 ID.*不正確|invalid_client/i.test(e)) {
+    return { reason: `${e}｜需人工：這是 Google OAuth 憑證問題，需要你本人到 Google Cloud Console 或 OAuth Playground 重新核對/走一次流程，AI 沒辦法自己生成或修好。`, resolution: "needs-human", category: "credentials", transient: false };
+  }
+  // ExcelJS/JSZip 對 CSV、HTML 錯誤頁或損毀下載檔會丟非常技術性的「central directory」錯誤。
+  // 這不是選擇器或程式碼能修的問題；把真正要做的事直接講成白話，避免使用者傻等 AI 重跑。
+  if (/can't find end of central directory|is this a zip file|end of central directory/i.test(e)) {
+    return { reason: "這一步需要 Excel 活頁簿，但這次選到的檔案不是有效的 .xlsx/.xls 檔（可能選成 CSV、下載到登入頁，或檔案還沒下載完整）。請重新選原始 Excel 檔後再試，不需要叫 AI 重跑。", resolution: "needs-human", category: "data", transient: false };
   }
   // 缺少網址、端點或其他必要設定 ≠ 密碼錯誤。這類值 AI 不能憑空猜，直接點名缺什麼，不讓修復迴圈浪費時間。
-  if (/執行前還缺少設定|尚未填入.*(網址|URL|端點|路徑|Chat ID)|沒有設定.*(網址|URL|端點|路徑)|缺少.*(網址|URL|端點|路徑)|Apps Script.*(?:版本|部署)|部署版本太舊|寫入服務還不能使用/i.test(e)) {
-    return { reason: `${e}｜需人工：請依上面的提示更新對應節點或設定頁；這類外部網址／部署版本不是 AI 重跑能修好的。`, resolution: "needs-human", category: "configuration" };
+  if (/執行前還缺少設定|尚未填入.*(網址|URL|端點|路徑|Chat ID)|尚未設定.*(?:OAuth|憑證)|沒有設定.*(網址|URL|端點|路徑)|缺少.*(網址|URL|端點|路徑)|Apps Script.*(?:版本|部署)|部署版本太舊|寫入服務還不能使用/i.test(e)) {
+    return { reason: `${e}｜需人工：請依上面的提示更新對應節點或設定頁；這類外部網址／部署版本不是 AI 重跑能修好的。`, resolution: "needs-human", category: "configuration", transient: false };
   }
-  // 外部視覺服務當下整體無回應，改節點設定/選擇器不會有用。本機 OCR 會優先接手；
-  // 若本機也不可用才會到這裡，應說明是服務問題，不能再為了「讓 AI 修」白燒一輪 token。
+  // Apps Script 執行當下找不到指令碼函式(如 doGet)——真實踩過：同一份部署、完全沒改設定，
+  // 這次失敗、幾分鐘後重跑就直接成功，是 Google Apps Script 執行環境偶發的暫時性問題，
+  // 不是部署真的少了那個函式(那種情況會一直穩定失敗，不會重跑就好)。標成 transient 讓它自動重跑；
+  // 若同一個部署真的持續失敗，MAX_AUTO_RETRIES 的上限會讓它幾次後照樣落回正常通知使用者。
+  if (/Apps Script 執行失敗.{0,4}找不到以下指令碼函式|找不到以下指令碼函式.{0,10}doGet/i.test(e)) {
+    return { reason: `${e}｜Apps Script 執行環境偶發問題，多半重跑就會成功，已排定自動重跑；若持續發生請確認 Apps Script 部署狀態。`, resolution: "needs-human", category: "configuration", transient: true };
+  }
+  // 外部視覺服務當下整體無回應，改節點設定/選擇器不會有用；但這是「服務暫時掛掉」而不是
+  // 「設定本身有問題」——多半過幾分鐘服務就恢復了，重跑同一份設定很可能就直接成功。
+  // 標成 transient，讓無人值守觸發的正式流程能自動排一次延後重跑，不用使用者自己想到要重試。
   if (/驗證碼視覺模型目前沒有回應|視覺模型.*(?:沒有回應|無回應|不可用)/i.test(e)) {
-    return { reason: `${e}｜視覺服務目前不可用，改流程設定無法解決；Agent Hub 已停止自動空轉與 AI 修圖。`, resolution: "needs-human", category: "configuration" };
+    return { reason: `${e}｜視覺服務目前不可用，改流程設定無法解決；Agent Hub 已停止自動空轉與 AI 修圖，會排一次延後自動重跑。`, resolution: "needs-human", category: "configuration", transient: true };
+  }
+  // 「自訂程式碼本來是空的，執行時臨時請 AI 產碼卻逾時」不是使用者的資料或設定問題。
+  // 若只回報「節點逾時」，使用者會去亂改 sheet/欄位，修復 AI 也會誤猜 selector。要把真正
+  // 卡住的是哪一層直接講出來，並交給整圖修復產出、保存完整程式碼。
+  if (/正在由 AI 臨時產碼但.*沒有完成|沒有可執行程式碼.*AI.*產碼/i.test(e)) {
+    return { reason: `${e}｜這不是資料或欄位設定錯誤，而是這個步驟沒有保存可執行程式碼。AI 會直接補完整程式碼並保存；不要重跑或手動調整其他節點。`, resolution: "ai-fixable", category: "ai-fixable", transient: false };
   }
   // ② 結構性/技術性問題 → AI 可修。這一類要排在「資料確認」前面判斷，因為它們的訊息裡也常含「請確認」，
   //    但真正的原因是流程邏輯/選擇器/資料接法(AI 改得動)，不是使用者要提供的值。
   //    特別是「{{變數}} 沒解析到/上游沒產出」這種資料流問題——原因在上游節點，整圖修復改得掉。
   if (/沒有解析到實際資料|上游節點|還沒有內容|還沒有程式碼|自訂步驟|程式碼.*錯誤|語法|選擇器|selector|逾時|超過|timeout|驗證碼|認證資訊檢查失敗|找不到.*元素|找不到搜尋框|element|網路|網絡|503|下載/i.test(e)) {
-    return { reason: `${e}｜AI 可修：多半是流程邏輯、資料接法或網頁選擇器的問題，AI 會看整條流程+截圖自動修。`, resolution: "ai-fixable", category: "ai-fixable" };
+    return { reason: `${e}｜AI 可修：多半是流程邏輯、資料接法或網頁選擇器的問題，AI 會看整條流程+截圖自動修。`, resolution: "ai-fixable", category: "ai-fixable", transient: false };
   }
-  // ③ 真的是「使用者要確認的值」(某封信不存在/報表名稱/日期輸入)才歸需人工——但自動測試迴圈仍會先讓 AI 試一次
-  //    (整圖修復可能發現是上游把搜尋條件算錯了)，試過還是這類錯誤才真的停下來問使用者。
-  if (/找不到.*信|搜尋不到.*信|查無|報表名稱|沒有寄|該日期.*沒有|這天.*沒有|日期設定互相矛盾|早於週增量結束日|不是公開的|分享設定|一般存取權|誰可以存取|重新部署/.test(e)) {
-    return { reason: `${e}｜可能需人工：請確認日期、報表名稱等輸入是否正確；AI 也會先試著看是不是上游把搜尋條件算錯了。`, resolution: "needs-human", category: "data" };
+  // ③ 真的是「使用者要確認的值」(某封信不存在/報表名稱/日期輸入/目標頁面內容跟預期兜不上)才歸需人工——
+  //    但自動測試迴圈仍會先讓 AI 試一次(整圖修復可能發現是上游把搜尋條件算錯了)，試過還是這類錯誤才真的停下來問使用者。
+  //    「找不到目標頁面：沒有任何一頁符合...」這類是真實踩過的漏網之魚——原本的規則只認「信」，
+  //    這種「掃過所有候選、內容真的對不上原本假設」的錯誤沒被歸類到，就掉到預設的 ai-fixable/unknown，
+  //    讓修復迴圈對著「頁面內容跟業務現況不符」這種只有使用者知道答案的事，一直誤以為是選擇器問題而重複瞎猜。
+  //    「找不到分頁: X」(Apps Script 寫入時回傳)是同一類漏網之魚——真實踩過：使用者解決 Apps Script
+  //    部署/授權問題後緊接著撞上這個，AI 沒辦法連進使用者的 Google 試算表看裡面實際有哪些分頁，
+  //    只能瞎猜著改設定，猜不中就一直卡著，使用者看起來像是「AI 修很久都沒改變」。
+  //    excelProcess.ts 找不到指定欄位是同一種情境(一樣會列出實際欄位清單)，AI 一樣沒辦法連進
+  //    使用者的真實檔案確認正確欄名，必須同樣歸類成需人工。
+  if (/找不到.*信|搜尋不到.*信|查無|報表名稱|沒有寄|該日期.*沒有|這天.*沒有|日期設定互相矛盾|早於週增量結束日|不是公開的|分享設定|一般存取權|誰可以存取|重新部署|找不到目標(?:頁面|檔案)|找不到分頁|找不到.{0,20}欄|沒有(?:任何)?一(?:頁|筆|項|份|個|張).{0,6}(?:符合|對得上)/.test(e)) {
+    return { reason: `${e}｜可能需人工：請確認日期、報表名稱、目標頁面等輸入是否正確；AI 也會先試著看是不是上游把搜尋條件算錯了。`, resolution: "needs-human", category: "data", transient: false };
   }
   // 預設：先讓 AI 試(很多 Playwright 英文錯誤其實是選擇器/暫時性問題)
-  return { reason: `${e}｜先讓 AI 試修：看整條流程與截圖找原因。`, resolution: "ai-fixable", category: "unknown" };
+  return { reason: `${e}｜先讓 AI 試修：看整條流程與截圖找原因。`, resolution: "ai-fixable", category: "unknown", transient: false };
 }
 
 /**
@@ -646,12 +826,25 @@ async function proposeFixInBackground(workflowId: string, runId: string, nodeId:
   try {
     const client = getClient();
     const model = getWorkflowModel(workflowId, wf.defaultModel);
-    const edit = await Promise.race([
-      aiRepairNode(client, model, workflowId, nodeId, error, runId, false),
+    // 改用整圖感知修復(跟手動按「讓 AI 修」同一套)，不是只改回報失敗的那個節點——真正原因常常
+    // 在上游沒把資料準備好的節點(見 aiRepairGraph 文件註解)。以前這裡用單節點的 aiRepairNode，
+    // 手動修復跟自動監控失敗的修復能力不一致：對著錯的節點瞎改，真正的上游問題永遠修不到。
+    const repair = await Promise.race([
+      aiRepairGraph(client, model, workflowId, nodeId, error, runId, { apply: false }),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error("想修法逾時")), 5 * 60 * 1000)),
     ]);
-    createProposal({ runId, workflowId, nodeId, nodeLabel, error, before: edit.before, after: edit.config });
-    notifyDesktop(`「${wf.name}」AI 已經想好修法`, `「${nodeLabel}」這步，打開 Agent Hub 看一鍵套用+重跑。`);
+    if (repair.edits.length === 0) throw new Error("沒有找到有效的修復方案");
+    // 主要節點優先選「原本回報失敗的那個」(使用者最容易對上);真正原因在別的節點時，
+    // 那格也會在 edits 裡、被存進 extraEdits，套用提案時一起套，不會漏掉。
+    const primary = repair.edits.find((e) => e.nodeId === nodeId) ?? repair.edits[0];
+    const extraEdits = repair.edits.filter((e) => e.nodeId !== primary.nodeId)
+      .map((e) => ({ nodeId: e.nodeId, nodeLabel: e.nodeLabel, before: e.before, after: e.after }));
+    createProposal({
+      runId, workflowId, nodeId: primary.nodeId, nodeLabel: primary.nodeLabel, error,
+      before: primary.before, after: primary.after, extraEdits,
+    });
+    const extraNote = extraEdits.length ? `(連同「${extraEdits.map((e) => e.nodeLabel).join("、")}」共 ${extraEdits.length + 1} 步)` : "";
+    notifyDesktop(`「${wf.name}」AI 已經想好修法`, `「${primary.nodeLabel}」這步${extraNote}，打開 Agent Hub 看一鍵套用+重跑。`);
   } catch {
     notifyDesktop(`「${wf.name}」AI 沒能自動想出修法`, `請打開 Agent Hub，到「${nodeLabel}」這步手動按「🔧 讓 AI 修」。`);
   }
@@ -671,11 +864,18 @@ function processQueue() {
   });
 }
 
-/** custom-code 明確回報資料矛盾/校驗失敗時，原樣 input 重跑不會變對；網路暫時錯誤仍保留重試。 */
+/**
+ * 第一次失敗就已能確定「同一份設定、同一份輸入再跑一次不會變好」的情況。
+ * 重試只留給網路短暫中斷、503 這類有機會自行恢復的問題；選擇器、欄位、分頁、語法、資料校驗
+ * 等結構性錯誤重跑只會讓使用者多等幾分鐘，應立即留下失敗現場給 AI 修。
+ */
 export function isDeterministicValidationFailure(nodeType: string, error: unknown): boolean {
-  if (nodeType !== "custom-code") return false;
   const message = error instanceof Error ? error.message : String(error);
-  return /互相矛盾|資料.{0,12}(?:不一致|對不上)|(?:校驗|驗證)(?:不通過|失敗)|早於.{0,12}(?:結束日|起始日)|晚於.{0,12}(?:結束日|起始日)/.test(message);
+  if (/互相矛盾|資料.{0,12}(?:不一致|對不上)|(?:校驗|驗證)(?:不通過|失敗)|早於.{0,12}(?:結束日|起始日)|晚於.{0,12}(?:結束日|起始日)/.test(message)) return true;
+  if (/選擇器|selector|找不到.{0,12}(?:元素|欄位|分頁|標題|檔案)|沒有解析到實際資料|未解析(?:的)?(?:變數|欄位)|程式碼.{0,12}(?:語法|錯誤)|syntax error|is not defined|cannot read propert/i.test(message)) return true;
+  // custom-code 本身的失敗幾乎都是相同 input 下的邏輯／欄位問題；真正網路暫時故障才保留一次重試。
+  if (nodeType === "custom-code" && !/timeout|timed out|network|fetch failed|econn|503|502/i.test(message)) return true;
+  return false;
 }
 
 async function runNodeWithRetry(node: WorkflowNode, ctx: NodeContext, retryable: boolean, configuredMaxAttempts?: number) {
@@ -718,8 +918,12 @@ async function runNodeWithRetry(node: WorkflowNode, ctx: NodeContext, retryable:
         new Promise<never>((_, rej) => {
           timeoutId = setTimeout(() => {
             timedOut = true;
-            attemptController.abort(new Error(`節點執行超過 ${timeoutMs / 1000} 秒`));
-            rej(new RetryableError(`節點執行超過 ${timeoutMs / 1000} 秒`));
+            const missingSavedCode = node.type === "custom-code" && isPlaceholderCode(node.config.code);
+            const message = missingSavedCode
+              ? `自訂步驟「${node.label}」沒有可執行程式碼，正在由 AI 臨時產碼但 ${timeoutMs / 1000} 秒內沒有完成；這不是 Excel、資料或其他節點設定的問題。`
+              : `節點執行超過 ${timeoutMs / 1000} 秒`;
+            attemptController.abort(new Error(message));
+            rej(new RetryableError(message));
           }, timeoutMs);
         }),
       ]);
@@ -730,6 +934,10 @@ async function runNodeWithRetry(node: WorkflowNode, ctx: NodeContext, retryable:
         // 逾時的那次操作可能還在背景跑(Playwright 沒有真正的取消)。強制關掉分頁讓它立刻拋錯結束，
         // 下一次重試會拿到全新分頁，不會跟殭屍操作同時搶同一頁(避免出現隨機、難重現的失敗)。
         await ctx.session.resetPage().catch(() => {});
+        // 一次已經等到節點自己的完整時限，重跑同一份設定只會再等一次相同的時限；停止並把現場
+        // 留給 AI 修，別讓使用者為了看到紅色錯誤卡還得白等第二、第三輪。
+        const message = err instanceof Error ? err.message : String(err);
+        throw new PermanentError(`${message}｜同一個節點已等到上限，系統不會用相同設定重跑；請直接讓 AI 依這次失敗現場修復。`);
       }
       if (err instanceof PermanentError || isDeterministicValidationFailure(node.type, err)) throw err;
       if (ctx.cancelSignal.aborted) throw err; // 使用者按了停止——別浪費重試次數重打一個注定失敗的呼叫
@@ -759,10 +967,14 @@ async function executeWorkflow(item: QueueItem) {
   db.prepare(`UPDATE runs SET status = 'running' WHERE id = ?`).run(runId);
   const { baseUrl, apiKey } = getGlobalSettings();
   const model = getWorkflowModel(workflowId, wf.defaultModel);
+  const requiredSecretKeys = new Set((deriveRequiresSecrets(wf) ?? []).map((field) => field.key));
+  const approvedOverrides = Object.fromEntries(
+    Object.entries(item.secretOverrides ?? {}).filter(([key]) => requiredSecretKeys.has(key)),
+  );
   const secrets = {
-    ...getWorkflowSecrets(workflowId),
+    ...getWorkflowSecretsForKeys(workflowId, requiredSecretKeys),
     // 只讀試跑可暫用對話這一輪附的讀取設定；正式 run 在入隊時已強制丟棄 overrides。
-    ...(item.secretOverrides ?? {}),
+    ...approvedOverrides,
   };
   const session = makeSession(headed, workflowId);
   activeSessions.set(runId, session); // 讓 cancelRun() 找得到這個 run 的分頁，能立刻強制中斷
@@ -793,12 +1005,19 @@ async function executeWorkflow(item: QueueItem) {
   const succeededNodes = new Set<string>();
   // 「失敗但被失敗分支接住」的節點：只有 error 出線活著，正常出線全死。
   const errorRouted = new Set<string>();
+  // 真實踩過的事故：一個節點失敗且沒接失敗分支時，以前是整個執行迴圈直接 break，不只擋住
+  // 「真的依賴這個失敗節點」的下游，連完全獨立、沒有任何依賴關係的兄弟分支(例如同一顆
+  // wait-approval 核准後同時要做的「寫入試算表」+「桌面通知」，寫入失敗)也一起放棄——
+  // 使用者看到的是「明明要求同時做兩件事，其中一件失敗，另一件卻連跑都沒跑」。這個節點失敗後，
+  // 只有真正依賴它的下游才該被跳過，其餘不相干的分支要繼續跑，記錄哪些節點是這樣失敗的。
+  const unhandledFailedNodes = new Set<string>();
   // 這條 edge 是不是死的(不會有資料流過)：來源被 skip、來源有分支且這條的 fromPort 沒被選中、
-  // 來源成功但這條是失敗分支、來源走了失敗分支但這條是正常出線。
+  // 來源成功但這條是失敗分支、來源走了失敗分支但這條是正常出線、來源失敗且沒有失敗分支可接。
   const isEdgeDead = (e: { from: string; fromPort?: string }): boolean => {
     if (skipped.has(e.from)) return true;
     if (succeededNodes.has(e.from) && e.fromPort === "error") return true;
     if (errorRouted.has(e.from) && e.fromPort !== "error") return true;
+    if (unhandledFailedNodes.has(e.from)) return true;
     const ap = nodeActivePorts.get(e.from);
     return !!(ap && e.fromPort && !ap.includes(e.fromPort));
   };
@@ -824,6 +1043,13 @@ async function executeWorkflow(item: QueueItem) {
   let waiting: { nodeLabel: string; message: string } | null = null;
   /** 這輪被失敗分支接住的錯誤(run 最後算成功，但要老實告訴使用者哪步出過事) */
   const handledFailures: { label: string; error: string }[] = [];
+  /** 沒接失敗分支、但因為有不相干的獨立分支而讓迴圈繼續跑的失敗——run 最後仍算失敗，
+   * 但總結要列出「還有哪些其他失敗」，不能因為只記第一個而讓使用者漏看其他也失敗的分支。 */
+  const unhandledFailures: { label: string; error: string }[] = [];
+  /** 只讀安全模式攔下的「寫出/操作外部系統」步驟——最後總結必須點名,不能只寫「執行成功」。
+   * 真實踩過:使用者框選 5 步只測,其中關鍵的那步(點正式簡報的重新整理)被安全模式默默略過,
+   * 總結卻只寫「完成 3 個步驟」,使用者完全不知道為什麼圈了 5 步只跑 2 步。 */
+  const withheldWrites: string[] = [];
 
   const now = new Date();
 
@@ -901,8 +1127,23 @@ async function executeWorkflow(item: QueueItem) {
         if (ports) nodeActivePorts.set(node.id, ports); // 重放上次選的分支，下游分支邏輯才會一致
         succeededNodes.add(node.id);
         successCount++;
-        log(runId, node.id, `[${node.label}] ↩︎ 沿用上次成功的結果(續跑不重跑這步)`);
+        // 從中段起跑是「新的 run」，node_runs 全是 pending，要在這裡補上沿用的結果；
+        // 失敗續跑(resumeRun)沿用的是同一筆 run 既有的成功列，不能重寫(會把純 output 蓋成合併值)。
+        if (item.resume.skipUnseeded) {
+          db.prepare(`UPDATE node_runs SET status='success', output_json=?, active_ports=?, finished_at=datetime('now') WHERE run_id=? AND node_id=?`)
+            .run(JSON.stringify(seed), ports ? JSON.stringify(ports) : null, runId, node.id);
+        }
+        log(runId, node.id, item.resume.skipUnseeded
+          ? `[${node.label}] ↩︎ 沿用最近一次執行的結果(這次只測後段)`
+          : `[${node.label}] ↩︎ 沿用上次成功的結果(續跑不重跑這步)`);
         skipDeadDownstream(node.id);
+        continue;
+      }
+      // 從中段開始測：沒有結果可沿用的上游一律「跳過」，絕不能掉進下面的正常執行——
+      // 使用者就是要略過前面登入/抓信/寫入那段。缺的欄位會以 {{變數}} 警告老實浮出。
+      if (item.resume.skipUnseeded) {
+        db.prepare(`UPDATE node_runs SET status='skipped', finished_at=datetime('now') WHERE run_id=? AND node_id=?`).run(runId, node.id);
+        log(runId, node.id, `[${node.label}] ⏭ 只測後段：跳過這步(沒有最近的結果可沿用)`);
         continue;
       }
       // 沒有 seed(上次沒成功、圖改過新增的節點等)：往下走正常執行——老實重跑比沿用不存在的結果安全
@@ -922,6 +1163,24 @@ async function executeWorkflow(item: QueueItem) {
     const upstreamIds = wf.edges.filter((e) => e.to === node.id).map((e) => e.from);
     const input: Record<string, unknown> = {};
     if (node.type === "trigger") Object.assign(input, triggerParams);
+    // 多個上游分支對同一個欄位輸出不同值時，以前只依連線順序留下最後一個、完全沒有任何提示——
+    // 流程可能全綠、下游卻靜默拿到不是預期分支的資料。這裡不改變既有的合併行為(仍是「依連線
+    // 順序、後面蓋過前面」，貿然改語意可能讓原本正常運作的分流圖表反而失敗)，但偵測到真的不同
+    // 值時記一筆警告，讓衝突至少變成看得見的事，使用者/AI 修復迴圈才有機會發現並處理。
+    if (upstreamIds.length > 1) {
+      const seenFrom = new Map<string, { nodeId: string; value: unknown }>();
+      for (const uid of upstreamIds) {
+        for (const [k, v] of Object.entries(nodeOutputs.get(uid) ?? {})) {
+          const prior = seenFrom.get(k);
+          if (prior && JSON.stringify(prior.value) !== JSON.stringify(v)) {
+            const priorLabel = wf.nodes.find((n) => n.id === prior.nodeId)?.label ?? prior.nodeId;
+            const curLabel = wf.nodes.find((n) => n.id === uid)?.label ?? uid;
+            log(runId, node.id, `⚠️ 欄位「${k}」同時被多個上游分支輸出不同的值(「${priorLabel}」與「${curLabel}」)——依連線順序這裡用的是「${curLabel}」的值；如果這不是預期的分支，請確認上游邏輯或改用明確的合併步驟`);
+          }
+          seenFrom.set(k, { nodeId: uid, value: v });
+        }
+      }
+    }
     for (const uid of upstreamIds) Object.assign(input, nodeOutputs.get(uid) ?? {});
     // 也把 trigger 參數一路帶著方便引用(只補 input 還沒有的 key，上游算出的值優先)
     for (const [k, v] of Object.entries(triggerParams)) if (!(k in input)) input[k] = v;
@@ -931,6 +1190,7 @@ async function executeWorkflow(item: QueueItem) {
     if (dryRun) {
       const skipKind = dryRunSkipKind(node, hasProvidedFile);
       if (skipKind) {
+        if (skipKind === "write") withheldWrites.push(node.label);
         nodeOutputs.set(node.id, { ...input });
         db.prepare(`UPDATE node_runs SET status='skipped', input_json=?, finished_at=datetime('now') WHERE run_id=? AND node_id=?`)
           .run(JSON.stringify(input), runId, node.id);
@@ -969,14 +1229,14 @@ async function executeWorkflow(item: QueueItem) {
       dryRun,
       cancelSignal: abortController.signal,
       log: (msg: string) => log(runId, node.id, msg),
-      registerFile: (filename, filePath, mime) => {
+      registerFile: (filename, filePath, mime, kind = "output") => {
         let size = 0;
         try {
           size = fs.statSync(filePath).size;
         } catch {}
         db.prepare(
-          `INSERT INTO run_files (run_id, workflow_id, filename, path, mime, size, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
-        ).run(runId, workflowId, filename, filePath, mime, size);
+          `INSERT INTO run_files (run_id, workflow_id, filename, path, mime, size, created_at, kind) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)`,
+        ).run(runId, workflowId, filename, filePath, mime, size, kind);
       },
     };
 
@@ -989,6 +1249,11 @@ async function executeWorkflow(item: QueueItem) {
       // 就消失、下游拿到的是原封不動的 {{欄位}} 字面文字」的真實根因。改在這個唯一存放輸出的地方統一處理，
       // 不用去每個節點檔案裡各自補 spread、以後新增節點型別也不會漏。
       nodeOutputs.set(node.id, { ...input, ...result.output });
+      // custom-code 的空殼在執行期才產碼,產出的碼若含寫出動作是在節點「裡面」被只讀防護攔住的
+      // (回傳 success+標記,不走上面的 engine 層略過)——這種也算被攔下,總結一樣要點名。
+      if (dryRun && result.output && (result.output as Record<string, unknown>)[DRY_RUN_SKIPPED_WRITES_KEY]) {
+        withheldWrites.push(node.label);
+      }
       successCount++;
       succeededNodes.add(node.id); // 成功的節點,它的失敗分支(fromPort="error")那條路是死的
       db.prepare(`UPDATE node_runs SET status='success', output_json=?, active_ports=?, attempt=?, finished_at=datetime('now') WHERE run_id=? AND node_id=?`)
@@ -1019,6 +1284,24 @@ async function executeWorkflow(item: QueueItem) {
       // 難懂的英文錯誤(如 "Target page, context or browser has been closed")，改顯示清楚的中文原因
       const errMsg = isCancel ? USER_CANCELLED : err instanceof Error ? err.message : String(err);
 
+      // 節點失敗時,若它開過瀏覽器,自動把「當下頁面」截圖+存 HTML 到除錯目錄。
+      // custom-code 自己開瀏覽器操作(例如抓 Google Drive 資料夾清單)失敗時,以前完全不留現場——
+      // AI 修復(getLastFailureContext 從這個目錄讀 HTML/截圖)拿不到頁面,只能瞎換 selector、永遠收斂不了
+      // (「明明登入成功了還一直說失敗、AI 怎麼修都修不好」的真實根因)。內建 browser-login 早就會存,
+      // 這裡補上讓「任何節點」都存,不再漏掉 custom-code。使用者主動停止的不存(頁面已被強關、截圖也會失敗)。
+      if (!isCancel) {
+        const failPage = session.currentPage();
+        if (failPage) {
+          try {
+            const dir = path.join(/* turbopackIgnore: true */ debugDir, node.id);
+            fs.mkdirSync(dir, { recursive: true });
+            await failPage.screenshot({ path: path.join(/* turbopackIgnore: true */ dir, "99-failure.png"), fullPage: true }).catch(() => {});
+            await fs.promises.writeFile(path.join(/* turbopackIgnore: true */ dir, "99-failure.html"), await failPage.content()).catch(() => {});
+            log(runId, node.id, `[${node.label}] 📸 已保存失敗當下的畫面與網頁內容(供 AI 修復和你自己檢視真正卡在哪)`);
+          } catch { /* 存除錯現場失敗不能影響主流程 */ }
+        }
+      }
+
       // ── 失敗分支(Plan B)：節點接了 fromPort="error" 的出線，就不讓整條 run 倒下——
       //    把錯誤資訊當這個節點的輸出({{error}}/{{errorStep}})、只走失敗分支繼續跑。
       //    使用者按停止不走備案(他要的是停，不是 Plan B)。 ──
@@ -1036,14 +1319,24 @@ async function executeWorkflow(item: QueueItem) {
         continue;
       }
 
-      failed = true;
-      failError = errMsg;
-      failedNode = node.id;
-      failedNodeLabel = node.label;
+      // 第一個失敗的節點決定 run 最後回報的主要原因(通知/AI 修復提案/失敗備援流程都認這個)；
+      // 後面若還有其他不相干分支也失敗，記進 unhandledFailures，不覆蓋掉第一個。
+      if (!failed) {
+        failed = true;
+        failError = errMsg;
+        failedNode = node.id;
+        failedNodeLabel = node.label;
+      } else {
+        unhandledFailures.push({ label: node.label, error: errMsg });
+      }
       db.prepare(`UPDATE node_runs SET status='failed', error=?, finished_at=datetime('now') WHERE run_id=? AND node_id=?`)
-        .run(failError, runId, node.id);
-      log(runId, node.id, `[${node.label}] 失敗：${failError}`);
-      break;
+        .run(errMsg, runId, node.id);
+      log(runId, node.id, `[${node.label}] 失敗：${errMsg}`);
+      // 只跳過「真的依賴這個失敗節點」的下游；不相干的獨立分支(如同一顆 wait-approval 核准後
+      // 同時要做的另一件事)要繼續執行，不能因為這個節點沒接失敗分支就整條 run 直接放棄。
+      unhandledFailedNodes.add(node.id);
+      skipDeadDownstream(node.id);
+      continue;
     }
   }
   } catch (err) {
@@ -1071,18 +1364,44 @@ async function executeWorkflow(item: QueueItem) {
     cancelCause.delete(runId);
     const reason = cause ?? (failedNodeLabel ? `使用者在「${failedNodeLabel}」這步手動停止了執行。` : "使用者手動停止了這次執行。");
     markPendingNodeRunsSkipped(db, runId);
-    db.prepare(`UPDATE runs SET status='failed', error=?, reason=?, resolution='needs-human', failed_node=?, finished_at=datetime('now') WHERE id=?`)
-      .run(failError, reason, failedNode || null, runId);
-    log(runId, null, "⏹ 已停止執行");
+    // runWorkflowAndWait 的時間預算用 cancelRun 來確實中斷底層工作；以前沿用 USER_CANCELLED
+    // 當內部控制碼，畫面卻顯示成「使用者取消」，讓人完全不知道實際是 AI/節點跑太久。
+    const recordError = cause ? SYSTEM_TIMEOUT : USER_CANCELLED;
+    const resolution = cause ? "ai-fixable" : "needs-human";
+    db.prepare(`UPDATE runs SET status='failed', error=?, reason=?, resolution=?, failed_node=?, finished_at=datetime('now') WHERE id=?`)
+      .run(recordError, reason, resolution, failedNode || null, runId);
+    log(runId, null, cause ? "⏱ 系統時間預算用完，已停止執行" : "⏹ 使用者已停止執行");
   } else if (failed) {
-    const { reason, resolution } = classifyFailure(failError);
-    const fullReason = failedNodeLabel ? `在「${failedNodeLabel}」這步失敗：${reason}` : reason;
+    const { reason, resolution, transient } = classifyFailure(failError);
+    // 其他不相干的獨立分支也失敗時要老實列出來，不能因為只回報第一個失敗就讓使用者以為
+    // 只有那一步出事——他們是各自獨立的分支，每一個都可能需要個別處理。
+    const otherFailuresNote = unhandledFailures.length > 0
+      ? `\n\n另外「${unhandledFailures.map((f) => f.label).join("、")}」這幾個不相干的獨立分支也失敗了，已個別記錄原因，請逐一確認。`
+      : "";
+    const fullReason = (failedNodeLabel ? `在「${failedNodeLabel}」這步失敗：${reason}` : reason) + otherFailuresNote;
     db.prepare(`UPDATE runs SET status='failed', error=?, reason=?, resolution=?, failed_node=?, finished_at=datetime('now') WHERE id=?`)
       .run(failError, fullReason, resolution, failedNode || null, runId);
     log(runId, null, `❌ 執行失敗：${fullReason}`);
     // 無人值守觸發(排程/資料夾監聽/webhook)的失敗一定要主動通知——這是使用者唯一能知道「沒跑成功」的管道，不然只能自己想到才會去開網頁看
     if (trigger !== "manual") {
-      if (resolution === "ai-fixable" && wf.status === "official" && failedNode) {
+      // 判定為「外部服務暫時性問題」(不是邏輯/帳密/設定問題)時，AI 改設定沒用，但重跑同一份設定
+      // 很可能就直接成功——正式流程排一次延後自動重跑，不用使用者自己想到要手動重試(真實踩過的
+      // 抱怨：「失敗要重複跑啊，不然就停滯了」)。用 __retryAttempt 帶在觸發參數裡數第幾次重試，
+      // 超過上限就不再排、退回原本的通知流程，避免真的卡死的東西無限重試下去。
+      const retryAttempt = Number(triggerParams.__retryAttempt ?? 0);
+      const willAutoRetry = transient && wf.status === "official" && !dryRun && retryAttempt < MAX_AUTO_RETRIES;
+      if (willAutoRetry) {
+        const nextAttempt = retryAttempt + 1;
+        const retryParams = { ...triggerParams, __retryAttempt: nextAttempt };
+        db.prepare(
+          `INSERT INTO pending_retries (id, workflow_id, trigger_params_json, attempt, retry_at, original_trigger, created_at, run_id) VALUES (?,?,?,?,datetime('now', ?),?,datetime('now'),?)`,
+        ).run(randomUUID(), workflowId, JSON.stringify(retryParams), nextAttempt, `+${AUTO_RETRY_DELAY_MINUTES} minutes`, trigger, runId);
+        notifyDesktop(
+          `「${wf.name}」${TRIGGER_LABEL[trigger]}執行失敗`,
+          `${fullReason.slice(0, 150)}｜判斷是外部服務暫時性問題，已排定 ${AUTO_RETRY_DELAY_MINUTES} 分鐘後自動重跑(第 ${nextAttempt}/${MAX_AUTO_RETRIES} 次)`,
+        );
+        log(runId, null, `🔁 判定為暫時性問題，已排定 ${AUTO_RETRY_DELAY_MINUTES} 分鐘後自動重跑(第 ${nextAttempt}/${MAX_AUTO_RETRIES} 次)`);
+      } else if (resolution === "ai-fixable" && wf.status === "official" && failedNode) {
         // 正式流程無人值守失敗且看起來 AI 修得好：在背景讓 AI 想一個修法提案(不自動套用，不影響正式在跑的設定)，
         // 想好之後通知裡順便講一句「AI 已經想好怎麼修」，使用者開網頁就能一鍵套用+重跑，不用自己動手找問題。
         notifyDesktop(`「${wf.name}」${TRIGGER_LABEL[trigger]}執行失敗`, `${fullReason.slice(0, 150)}｜AI 正在想辦法修…`);
@@ -1092,8 +1411,12 @@ async function executeWorkflow(item: QueueItem) {
       }
     }
     // ── 全域備援：這條流程設定了「失敗時自動執行另一條流程」就把它叫起來(帶失敗現場資訊)。
-    //    __errorHop 防連鎖迴圈：備援流程自己也失敗、又指回來 → 最多跳 2 層就停。 ──
-    if (wf.onFailureWorkflow) {
+    //    __errorHop 防連鎖迴圈：備援流程自己也失敗、又指回來 → 最多跳 2 層就停。
+    //    只讀試跑(dryRun)失敗不能觸發——備援流程通常會真的寫入/通知，試跑的失敗只是「證明看懂了沒」，
+    //    不該因此打一輪真的備援動作。 ──
+    if (wf.onFailureWorkflow && dryRun) {
+      log(runId, null, `🔒 設定了失敗備援流程「${wf.onFailureWorkflow}」，但這是只讀試跑，不觸發真正的備援動作`);
+    } else if (wf.onFailureWorkflow) {
       const hop = Number(triggerParams.__errorHop ?? 0) + 1;
       if (hop > 2) {
         log(runId, null, `🆘 失敗備援流程已連鎖 ${hop - 1} 層，為避免無限迴圈不再觸發`);
@@ -1122,8 +1445,24 @@ async function executeWorkflow(item: QueueItem) {
     // (cfgStr 刻意只警告不拋錯，見 nodeHelpers)。這種執行技術上成功、產出卻是垃圾，
     // 若總結只寫「執行成功」使用者根本不會發現。把警告數浮上來，讓人一眼看到該去檢查。
     const varWarnings = getVarWarnings(runId).count;
+    // 部分執行(框選幾步/從某步開始測)裡「使用者明確選了、卻沒有真的執行」的步驟,總結必須逐一講明原因:
+    // ①被只讀安全模式攔下(寫入/發送/操作外部系統)②分流沒走到的分支。不講清楚的話,使用者看到
+    // 「圈 5 步只跑 2 步」只會以為壞掉了(真實踩過的抱怨),而不知道這是安全設計+分支語意。
+    const selectedIds = item.resume?.skipUnseeded ? item.resume.rerunNodeIds : null;
+    const label = (nid: string) => wf.nodes.find((n) => n.id === nid)?.label ?? nid;
+    const selectedDeadBranch = selectedIds
+      ? selectedIds.filter((nid) => skipped.has(nid)).map(label)
+      : [];
+    const withheldNote = withheldWrites.length > 0
+      ? `🔒 其中「${withheldWrites.join("、")}」會真的寫入、發送或操作外部系統——測試模式為了不動到正式資料，刻意沒有執行這${withheldWrites.length > 1 ? "幾" : "一"}步(前面的讀取/計算都是真的跑過)。確認流程沒問題後，按「▶ 執行」完整執行才會真的做。`
+      : "";
+    const deadBranchNote = selectedDeadBranch.length > 0
+      ? `⏭「${selectedDeadBranch.join("、")}」是分流沒走到的分支，這次本來就不需要執行。`
+      : "";
     const reason =
       `執行成功，完成 ${successCount} 個步驟。` +
+      withheldNote +
+      deadBranchNote +
       (handledFailures.length > 0
         ? `🆘 其中「${handledFailures.map((h) => h.label).join("、")}」出了錯，已由你畫好的失敗分支(Plan B)接手處理——請確認備案結果符合預期(原錯誤：${handledFailures[0].error.slice(0, 100)})。`
         : "") +
@@ -1137,7 +1476,7 @@ async function executeWorkflow(item: QueueItem) {
 }
 
 /** 這個 pid 的進程現在還活著嗎？(signal 0 不會真的送信號，只檢查存在；EPERM 代表存在但無權限) */
-function isPidAlive(pid: number): boolean {
+export function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;

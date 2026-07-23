@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
-import { getWorkflow, saveWorkflow, deleteWorkflow, isBuiltin } from "@/lib/workflow/store";
+import { getWorkflow, saveWorkflow, deleteWorkflow, deriveRequiresSecrets, isBuiltin } from "@/lib/workflow/store";
 import { getWorkflowModel, setWorkflowModel, getWorkflowSecrets, setWorkflowSecrets } from "@/lib/settingsStore";
 import { listRuns } from "@/lib/workflow/engine";
 import { autorunActive } from "@/lib/workflow/busyLocks";
@@ -8,6 +8,9 @@ import { getNodeDef } from "@/lib/workflow/registry";
 import { lintGraph, validateConfigTypes, withSchemaDefaults } from "@/lib/workflow/graphLint";
 import type { WorkflowNode, WorkflowEdge } from "@/lib/workflow/types";
 import { separateOverlappingNodes } from "@/lib/workflow/layout";
+import { syncLabelForDestinationChange, type ReplacePair } from "@/lib/workflow/textReplace";
+import { getDb } from "@/lib/db";
+import { workflowExecutionFingerprint } from "@/lib/workflow/fingerprint";
 
 const PARAM_TYPES = new Set(["text", "number", "date-or-token", "select", "boolean", "secret", "code", "textarea"]);
 
@@ -38,9 +41,12 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const wf = getWorkflow(id);
   if (!wf) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
   const secrets = getWorkflowSecrets(id);
+  // 帳密欄位每次讀都重新推導,不用磁碟上存的舊清單——custom-code 的帳密需求(ctx.secrets.X)是後來
+  // 才會掃的,已存在的流程若只讀舊 requiresSecrets,設定頁永遠長不出新欄位、使用者沒地方填帳密。
+  const requiresSecrets = deriveRequiresSecrets(wf);
   return NextResponse.json({
-    workflow: { ...wf, model: getWorkflowModel(id, wf.defaultModel) },
-    secretsSet: Object.fromEntries((wf.requiresSecrets ?? []).map((f) => [f.key, Boolean(secrets[f.key]?.length)])),
+    workflow: { ...wf, requiresSecrets, model: getWorkflowModel(id, wf.defaultModel) },
+    secretsSet: Object.fromEntries((requiresSecrets ?? []).map((f) => [f.key, Boolean(secrets[f.key]?.length)])),
     runs: listRuns(id),
   });
 }
@@ -194,7 +200,17 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
       const applied = putSheetUrlIntoAllWriteNodes(cur, scriptUrl);
       saveWorkflow(applied.workflow);
     } else {
-      saveWorkflow({ ...cur, nodes: cur.nodes.map((n) => (n.id === target.id ? { ...n, config: merged } : n)) });
+      // 直接改設定(不經 AI)也要維持「名稱說的用途 = 真正設定的用途」——跟 graphRepair 的 AI 修復
+      // 同一套規則(syncLabelForDestinationChange)，只在原 config 確實使用舊完整目的地時同步，
+      // 避免把仍寫其他目的地的節點名稱一起誤改。以前這裡只存 config、完全不動 label，使用者手動把
+      // 「填回 A 分頁」的 sheetName 改成 B 分頁後，節點名稱還留著「A」，變成名實不符的真實 bug。
+      const destinationPairs: ReplacePair[] = Object.keys(filtered).flatMap((k) => {
+        const before = target.config[k];
+        const after = filtered[k];
+        return typeof before === "string" && typeof after === "string" && before !== after ? [{ from: before, to: after }] : [];
+      });
+      const synced = syncLabelForDestinationChange(target.label, target.config, destinationPairs);
+      saveWorkflow({ ...cur, nodes: cur.nodes.map((n) => (n.id === target.id ? { ...n, label: synced.label, config: merged } : n)) });
     }
   }
 
@@ -300,10 +316,24 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   if (changesManifest) {
     // 以「當下最新版」為底(不是函式開頭那份)——避免用過期快照把上面部分更新或其他人剛存的改動蓋掉
     const cur = getWorkflow(id) ?? wf;
+    let promotionWarning: string | undefined;
     if (body.status === "official") {
       const errors = lintGraph(cur.nodes, cur.edges);
       if (errors.length > 0) {
         return NextResponse.json({ error: `這張流程圖還不能設為正式：\n${errors.slice(0, 8).map((e) => `- ${e}`).join("\n")}` }, { status: 400 });
+      }
+      // lintGraph 只驗證「結構合法」(型別存在/邊指向存在的節點/無環/config 型別對)，不保證這張圖
+      // 真的能跑——一張結構合法但實際會失敗的圖(選擇器錯、缺帳密、外部服務打不通…)照樣能通過這關，
+      // 一旦設為正式就可能立刻掛上排程/監聽開始無人值守執行。這裡不做成硬性擋下(很多流程第一次
+      // 設定時確實還沒條件測試，硬擋會擋住合理的使用情境)，但至少查一下「這個確切版本的圖」有沒有
+      // 任何一次執行(含安全試跑)成功過或正確地停在等簽核——都沒有的話在回應帶一句警告，
+      // 讓使用者自己決定要不要先測過再啟用自動觸發。
+      const fingerprint = workflowExecutionFingerprint(cur);
+      const verifiedRun = getDb()
+        .prepare(`SELECT id FROM runs WHERE workflow_id = ? AND graph_fingerprint = ? AND status IN ('success','waiting') LIMIT 1`)
+        .get(id, fingerprint);
+      if (!verifiedRun) {
+        promotionWarning = "這張流程圖結構合法，但目前這個版本還沒有任何一次執行(含安全試跑)成功過——建議先用「🪄 幫我測到會跑」或「只測試不更改資料」驗證過，再讓自動觸發(排程/監聽)開始運作。";
       }
     }
     // onFailureWorkflow/group：空字串=清掉設定(存成 undefined)，undefined=不改——跟 builderPrefs 同一套語意
@@ -331,6 +361,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
       onFailureWorkflow: onFailure,
       group,
     });
+    return NextResponse.json({ ok: true, ...(promotionWarning ? { warning: promotionWarning } : {}) });
   }
   return NextResponse.json({ ok: true });
 }

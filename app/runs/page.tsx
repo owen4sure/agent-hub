@@ -19,7 +19,7 @@ interface GlobalRun {
 
 const TRIGGER_LABEL: Record<string, string> = {
   manual: "手動", schedule: "排程", watch: "資料夾監聽", webhook: "Webhook", form: "表單", error: "錯誤觸發",
-  email: "收信觸發", telegram: "Telegram 訊息", line: "LINE 訊息",
+  email: "收信觸發", telegram: "Telegram 訊息", line: "LINE 訊息", retry: "失敗自動重跑",
 };
 const STATUS_FILTERS: { key: string; label: string }[] = [
   { key: "all", label: "全部" },

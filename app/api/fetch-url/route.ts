@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import fs from "node:fs";
+import path from "node:path";
 import { isPrivateHost, privateUrlsAllowed } from "@/lib/urlGuard";
 import { readGoogleDoc, parseGoogleDocUrl } from "@/lib/googleExport";
 import { saveChatAttachment } from "@/lib/chatAttachments";
@@ -45,32 +47,49 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "這個網址指向內部網路位址，基於安全考量不開放讀取(自家內網有需要可設定環境變數 AGENT_HUB_ALLOW_PRIVATE_URLS=1 關閉)" }, { status: 400 });
     }
 
-    // Google 試算表/文件先走官方匯出，才能讀到真正的儲存格/文件內容，而不是只看截圖。
-    log("google-export:start");
-    const gDoc = await readGoogleDoc(url, controller.signal);
-    if (gDoc) {
-      log("google-export:complete");
-      const asset = workflowId ? saveChatAttachment({
-        workflowId,
-        source: "url",
-        filename: gDoc.title || url,
-        mime: "text/plain",
-        text: gDoc.text,
-        originalBase64: "",
-        images: [],
-      }) : null;
-      return NextResponse.json({ title: gDoc.title, text: gDoc.text, googleExport: true, assetId: asset?.id });
+    // Google 試算表/文件通常先走官方匯出。但若使用者已在「這條流程」手動登入，
+    // 絕不能先因匿名匯出失敗就叫他把私有文件公開；直接走下面的已登入瀏覽器讀取。
+    const savedSession = workflowId
+      ? path.join(process.cwd(), "data", "browser-sessions", `${workflowId}.json`)
+      : null;
+    const hasSavedSession = Boolean(savedSession && fs.existsSync(savedSession));
+    if (!hasSavedSession) {
+      log("google-export:start");
+      const gDoc = await readGoogleDoc(url, controller.signal);
+      if (gDoc) {
+        log("google-export:complete");
+        const asset = workflowId ? saveChatAttachment({
+          workflowId,
+          source: "url",
+          filename: gDoc.title || url,
+          mime: "text/plain",
+          text: gDoc.text,
+          originalBase64: "",
+          images: [],
+        }) : null;
+        return NextResponse.json({ title: gDoc.title, text: gDoc.text, googleExport: true, assetId: asset?.id });
+      }
     }
     if (controller.signal.aborted) throw abortError(controller.signal);
 
     log("browser:launch");
     const { chromium } = await import("playwright");
-    const browser = await chromium.launch({ headless: true });
+    // 跟 engine/manualLogin 同一套反自動化偵測參數：navigator.webdriver=true 是 Radware/Cloudflare
+    // 這類防護判定機器人的主要訊號，不拿掉的話使用者貼銀行/官網連結常只會拿到「Challenge Validation」
+    // 挑戰頁(真實踩過：台銀匯率頁)，後面的挑戰頁等待重抽也救不回來。
+    const browser = await chromium.launch({ headless: true, args: ["--disable-blink-features=AutomationControlled"] });
     const closeOnAbort = () => { void browser.close().catch(() => {}); };
     controller.signal.addEventListener("abort", closeOnAbort, { once: true });
     try {
       if (controller.signal.aborted) throw abortError(controller.signal);
-      const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1.5 });
+      // 私有文件不該要求使用者把權限調成公開。若他已從流程頁「手動登入一次」，
+      // 只在同一 workflow 的本機 session 內讀取；沒有 session 則仍是匿名讀取，絕不代填帳密。
+      const context = await browser.newContext({
+        viewport: { width: 1280, height: 900 },
+        deviceScaleFactor: 1.5,
+        ...(hasSavedSession && savedSession ? { storageState: savedSession } : {}),
+      });
+      const page = await context.newPage();
       page.setDefaultTimeout(8_000);
       page.setDefaultNavigationTimeout(20_000);
       if (guardOn) {
@@ -94,8 +113,7 @@ export async function POST(req: Request) {
       if (controller.signal.aborted) throw abortError(controller.signal);
 
       log("browser:extract");
-      const title = await page.title().catch(() => "");
-      const pageData = await page.evaluate(() => {
+      const extractPage = () => page.evaluate(() => {
         const b = document.body;
         const rawText = b ? (b.innerText || "") : "";
         return {
@@ -105,6 +123,22 @@ export async function POST(req: Request) {
           hasPasswordField: Boolean(document.querySelector('input[type="password"]')),
         };
       }).catch(() => ({ text: "", height: 900, hasPasswordField: false }));
+      let title = await page.title().catch(() => "");
+      let pageData = await extractPage();
+      // Cloudflare 這類「防機器人挑戰頁」(Challenge Validation/Just a moment…)在真瀏覽器裡通常
+      // 3~6 秒會自動通過並跳轉到真正的頁面。第一眼抽到的是挑戰頁就再等一次重抽——不然使用者
+      // 貼一個匯率/官網連結，AI 只會收到一句「Challenge Validation」，接著就被迫瞎猜
+      // (真實踩過：台銀匯率頁)。只重試一次、上限 6 秒，真的擋死的站不會拖住整個請求。
+      const looksLikeBotChallenge =
+        /challenge validation|just a moment|checking your browser|verify you are|attention required|cf-browser-verification/i.test(title) ||
+        (pageData.text.trim().length < 200 && /challenge|checking|verification|驗證中|請稍候/i.test(`${title} ${pageData.text}`));
+      if (looksLikeBotChallenge) {
+        log("browser:challenge-wait");
+        await page.waitForTimeout(6_000);
+        if (controller.signal.aborted) throw abortError(controller.signal);
+        title = await page.title().catch(() => title);
+        pageData = await extractPage();
+      }
 
       // 不截無限長整頁：虛擬列表/動態頁面的 fullPage 截圖可能耗掉數十秒和大量記憶體。
       // 前 5000px 供視覺模型理解版面，文字則另外抽取。
@@ -115,7 +149,7 @@ export async function POST(req: Request) {
         timeout: 8_000,
       }).catch(() => page.screenshot({ type: "png", timeout: 4_000 }));
 
-      const gNote = parseGoogleDocUrl(url)
+      const gNote = parseGoogleDocUrl(url) && !hasSavedSession
         ? `⚠️ 這是 Google 文件，但它沒有開放「知道連結的人可檢視」，我沒辦法讀到真正的儲存格內容，只能從下面這張截圖看到畫面(可能看不清楚)。請把共用權限改成「知道連結的人可檢視」，我就能直接讀到每一格的真實數值。\n\n`
         : "";
       const visibleText = compactVisibleWebText(pageData.text);

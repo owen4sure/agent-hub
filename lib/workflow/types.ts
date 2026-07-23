@@ -49,6 +49,30 @@ export interface Workflow {
   group?: string;
   /** 外部檔案匯入後，第一次執行前必須由使用者明確確認其本機讀檔／外送能力。 */
   importedUntrusted?: boolean;
+  /**
+   * 複製流程時保留的白話交接。不複製冗長聊天、帳密或瀏覽器登入；但使用者明確拿來定義
+   * 流程的檔案／圖片會複製成副本自己的私有附件，讓副本的 AI 能接著理解而非叫人重傳。
+   */
+  copyHandoff?: {
+    sourceName: string;
+    summary: string;
+    copiedAt: string;
+    attachments?: { assetId: string; name: string; kind: "file" | "image" }[];
+    /** 對話或附件超過交接上限而被截斷早期內容時=true——複製當下要據此警告使用者，
+     * 不能默默截斷卻讓人以為 AI 完整承接了原流程的脈絡。 */
+    truncatedChat?: boolean;
+    truncatedAttachments?: boolean;
+  };
+  /**
+   * 使用者在對話裡用「記住／規則是／以後都要」這類明確收尾語要求持久保存的規則(見
+   * chatCommand.ts 的 extractRememberedRule)——跟 copyHandoff.summary 這種自由文字摘要不同，
+   * 這裡只收「使用者親口明確要求記住」的句子，觸發條件刻意保守，避免把一般閒聊誤存成規則。
+   * 建圖/改圖時以「優先於背景脈絡」的措辭餵給模型(見 builder.ts 的 inheritedContextSection)。
+   * 這是 2026-07 第三輪外部審查「沒有穩定的工作流需求規格」這個 P1 的縮小範圍版本——完整版
+   * (允許修改欄位白名單、正式驗收條件)是更大的架構專案，這裡先解決「使用者明確確認的決定
+   * 沒有持久化位置、只能靠模型重讀聊天猜」這個最具體的痛點。
+   */
+  confirmedRules?: { text: string; confirmedAt: string }[];
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
 }
@@ -57,6 +81,9 @@ export interface Workflow {
 export interface RunSession {
   getPage(): Promise<Page>;
   getBrowser(): Promise<Browser>;
+  /** 回傳「已經開著的」分頁,沒有就回 null——不像 getPage 會 lazy 新開一個。
+   * 節點失敗時引擎用它把當下真實頁面截圖+存 HTML,不會平白開一個空白頁污染除錯現場。 */
+  currentPage(): Page | null;
   close(): Promise<void>;
   /** 節點逾時後呼叫：強制關掉當下分頁(讓卡住的操作立刻拋錯中止)，下一步會拿到全新分頁，不會跟逾時的殭屍操作搶同一頁 */
   resetPage(): Promise<void>;
@@ -85,7 +112,9 @@ export interface NodeContext {
   dryRun?: boolean;
   log: (msg: string) => void;
   /** 登記一個產出檔，讓它出現在 dashboard 的檔案清單/可下載 */
-  registerFile: (filename: string, filePath: string, mime: string) => void;
+  // kind 省略 = 'output'(交付產出,會列在「產出檔案」頁)；'intermediate' = 抓進來給下游/AI 對話
+  // 讀的中間檔(信件附件、解壓出的檔案)——照樣登記讓生命週期跟著 run,只是不列在產出清單。
+  registerFile: (filename: string, filePath: string, mime: string, kind?: "output" | "intermediate") => void;
   /** 使用者按「⏹ 停止執行」時會 abort。cancelRequested 只在節點「之間」被檢查，對正在跑的 fetch/AI
    * 呼叫沒有效果——按停止後畫面卡在同一個節點好幾十秒是這個原因。會等待外部呼叫的節點(http-request/
    * llm-decide/custom-code 產碼)請把它接進 fetch 的 signal 或 callAIWithRetry 的 opts.signal，

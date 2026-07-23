@@ -1,6 +1,7 @@
 import type { NodeDefinition } from "../types";
 import { PermanentError } from "../types";
 import { getWorkflow } from "../store";
+import { scanSecretKeys } from "../secretScan";
 import { generateCustomCode, isPlaceholderCode, PLACEHOLDER_CODE } from "../codegen";
 import { customCodeIsUnsafeForDryRun, DRY_RUN_SKIPPED_WRITES_KEY } from "../dryRun";
 
@@ -29,9 +30,18 @@ export const customCodeNode: NodeDefinition = {
     { key: "intent", label: "這個節點要做什麼(白話)", type: "textarea", default: "" },
     { key: "code", label: "程式碼(AI 產生，勿手動改)", type: "code", default: PLACEHOLDER_CODE },
   ],
+  // custom-code 的帳密需求藏在 intent/程式碼文字裡(ctx.secrets.googleAccount 這種)，跟其他節點
+  // 不同、沒有固定欄位可宣告——不掃出來的話 requiresSecrets 推導不到，設定頁永遠長不出輸入框，
+  // 使用者「登入失敗要填密碼」卻根本沒有地方填(踩過:Google 登入的自訂步驟)。
+  secretFields(config) {
+    return scanSecretKeys(`${String(config.intent ?? "")}\n${String(config.code ?? "")}`);
+  },
   // 自訂程式碼若 selector/邏輯寫錯，原樣重跑不會變好，反而可能連續等 3 次 30 秒。
   // 外部暫時錯誤應由程式碼自己明確重試；節點失敗後交給整圖修復，避免盲目燒時間。
   retryable: false,
+  // 這一步正常的 Excel/資料計算應在數秒完成；若是在第一次臨時產碼或壞掉的程式卡住，
+  // 等 3 分鐘再等同一段重跑沒有價值。90 秒後立即留下真實錯誤，讓「讓 AI 修」重產／修正程式。
+  timeoutMs: 90_000,
   async execute(ctx) {
     // 一定要讀「磁碟上最新版」的 code，不能只看 ctx.config——ctx.config 是節點開跑當下的快照，
     // 重試時還是舊的：第一次嘗試若剛自動產生過程式碼(已存回磁碟)，用快照會誤判「還是空殼」，

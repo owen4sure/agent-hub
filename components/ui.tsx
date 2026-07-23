@@ -73,6 +73,20 @@ export function formatDate(s?: string | null): string {
   return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+/** 排程的 next_run_at 是 lib/scheduler.ts 的 computeNextRun/taipeiParts 早就換算好的「台北本地時間」
+ * naive 字串(跟 SQLite datetime('now') 那種真正的 UTC 時間戳記完全不同來源)，不能套用上面 formatDate()
+ * 的「當作 UTC 再轉本地」邏輯——那會把本來就已經是本地時間的值再多加一次 +8 小時。
+ * 真實踩過的事故：排程設「早上 9:00」，套用 formatDate 後畫面顯示「17:00」，使用者以為排程時間跑掉了，
+ * 其實只是顯示層多轉了一次時區，真正觸發時間(scheduler tick 全程用同一套台北 naive 字串比對)完全正確。
+ * 這裡只重排分隔符號，不做任何時區換算。 */
+export function formatScheduleNextRun(s?: string | null): string {
+  if (!s) return "";
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (!m) return s;
+  const [, y, mo, d, h, mi] = m;
+  return `${y}/${mo}/${d} ${h}:${mi}`;
+}
+
 /** 把 "09:00" 這種 24 小時字串講成「早上 9:00」讓非工程背景的人一看就懂 */
 export function friendlyTime(hhmm: string): string {
   const [h, m] = hhmm.split(":").map(Number);

@@ -3,6 +3,7 @@ import { extractTextFromFile } from "@/lib/textExtract";
 import { renderXlsxToImage } from "@/lib/xlsxRender";
 import { renderPdfToImages } from "@/lib/pdfRender";
 import { renderDocxToImage } from "@/lib/docxRender";
+import { renderPptxToImages } from "@/lib/pptxRender";
 import { extractEmbeddedImages } from "@/lib/embeddedImages";
 import { saveChatAttachment } from "@/lib/chatAttachments";
 import { getWorkflow, isValidWorkflowId } from "@/lib/workflow/store";
@@ -68,6 +69,12 @@ export async function POST(req: Request) {
   if (/\.docx$/.test(name)) {
     const rendered = await renderDocxToImage(buffer).catch(() => null);
     if (rendered) images.push({ b64: rendered, name: `${body.filename}(渲染圖)`, mime: "image/png" });
+  }
+  // PowerPoint：逐頁轉成圖，讓 AI 看得到真正的排版、圖表與色彩；只抽 XML 文字會看不出
+  // 「哪個數字在哪一張、是不是標題或註解」，很容易把工作流程理解錯。
+  if (/\.pptx$/.test(name)) {
+    const pages = await renderPptxToImages(buffer).catch(() => []);
+    pages.forEach((page) => images.push({ b64: page.b64, name: `${body.filename}第${page.page}張投影片`, mime: "image/png" }));
   }
   // Office 檔(xlsx/docx/pptx)裡嵌入的圖片也一起抽出來給 AI 看
   if (/\.(xlsx|xlsm|docx|pptx)$/.test(name)) {

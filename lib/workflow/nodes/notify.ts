@@ -1,6 +1,7 @@
 import type { NodeDefinition } from "../types";
 import { PermanentError, RetryableError } from "../types";
-import { cfgStr } from "../nodeHelpers";
+import { cfgStr, needsSetupHint } from "../nodeHelpers";
+import { getAttemptState, getCompletedAction, idempotencyKey, markAttemptStarted, recordCompletedAction } from "../idempotency";
 
 /**
  * 訊息通知節點：把流程結果推到使用者的 Telegram / LINE。
@@ -66,21 +67,35 @@ async function sendTelegramRaw(botToken: string, body: unknown, signal?: AbortSi
   if (r.status === 400 && /chat not found/i.test(r.text)) {
     throw new PermanentError("Telegram Chat ID 不正確(找不到聊天)——請先在 Telegram 跟你的 bot 說一句話，再到設定頁按「自動偵測」重抓 Chat ID");
   }
+  // 真實常見情境：使用者封鎖了自己的 bot(或從沒對它按過「開始」)，Telegram 回 403。
+  // 跟 sendSlack 下面的 403(action_prohibited)是同一類「外部服務主動拒絕」情境，
+  // 這裡漏掉同款翻譯，使用者只會看到一段看不懂的原始英文，不知道要去 Telegram 解除封鎖。
+  if (r.status === 403) {
+    throw new PermanentError("Telegram 拒絕發送(403)，通常是你封鎖了這個 bot、或從沒對它按過「開始」——請到 Telegram 找到這個 bot，確認沒有封鎖它，並傳一句話開始對話");
+  }
   if (r.status >= 500) throw new RetryableError(`Telegram 伺服器暫時錯誤(${r.status})`);
   if (r.status !== 200) throw new PermanentError(`Telegram 發送失敗(${r.status})：${r.text.slice(0, 150)}`);
 }
 
-/** 送一則 LINE 訊息(Messaging API push；給節點與設定頁的「測試發送」共用) */
-export async function sendLine(channelAccessToken: string, userId: string, text: string, signal?: AbortSignal): Promise<void> {
+/** 送一則 LINE 訊息(Messaging API push；給節點與設定頁的「測試發送」共用)。
+ * to 可以是 userId(U 開頭)、groupId(C 開頭)或 roomId(R 開頭)——push API 同一個端點都吃。 */
+export async function sendLine(channelAccessToken: string, to: string, text: string, signal?: AbortSignal): Promise<void> {
   const r = await postJson(
     "https://api.line.me/v2/bot/message/push",
     { Authorization: `Bearer ${channelAccessToken}` },
-    { to: userId, messages: [{ type: "text", text: text.slice(0, 5000) }] },
+    { to, messages: [{ type: "text", text: text.slice(0, 5000) }] },
     signal,
   );
   if (r.status === 401) throw new PermanentError("LINE Channel Access Token 不正確(API 回 401)——請到設定頁照教學重新發行並貼上");
   if (r.status === 400 && /invalid.*to|not found/i.test(r.text)) {
-    throw new PermanentError("LINE 的「你的 User ID」不正確——請到 LINE Developers 的 Basic settings 頁最下方複製 Your user ID(U 開頭那串)");
+    throw new PermanentError(
+      "LINE 的傳送對象 ID 不正確——1對1 用 LINE Developers Basic settings 最下方的 Your user ID(U 開頭)；" +
+      "群組用 groupId(C 開頭)：把官方帳號加進群組後在群組傳一句話，執行紀錄/伺服器 log 會印出 groupId",
+    );
+  }
+  // 跟 sendTelegram 的 403 是同一類情境：使用者封鎖了官方帳號，LINE 拒絕發送。
+  if (r.status === 403) {
+    throw new PermanentError("LINE 拒絕發送(403)，通常是這個人封鎖了官方帳號——請到 LINE 找到這個官方帳號，確認沒有封鎖它");
   }
   if (r.status >= 500) throw new RetryableError(`LINE 伺服器暫時錯誤(${r.status})`);
   if (r.status !== 200) throw new PermanentError(`LINE 發送失敗(${r.status})：${r.text.slice(0, 150)}`);
@@ -104,7 +119,6 @@ export async function sendSlack(webhookUrl: string, text: string, signal?: Abort
   if (r.status !== 200) throw new PermanentError(`Slack 發送失敗(${r.status})：${r.text.slice(0, 150)}`);
 }
 
-const NEED_SETUP = "請到「設定」頁最下面的「通知串接」區，照教學一步一步填好(有「測試發送」可以先驗證)";
 
 export const telegramNotifyNode: NodeDefinition = {
   type: "telegram-notify",
@@ -122,14 +136,28 @@ export const telegramNotifyNode: NodeDefinition = {
   ],
   retryable: true,
   async execute(ctx) {
+    // retryable 逾時重跑不等於「這次真的沒送到」——Telegram 可能其實已經收到，只是等回應逾時，
+    // 重跑會發第二次一模一樣的通知。
+    const key = idempotencyKey(ctx);
+    const state = getAttemptState(key);
+    if (state === "completed") {
+      ctx.log("這則 Telegram 通知在這次執行裡已經真的發送過(重試時偵測到)，不再重複發送");
+      return { output: getCompletedAction(key)! };
+    }
+    if (state === "pending") {
+      throw new PermanentError("上次發送這則 Telegram 通知時沒有等到明確的成功或失敗回應(可能其實已經送達)，為了避免重複發送，不會自動重試——請自行確認是否已收到，若確實沒收到再手動重新執行這個步驟");
+    }
     const token = ctx.secrets.telegramBotToken;
     const chatId = ctx.secrets.telegramChatId;
-    if (!token || !chatId) throw new PermanentError(`尚未填入 Telegram Bot Token / Chat ID——${NEED_SETUP}`);
+    if (!token || !chatId) throw new PermanentError(`尚未填入 Telegram Bot Token / Chat ID——${needsSetupHint("Telegram")}`);
     const message = cfgStr(ctx, "message").trim();
     if (!message) throw new PermanentError("沒有設定要發送的訊息內容");
+    markAttemptStarted(key);
     await sendTelegram(token, chatId, message, ctx.cancelSignal);
     ctx.log(`已發送 Telegram 訊息(${message.length} 字)`);
-    return { output: { ...ctx.input, sent: true } };
+    const output = { ...ctx.input, sent: true };
+    recordCompletedAction(key, output);
+    return { output };
   },
 };
 
@@ -148,13 +176,25 @@ export const slackNotifyNode: NodeDefinition = {
   ],
   retryable: true,
   async execute(ctx) {
+    const key = idempotencyKey(ctx);
+    const state = getAttemptState(key);
+    if (state === "completed") {
+      ctx.log("這則 Slack 通知在這次執行裡已經真的發送過(重試時偵測到)，不再重複發送");
+      return { output: getCompletedAction(key)! };
+    }
+    if (state === "pending") {
+      throw new PermanentError("上次發送這則 Slack 通知時沒有等到明確的成功或失敗回應(可能其實已經送達)，為了避免重複發送，不會自動重試——請自行確認是否已收到，若確實沒收到再手動重新執行這個步驟");
+    }
     const url = ctx.secrets.slackWebhookUrl;
-    if (!url) throw new PermanentError(`尚未填入 Slack Webhook 網址——${NEED_SETUP}`);
+    if (!url) throw new PermanentError(`尚未填入 Slack Webhook 網址——${needsSetupHint("Slack")}`);
     const message = cfgStr(ctx, "message").trim();
     if (!message) throw new PermanentError("沒有設定要發送的訊息內容");
+    markAttemptStarted(key);
     await sendSlack(url, message, ctx.cancelSignal);
     ctx.log(`已發送 Slack 訊息(${message.length} 字)`);
-    return { output: { ...ctx.input, sent: true } };
+    const output = { ...ctx.input, sent: true };
+    recordCompletedAction(key, output);
+    return { output };
   },
 };
 
@@ -162,11 +202,20 @@ export const lineNotifyNode: NodeDefinition = {
   type: "line-notify",
   category: "integration",
   label: "發 LINE 通知",
-  description: "把訊息發到使用者的 LINE(例如「報表做好了」或把結果內容直接傳過去)。需要先在設定頁串接好 LINE 官方帳號(有教學)。",
+  description:
+    "把訊息發到使用者的 LINE 或 LINE 群組(例如「報表做好了」或把結果內容直接傳過去)。" +
+    "需要先在設定頁串接好 LINE 官方帳號(有教學)。發到群組：把官方帳號加進群組，" +
+    "「傳送對象」填群組 ID(C 開頭)或 {{groupId}}(LINE 觸發的流程可直接回到來源群組)。",
   icon: "💬",
   outputs: "sent(是否已送出)",
   configSchema: [
     { key: "message", label: "訊息內容(可用 {{欄位}} 帶入上游資料)", type: "textarea", default: "" },
+    {
+      key: "target",
+      label: "傳送對象(留空=設定頁的 User ID；群組填 groupId 或 {{groupId}})",
+      type: "text",
+      default: "",
+    },
   ],
   secretFields: () => [
     { key: "lineChannelAccessToken", label: "LINE Channel Access Token", type: "password" },
@@ -174,13 +223,25 @@ export const lineNotifyNode: NodeDefinition = {
   ],
   retryable: true,
   async execute(ctx) {
+    const key = idempotencyKey(ctx);
+    const state = getAttemptState(key);
+    if (state === "completed") {
+      ctx.log("這則 LINE 通知在這次執行裡已經真的發送過(重試時偵測到)，不再重複發送");
+      return { output: getCompletedAction(key)! };
+    }
+    if (state === "pending") {
+      throw new PermanentError("上次發送這則 LINE 通知時沒有等到明確的成功或失敗回應(可能其實已經送達)，為了避免重複發送，不會自動重試——請自行確認是否已收到，若確實沒收到再手動重新執行這個步驟");
+    }
     const token = ctx.secrets.lineChannelAccessToken;
-    const userId = ctx.secrets.lineUserId;
-    if (!token || !userId) throw new PermanentError(`尚未填入 LINE Channel Access Token / User ID——${NEED_SETUP}`);
+    const target = cfgStr(ctx, "target").trim() || ctx.secrets.lineUserId;
+    if (!token || !target) throw new PermanentError(`尚未填入 LINE Channel Access Token / 傳送對象——${needsSetupHint("LINE")}`);
     const message = cfgStr(ctx, "message").trim();
     if (!message) throw new PermanentError("沒有設定要發送的訊息內容");
-    await sendLine(token, userId, message, ctx.cancelSignal);
-    ctx.log(`已發送 LINE 訊息(${message.length} 字)`);
-    return { output: { ...ctx.input, sent: true } };
+    markAttemptStarted(key);
+    await sendLine(token, target, message, ctx.cancelSignal);
+    ctx.log(`已發送 LINE 訊息(${message.length} 字)給 ${target.startsWith("C") ? "群組" : target.startsWith("R") ? "聊天室" : "個人"} ${target.slice(0, 6)}…`);
+    const output = { ...ctx.input, sent: true };
+    recordCompletedAction(key, output);
+    return { output };
   },
 };

@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "../db";
 
+/** 主要節點以外，還一併要改的節點(整圖感知修復發現真正原因不只一處時) */
+export interface ExtraFixEdit {
+  nodeId: string;
+  nodeLabel: string;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+}
+
 export interface FixProposal {
   id: string;
   run_id: string;
@@ -10,6 +18,7 @@ export interface FixProposal {
   error: string | null;
   before_json: string;
   after_json: string;
+  extra_edits_json: string | null;
   status: "pending" | "applied" | "dismissed";
   created_at: string;
 }
@@ -22,6 +31,8 @@ export function createProposal(input: {
   error: string;
   before: Record<string, unknown>;
   after: Record<string, unknown>;
+  /** 整圖感知修復除了主要節點外，還一併改了哪些節點——套用提案時要一起套用，不能只套主要那格 */
+  extraEdits?: ExtraFixEdit[];
 }): string {
   const db = getDb();
   // 同一個 workflow+節點若已有還沒處理的舊提案，先作廢——不然同一個排程每天都失敗，
@@ -29,9 +40,13 @@ export function createProposal(input: {
   db.prepare(`UPDATE fix_proposals SET status='dismissed' WHERE workflow_id=? AND node_id=? AND status='pending'`).run(input.workflowId, input.nodeId);
   const id = randomUUID();
   db.prepare(
-    `INSERT INTO fix_proposals (id, run_id, workflow_id, node_id, node_label, error, before_json, after_json, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`,
-  ).run(id, input.runId, input.workflowId, input.nodeId, input.nodeLabel, input.error, JSON.stringify(input.before), JSON.stringify(input.after));
+    `INSERT INTO fix_proposals (id, run_id, workflow_id, node_id, node_label, error, before_json, after_json, extra_edits_json, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`,
+  ).run(
+    id, input.runId, input.workflowId, input.nodeId, input.nodeLabel, input.error,
+    JSON.stringify(input.before), JSON.stringify(input.after),
+    input.extraEdits?.length ? JSON.stringify(input.extraEdits) : null,
+  );
   return id;
 }
 

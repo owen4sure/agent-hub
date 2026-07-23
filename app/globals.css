@@ -339,6 +339,13 @@ aside {
 }
 
 /* ── 節點卡:漸層描邊玻璃(padding-box/border-box 雙背景) ── */
+/* 左鍵拖曳的框選矩形——預設樣式在深色畫布上幾乎看不見,改成清楚的 accent 虛線框 */
+.react-flow__selection {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1.5px dashed var(--accent);
+  border-radius: 6px;
+}
+
 .wf-node {
   position: relative;
   width: 170px;

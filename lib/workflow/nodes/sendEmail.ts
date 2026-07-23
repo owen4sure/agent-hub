@@ -3,7 +3,8 @@ import path from "node:path";
 import nodemailer from "nodemailer";
 import type { NodeDefinition } from "../types";
 import { PermanentError, RetryableError } from "../types";
-import { cfgStr } from "../nodeHelpers";
+import { cfgStr, needsSetupHint } from "../nodeHelpers";
+import { getAttemptState, getCompletedAction, idempotencyKey, markAttemptStarted, recordCompletedAction } from "../idempotency";
 
 /**
  * 寄 Email 節點：把流程結果(或附件檔案)寄到任何信箱。
@@ -95,10 +96,23 @@ export const sendEmailNode: NodeDefinition = {
   ],
   retryable: true,
   async execute(ctx) {
+    // retryable 節點逾時重跑不等於「這次真的沒寄到」——SMTP 可能其實已經送出，只是等回應逾時
+    // (真實會發生：ETIMEDOUT 就是明確的「送出後沒等到回應」場景)，重跑會寄第二封一模一樣的信。
+    const key = idempotencyKey(ctx);
+    const state = getAttemptState(key);
+    if (state === "completed") {
+      ctx.log("這封信在這次執行裡已經真的寄出過(重試時偵測到)，不再重複寄送");
+      return { output: getCompletedAction(key)! };
+    }
+    if (state === "pending") {
+      // 上次已經真的發起寄信但不確定有沒有送達(例如逾時)——這時候貿然重試才是真正會寄兩次信的
+      // 風險，不能自動重來，老實停下來讓人自己判斷(code review 抓到:只記「確定完成」防不住這裡)。
+      throw new PermanentError("上次寄這封信時沒有等到明確的成功或失敗回應(可能其實已經送出)，為了避免重複寄送，不會自動重試——請自行確認收件人是否已收到，若確實沒收到再手動重新執行這個步驟");
+    }
     const { smtpHost, smtpPort, smtpAccount, smtpPassword } = ctx.secrets;
     if (!smtpHost || !smtpAccount || !smtpPassword) {
       // 「尚未填入」的措辭比照 notify.ts——classifyFailure 靠它把這類錯誤歸成 needs-human(帳密類)
-      throw new PermanentError("尚未填入 SMTP 帳號設定——請到「設定」頁「通知串接」區的 Email 卡片照教學填好(有「測試發送」可先驗證)");
+      throw new PermanentError(`尚未填入 SMTP 帳號設定——${needsSetupHint("Email")}`);
     }
     const to = cfgStr(ctx, "to", "").trim() || smtpAccount;
     const subject = cfgStr(ctx, "subject").trim();
@@ -115,12 +129,17 @@ export const sendEmailNode: NodeDefinition = {
       attachments = [{ filename: path.basename(attachPath), path: attachPath }];
     }
 
+    // 所有驗證都過關、真的要發起寄信之前才標記 pending——驗證錯誤(設定沒填、缺主旨/附件)
+    // 跟外部呼叫完全無關，不能被誤標成「已經嘗試過」，不然使用者修好設定後還是會被卡住。
+    markAttemptStarted(key);
     await sendEmailSmtp(
       { host: smtpHost, port: smtpPort ?? "", account: smtpAccount, password: smtpPassword },
       { to, subject, text: body, attachments },
       ctx.cancelSignal,
     );
     ctx.log(`已寄出「${subject}」給 ${to}${attachments ? `(附件 ${attachments[0].filename})` : ""}`);
-    return { output: { ...ctx.input, sent: true, sentTo: to } };
+    const output = { ...ctx.input, sent: true, sentTo: to };
+    recordCompletedAction(key, output);
+    return { output };
   },
 };

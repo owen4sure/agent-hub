@@ -20,6 +20,8 @@
     "lint": "eslint",
     "test": "tsx --test \"lib/**/*.test.ts\"",
     "doctor": "tsx scripts/doctor.ts",
+    "check:change-guard": "node scripts/change-guard.mjs",
+    "verify:real-workflows": "node scripts/verify-real-workflows.mjs",
     "postinstall": "playwright install chromium"
   },
   "repository": {

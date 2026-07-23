@@ -220,7 +220,12 @@ export async function checkRunSemantics(
           const pd = producedDumps.get(dn.id);
           if (!pd || !r) continue;
           if (!cachedValues(r.input_json).includes(tl)) continue; // 資料根本沒流進這個節點,不怪它
-          if (pd.dumps.some((d) => !d.includes(tl))) {
+          // 「完全沒有」要用 every(全部產出檔都缺)判斷，不能用 some(任一檔缺)——一個節點可能同時
+          // 產出好幾個檔案(例如按類別/分月拆檔)，代碼合理地只落在其中一個檔案裡是正常的，不算可疑。
+          // 以前這裡用 some，單一產出檔時剛好跟 every 等價(所以沒被抓到)，但節點一旦真的產出多檔，
+          // 只要「任一檔缺」就會誤判可疑、白白觸發一輪修復，且下面 reason 講的「完全沒有」也對不上
+          // 實際只是某一個檔缺的情況，會誤導修復模型。
+          if (pd.dumps.every((d) => !d.includes(tl))) {
             return {
               suspicious: true,
               nodeId: dn.id,

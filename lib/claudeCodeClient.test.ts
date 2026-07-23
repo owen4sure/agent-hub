@@ -5,7 +5,8 @@ import { claudeCodeArgs, claudeCodeResultError } from "./claudeCodeClient";
 describe("claudeCodeArgs", () => {
   it("隔離使用者的 Claude Code 環境，且無附件時完全停用工具", () => {
     const args = claudeCodeArgs({ hasReadPaths: false, effort: "low" });
-    assert.ok(args.includes("--safe-mode"));
+    // 目前安裝的 CLI 版本沒有 --safe-mode 這個選項(帶了會 exit 1)，安全邊界改由 --tools 空清單保證。
+    assert.ok(!args.includes("--safe-mode"));
     assert.ok(args.includes("--no-session-persistence"));
     assert.deepEqual(args.slice(args.indexOf("--tools"), args.indexOf("--tools") + 2), ["--tools", ""]);
     assert.deepEqual(args.slice(args.indexOf("--effort"), args.indexOf("--effort") + 2), ["--effort", "low"]);

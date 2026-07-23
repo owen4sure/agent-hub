@@ -28,6 +28,8 @@ import { writeFileNode, readFileNode } from "./nodes/fileOps";
 import { webPageNode } from "./nodes/webPage";
 import { desktopNotifyNode } from "./nodes/desktopNotify";
 import { sendEmailNode } from "./nodes/sendEmail";
+import { googleSlidesRefreshNode } from "./nodes/googleSlidesRefresh";
+import { googleSlidesCreateNode } from "./nodes/googleSlidesCreate";
 
 const ALL: NodeDefinition[] = [
   triggerNode,
@@ -62,6 +64,8 @@ const ALL: NodeDefinition[] = [
   slackNotifyNode,
   sendEmailNode,
   desktopNotifyNode,
+  googleSlidesRefreshNode,
+  googleSlidesCreateNode,
 ];
 
 export const NODE_DEFS: Record<string, NodeDefinition> = Object.fromEntries(

@@ -299,6 +299,49 @@ function columnMap(sheet: ExcelJS.Worksheet, colLimit: number): string {
   return entries.length ? `【欄位對照(欄位代號→標題;同名欄看分類區分「累積」還是「當日新增」)】\n${entries.join(" | ")}` : "";
 }
 
+/**
+ * 抓「H6」「I8」這類 Excel 儲存格位址提及，用來做「讀指定儲存格」的補充查詢——一般模型只拿得到
+ * xlsxToText 截斷後的文字(前 60 列/200 欄/1200 格)，使用者若提到落在截斷範圍外的具體儲存格
+ * (2026-07 第三輪外部審查點名的情境：「自己看 H6/H8/I6/I8」)，光靠截斷文字永遠找不到。
+ * 只認 1-3 個大寫字母緊接 1-7 位數字、前後不是英數字——會有少量誤判(如「Q3」這種季度代稱)，
+ * 但誤判的代價只是「這個位址在檔案裡查不到值、不輸出」，不會造成任何錯誤動作，抓寬鬆比漏掉划算。
+ */
+export function extractCellReferences(text: string): string[] {
+  const matches = new Set<string>();
+  for (const m of text.matchAll(/(?<![A-Za-z0-9])([A-Z]{1,3}\d{1,7})(?![A-Za-z0-9])/g)) {
+    if (matches.size >= 20) break; // 上限防止異常輸入(整段大寫字母數字亂碼)撐爆逐格查詢的次數
+    matches.add(m[1]);
+  }
+  return [...matches];
+}
+
+/**
+ * 直接對「原始檔案位元組」讀出使用者提到的特定儲存格——不受 xlsxToText 的列數/欄數上限限制。
+ * 每個位址會在「全部分頁」裡查一次(不猜測使用者講的是哪個分頁，模糊比漏掉安全)，
+ * 只回報真的有值的格子；全部查無資料時回傳空字串(呼叫端不附加這段，不製造沒有內容的空標題)。
+ */
+export async function xlsxTargetedCellsText(buffer: Buffer, cellRefs: string[]): Promise<string> {
+  if (cellRefs.length === 0) return "";
+  let wb: ExcelJS.Workbook;
+  try {
+    wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buffer as unknown as ArrayBuffer);
+  } catch {
+    return ""; // 不是合法的 xlsx(例如其實是 .xls 誤附副檔名)就安靜放棄，不影響其餘正常流程
+  }
+  const lines: string[] = [];
+  for (const sheet of wb.worksheets.slice(0, 20)) {
+    for (const ref of cellRefs) {
+      try {
+        const value = cellToText(sheet.getCell(ref).value).trim();
+        if (value) lines.push(`分頁「${sheet.name}」${ref} = ${value}`);
+      } catch { /* 位址不合法或超出這個分頁範圍，略過這一格繼續查下一個 */ }
+    }
+  }
+  if (lines.length === 0) return "";
+  return `【你提到的特定儲存格(直接讀取原始檔案，不受一般顯示的列數/欄數上限限制)】\n${lines.join("\n")}`;
+}
+
 /** 把 Excel(.xlsx) 每個分頁轉成「分頁名 + 欄位對照 + 表格文字 + 版型格式」，讓 AI 看得懂結構、內容、也看得到顏色/框線/欄寬。 */
 export async function xlsxToText(buffer: Buffer): Promise<string> {
   const wb = new ExcelJS.Workbook();

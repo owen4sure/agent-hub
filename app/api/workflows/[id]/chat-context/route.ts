@@ -12,10 +12,11 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   if (!isValidWorkflowId(id) || !getWorkflow(id)) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
-  const body = await req.json().catch(() => null) as { chat?: unknown; pendingGraph?: unknown; pendingExecution?: unknown } | null;
+  const body = await req.json().catch(() => null) as { chat?: unknown; pendingGraph?: unknown; pendingExecution?: unknown; pendingInput?: unknown } | null;
   if (!body || !Array.isArray(body.chat)) return NextResponse.json({ error: "對話狀態格式不正確" }, { status: 400 });
   try {
-    saveWorkflowChatState(id, { chat: body.chat, pendingGraph: body.pendingGraph ?? null, pendingExecution: body.pendingExecution ?? null });
+    // pendingInput 只是一張「要填哪些欄」的卡片定義；實際輸入值留在瀏覽器元件內，永遠不會送到這裡。
+    saveWorkflowChatState(id, { chat: body.chat, pendingGraph: body.pendingGraph ?? null, pendingExecution: body.pendingExecution ?? null, pendingInput: body.pendingInput ?? null });
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "無法儲存對話" }, { status: 400 });

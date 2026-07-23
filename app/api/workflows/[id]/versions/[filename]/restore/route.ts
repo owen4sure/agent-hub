@@ -15,7 +15,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   try {
     const restored = restoreBackup(id, decodeURIComponent(filename));
     if (!restored) return NextResponse.json({ error: "找不到這個版本" }, { status: 404 });
-    return NextResponse.json({ ok: true, workflow: restored });
+    return NextResponse.json({ ok: true, workflow: restored.workflow, ...(restored.warning ? { warning: restored.warning } : {}) });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 });
   }

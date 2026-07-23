@@ -39,10 +39,20 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const fired: string[] = [];
   for (const ev of events.slice(0, MAX_EVENTS_PER_CALL)) {
     try {
+      // 群組訊息：把 groupId 印進伺服器 log(而且會出現在 run 的輸入紀錄)——
+      // 使用者要拿群組 ID 就是「把官方帳號加進群組→群組傳一句話→來這裡抄 C 開頭那串」
+      if (ev.groupId) console.log(`[line-hooks] 收到群組訊息 sourceType=${ev.sourceType} groupId=${ev.groupId}`);
       const resolved = resolveParams(wf.triggerParams ?? [], {}, new Date());
       const runId = startWorkflowRun(
         id,
-        { ...resolved, message: ev.message, userId: ev.userId, replyToken: ev.replyToken },
+        {
+          ...resolved,
+          message: ev.message,
+          userId: ev.userId,
+          replyToken: ev.replyToken,
+          sourceType: ev.sourceType,
+          groupId: ev.groupId,
+        },
         { trigger: "line", headed: false },
       );
       fired.push(runId);

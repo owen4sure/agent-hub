@@ -29,7 +29,13 @@ export function SheetScriptCard({ nodeLabels }: { nodeLabels: string[] }) {
       <p className="faint">要設定的步驟：{nodeLabels.join("、")}</p>
       <ol className="list-decimal ml-4 space-y-1 muted">
         <li>按下面的「複製腳本」。</li>
-        <li>打開要寫入的試算表 →「擴充功能」→「Apps Script」。</li>
+        <li>
+          <b>打開你要寫入的那份試算表本身</b>，在它裡面點上方選單「擴充功能」→「Apps Script」。
+          <br />
+          <span style={{ color: "var(--red)" }}>
+            ⚠️ 真實踩過的錯誤：不要直接開 script.google.com 或用瀏覽器書籤/歷史紀錄開一個新的 Apps Script 分頁——那樣建出來的是一個完全獨立、沒有綁定在你試算表上的空白專案，之後寫入一定會失敗。一定要從試算表本身的選單點進去。
+          </span>
+        </li>
         <li>全選貼上、取代編輯器原本的內容，然後儲存。</li>
         <li>「部署」→「新增部署作業」→「網頁應用程式」→ 存取權選「任何人」。</li>
         <li>把 Google 給的 <code>…/exec</code> 網址<b>直接貼回這個對話</b>，我會自動填進所有寫入步驟。</li>

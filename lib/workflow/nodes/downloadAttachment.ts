@@ -64,7 +64,7 @@ export const downloadAttachmentNode: NodeDefinition = {
         : ext === ".xls" ? "application/vnd.ms-excel"
           : ext === ".csv" ? "text/csv"
             : ext === ".pdf" ? "application/pdf" : "application/octet-stream";
-      ctx.registerFile(filename, filePath, mime);
+      ctx.registerFile(filename, filePath, mime, "intermediate");
       return { output: { attachmentPath: filePath, filename } };
     };
 

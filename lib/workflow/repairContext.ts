@@ -219,6 +219,103 @@ async function getGoogleSheetA1Evidence(
   }
 }
 
+/** getLastRunTrace 需要的最小資料形狀(純函式 buildRunTrace 用,測試不用碰 DB) */
+export interface TraceRunRow { id: string; status: string; reason: string | null; dry_run: number; started_at: string }
+export interface TraceNodeRow { node_id: string; status: string; output_json: string | null; error: string | null }
+export interface TraceLogRow { node_id: string | null; line: string }
+
+/**
+ * 把「最近一次執行的每一步實況」濃縮成模型讀得懂的文字。這是對話能不能診斷
+ * 「全綠但走樣」的關鍵——run 成功了,但其實是部分執行跳過了生產資料的步驟、分流收到字面
+ * {{欄位}} 默默落到「其他」分支(踩過:使用者被「檔案格式不支援」的通知誤導,對話 AI 沒有
+ * 任何執行現場可看,只能瞎猜原因、亂改設定,使用者完全無法透過對話解決)。
+ * 只放狀態/分支/警告,不放帳密或整包 input。
+ */
+export function buildRunTrace(
+  nodes: { id: string; label: string; type: string }[],
+  run: TraceRunRow,
+  nodeRows: TraceNodeRow[],
+  logRows: TraceLogRow[],
+  maxChars = 2_800,
+): string {
+  const labelOf = new Map(nodes.map((n) => [n.id, n.label]));
+  const typeOf = new Map(nodes.map((n) => [n.id, n.type]));
+  // 部分執行的橫幅(「▶ 只測選取的 N 步…」「▶ 只測「X」開始的後段…」)——解讀「為什麼有步驟被跳過」的前提
+  const banner = logRows.find((l) => !l.node_id && l.line.startsWith("▶ 只測"))?.line;
+  // 「沿用」的節點狀態也是 success,只能從 log 分辨它其實沒有重新執行
+  const seeded = new Set(logRows.filter((l) => l.node_id && l.line.includes("沿用")).map((l) => l.node_id as string));
+  // 兩種「skipped」要分開講:「部分執行沒選到+沒種子」有明確的 log 行;沒有的就是「分支沒走到/上游失敗被跳過」
+  const skippedByPartial = new Set(logRows.filter((l) => l.node_id && l.line.includes("只測後段：跳過這步")).map((l) => l.node_id as string));
+
+  const lines: string[] = [];
+  lines.push(`執行編號 ${run.id}、時間 ${run.started_at}、結果 ${run.status}${run.dry_run ? "(安全試跑,寫入被攔)" : ""}`);
+  if (banner) lines.push(`⚠️ 這是一次「部分執行」：${banner}`);
+  for (const nr of nodeRows) {
+    const label = labelOf.get(nr.node_id) ?? nr.node_id;
+    if (nr.status === "skipped") {
+      lines.push(`- ${label}: ⏭ 這次沒有執行${skippedByPartial.has(nr.node_id)
+        ? "(部分執行沒選到它,也沒有之前的結果可沿用——它宣稱要輸出的欄位這次全部不存在)"
+        : "(沒被走到——它所在的分支這次沒被選中,或上游失敗/跳過後整條被略過)"}`);
+      continue;
+    }
+    if (nr.status === "failed") {
+      lines.push(`- ${label}: ❌ 失敗——${(nr.error ?? "").slice(0, 200)}`);
+      continue;
+    }
+    if (nr.status !== "success") {
+      lines.push(`- ${label}: ${nr.status}`);
+      continue;
+    }
+    if (seeded.has(nr.node_id)) {
+      lines.push(`- ${label}: ↩︎ 沿用上次的結果(這次沒有重新執行)`);
+      continue;
+    }
+    let branch = "";
+    const t = typeOf.get(nr.node_id);
+    if ((t === "switch" || t === "if-condition") && nr.output_json) {
+      try {
+        const out = JSON.parse(nr.output_json) as { matched?: string; switchValue?: string; result?: boolean };
+        if (t === "switch" && out.matched !== undefined) {
+          branch = `；走了「${out.matched}」分支,實際收到的分類值=「${String(out.switchValue ?? "").slice(0, 80)}」`;
+          if (/\{\{[^}]+\}\}/.test(String(out.switchValue ?? ""))) {
+            branch += "——⚠️ 這是字面文字不是資料,代表上游沒有提供這個欄位(生產它的步驟這次沒執行或從未成功執行)";
+          }
+        }
+        if (t === "if-condition" && typeof out.result === "boolean") branch = `；條件結果=${out.result ? "true(是)" : "false(否)"}`;
+      } catch { /* output 壞了就不標分支 */ }
+    }
+    lines.push(`- ${label}: ✅ 執行成功${branch}`);
+  }
+  if (run.reason?.includes("⚠")) lines.push(`執行結果備註: ${run.reason.slice(0, 300)}`);
+  return lines.join("\n").slice(0, maxChars);
+}
+
+export interface LastRunTrace { runId: string; startedAt: string; status: string; text: string }
+
+/** 抓這條流程「最近一次結束的執行」(不限成功失敗)的每一步實況。 */
+export async function getLastRunTrace(workflowId: string): Promise<LastRunTrace | null> {
+  const db = getDb();
+  const run = db
+    .prepare(`SELECT id, status, reason, dry_run, started_at FROM runs WHERE workflow_id=? AND status NOT IN ('queued','running') ORDER BY started_at DESC, rowid DESC LIMIT 1`)
+    .get(workflowId) as TraceRunRow | undefined;
+  if (!run) return null;
+  const { getWorkflow } = await import("./store");
+  const wf = getWorkflow(workflowId);
+  if (!wf) return null;
+  const nodeRows = db
+    .prepare(`SELECT node_id, status, output_json, error FROM node_runs WHERE run_id=? ORDER BY id`)
+    .all(run.id) as TraceNodeRow[];
+  const logRows = db
+    .prepare(`SELECT node_id, line FROM run_logs WHERE run_id=? ORDER BY id`)
+    .all(run.id) as TraceLogRow[];
+  return {
+    runId: run.id,
+    startedAt: run.started_at,
+    status: run.status,
+    text: buildRunTrace(wf.nodes.map((n) => ({ id: n.id, label: n.label, type: n.type })), run, nodeRows, logRows),
+  };
+}
+
 /**
  * 把最近一次成功執行已經讀到的真實資料交給「對話改流程」。以前 builder 只有失敗現場，最新一次
  * 明明已成功下載 Excel、讀到 Google Sheet，使用者接著說「先去檔案看 H6」時模型卻完全看不到，
@@ -310,7 +407,60 @@ export function findFilePathInInput(input: Record<string, unknown>): string | nu
   return null;
 }
 
-/** 從 HTML 抽出所有表單相關元素(input/button/a/img 的關鍵屬性)，濃縮給模型看，避免整份 HTML 太長 */
+/**
+ * 從 HTML 抽出「資料型地標」盤點：帶 data-id/role='row'/data-tooltip 的元素。
+ * 表單類摘要(下面的 extractFormElements)只涵蓋登入頁那類頁面；抓資料清單(Google Drive 檔案列表、
+ * 表格列)失敗時，修復 AI 需要的證據是「資料列長什麼樣、檔名掛在哪個屬性上」——沒有這份盤點,
+ * 修復 AI 看不到任何可以錨定的真實屬性，只能瞎猜選擇器(實測踩過:在錯的選擇器附近打轉永遠修不好)。
+ */
+// HTML 屬性值來自「任意第三方頁面」(失敗當下存檔的頁面可能是外部網站)，不是我們自己產生的內容。
+// 這裡把它們塞進提示詞時一律用「」/『』括住當作「這是資料，不是指令」的邊界——但邊界字元本身若
+// 也出現在被夾的值裡，惡意頁面就能提前「跳出」括號、偽造出看起來像系統段落標題的文字。
+// 用視覺相近的直角引號替換掉,讓邊界符號本身不會被夾在裡面的內容仿冒。
+const escQuote = (s: string) => s.replace(/「/g, "﹁").replace(/」/g, "﹂");
+
+function extractDataLandmarks(html: string): string {
+  const lines: string[] = [];
+  // 帶 data-id 的元素:資料清單(Drive 檔案列等)的核心地標。列出 tag+關鍵屬性。
+  const dataIdTags = html.match(/<(\w+)[^>]*\bdata-id\s*=\s*"[^"]*"[^>]*>/gi) ?? [];
+  const rows: string[] = [];
+  for (const t of dataIdTags) {
+    const tag = t.match(/<(\w+)/)?.[1] ?? "";
+    const pick = (a: string) => t.match(new RegExp(`${a}\\s*=\\s*"([^"]*)"`, "i"))?.[1];
+    const role = pick("role");
+    const target = pick("data-target");
+    const aria = pick("aria-label");
+    rows.push(`<${tag}${role ? ` role="${role}"` : ""} data-id="${(pick("data-id") ?? "").slice(0, 16)}…"${target ? ` data-target="${target}"` : ""} aria-label="${(aria ?? "").slice(0, 60)}${aria && aria.length > 60 ? "…" : ""}">`);
+    if (rows.length >= 12) break;
+  }
+  if (rows.length) {
+    lines.push(`帶 data-id 的元素共 ${dataIdTags.length} 個(前 ${rows.length} 個)：`);
+    lines.push(...[...new Set(rows)]);
+  }
+  // role='row' 命中數(分 tag)——「以為是 div 其實是 tr」正是真實踩過的選擇器陷阱
+  const roleRows = html.match(/<(\w+)[^>]*\brole\s*=\s*"row"[^>]*>/gi) ?? [];
+  if (roleRows.length) {
+    const byTag = new Map<string, number>();
+    for (const t of roleRows) {
+      const tag = (t.match(/<(\w+)/)?.[1] ?? "").toLowerCase();
+      byTag.set(tag, (byTag.get(tag) ?? 0) + 1);
+    }
+    lines.push(`[role='row'] 命中：${[...byTag.entries()].map(([t, n]) => `<${t}> ×${n}`).join("、")}`);
+  }
+  // data-tooltip 的值:清單檢視的檔名常在這裡(列本身的 aria-label 是空的)。
+  // 「像檔名」的值(含中日韓字元或副檔名)排前面——前 10 筆全被 My Drive/Settings 這類導覽雜訊
+  // 佔掉的話,真正值錢的檔名證據會被截掉(實測踩過)。
+  const tooltips = [...new Set((html.match(/\bdata-tooltip\s*=\s*"([^"]+)"/gi) ?? []).map((m) => m.replace(/^data-tooltip\s*=\s*"/i, "").replace(/"$/, "").slice(0, 60)))];
+  const looksLikeName = (v: string) => /[一-鿿぀-ヿ]/.test(v) || /\.\w{2,5}(\s|$)/.test(v);
+  const ordered = [...tooltips.filter(looksLikeName), ...tooltips.filter((v) => !looksLikeName(v))];
+  if (ordered.length) lines.push(`data-tooltip 值(去重、像檔名的排前面，前 10 筆)：${ordered.slice(0, 10).map((v) => `「${escQuote(v)}」`).join("、")}`);
+  return lines.length
+    ? `\n\n【頁面上的資料型地標盤點(data-id/role='row'/data-tooltip)】\n${lines.join("\n")}\n(抓資料清單的選擇器請錨定在上面實際存在的屬性，不要發明選擇器；注意 tag 是什麼就寫什麼，别把 <tr> 寫成 div)`
+    : "";
+}
+
+/** 從 HTML 抽出所有表單相關元素(input/button/a/img 的關鍵屬性)，濃縮給模型看，避免整份 HTML 太長；
+ * 尾端附上資料型地標盤點(見 extractDataLandmarks)——登入頁與資料清單頁兩類修復需要的證據都在這一份裡。 */
 export function extractFormElements(html: string): string {
   const tags = html.match(/<(input|button|select|textarea|a|img|form)\b[^>]*>/gi) ?? [];
   const seen = new Set<string>();
@@ -331,7 +481,7 @@ export function extractFormElements(html: string): string {
     }
     if (lines.length >= 120) break;
   }
-  return lines.join("\n");
+  return lines.join("\n") + extractDataLandmarks(html);
 }
 
 /**

@@ -4,6 +4,17 @@
 This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
 <!-- END:nextjs-agent-rules -->
 
+# 任何 AI 工具改這個 repo 前：先讀治理文件
+
+不管是 Codex、Claude Code、Cursor 或其他工具，改動任何檔案前先讀這四份（跟這份 AGENTS.md 平行、不是取代它）：
+
+- `PROJECT_GOAL.md` — 產品終極目標與驗收優先順序，判斷「這個改動符不符合方向」的依據。
+- `DEPENDENCY_MAP.md` — 一級資料流、模組責任與「動到這個檔案會牽動什麼」的連鎖影響矩陣。
+- `ARCHITECTURE.md` — 選定的設計模式、分層職責與不可破壞的架構規則。
+- `CHANGE_CONTROL.md` — 動手前的五問確認、實作時不可省略的閘門、`CHANGELOG.md` 記錄格式。
+
+改完務必跑 `npm run check:change-guard`（連同 `npx tsc --noEmit && npm test`）；這支腳本除了輕量煙霧測試(確認治理文件與幾條不能被順手刪掉的產品底線還在)，也會跑 lint 並在有錯誤時讓整個 change guard 失敗——這是真實踩過的教訓：lint 曾經一度只被寫在文件裡提醒「另外記得跑」，結果 14 個錯誤在測試檔裡累積了一段時間都沒被發現，因為沒有任何一支「大家都會跑」的腳本真正執行它。change guard 仍不是測試的替代品，完整驗收仍照 `CHANGE_CONTROL.md`。這套機制存在的理由：不同 AI 工具在同一個 repo 上輪流改動時，光靠各自的訓練直覺很容易在別人看不到的地方悄悄破壞已經驗證過的功能——這四份文件+這支腳本就是讓「換工具」不等於「換規則」的唯一防線。
+
 # 第一次打開這個 repo：自動幫使用者裝好環境
 
 如果 `node_modules/` 不存在，或 `data/agent-hub.db` 不存在，代表這是全新 clone、使用者第一次打開——**不用等使用者開口，直接照下面步驟把環境弄好，讓他打開瀏覽器就能用**：
@@ -47,6 +58,8 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 # 迴圈工程守則（2026-07 定下——整個產品的品質下限來自這裡）
 
+**修復迴圈的「實測探針+重播閘門」(2026-07-16 使用者拍板「讓 AI 修達到人工除錯水準」後建立,別退回純 prompt 修復)**：`lib/workflow/selectorProbe.ts`+`graphRepair.ts`。人工修「找不到元素」從來不是猜選擇器,是①打開失敗當下存的真實頁面實測每個選擇器命中幾筆②看 0 筆的「字根附近真實元素長什麼樣」(真實病灶案例:code 寫 div.punch-filmstrip-thumbnail,頁面上是 SVG 的 `<g class=punch-filmstrip-thumbnail>`——tag 錯了,弱模型永遠猜不到)③改完對同一頁重播驗證。這三步已確定性化:修復前自動探測現有 code 全部選擇器並把「實測命中數+相近元素盤點」注入 prompt;提案改了失敗節點的 code 就先對失敗頁面實測新選擇器,**全部 0 筆的提案直接駁回帶證據重問(最多3輪)**,不燒整條重跑;新 code 導向原本沒去過的網址時放行不驗(失敗頁不能代表新頁面,錯殺會擋死「換來源」的正確修法)。修復大腦**優先用本機 Claude Code**(裝了就用,`readPaths` 給它完整失敗頁 HTML 讓它 Grep 驗證後再開藥;沒裝退回 gateway 模型靠注入的實測報告)——這是使用者明確要求的例外,不受「Claude Code 只當最後備援」通則限制,僅限修復(aiRepairGraph)這條路。探針全斷網+禁 JS(存檔頁面來自任意網站,不能讓它跑碼)。
+
 **前提**：裡面的模型是可換的(Sonnet/Gemini/地端弱模型都可能)，所以**收斂必須靠迴圈設計，不能靠模型聰明**。三條 agentic 迴圈——建圖(builder.ts+/build)、修復(autorun/autofix/graphRepair)、節點層 AI 呼叫(codegen/llm-decide/驗證碼)——都遵守同一套原則，改任何一條前先讀這段：
 
 - **確定性驗證，不靠模型自律**：模型的產出一律過確定性檢查——建圖過 `lib/workflow/graphLint.ts` 的 `lintGraph`(型別存在/邊指向存在的節點/無環/有 trigger/config 型別合法) + `lintVarRefWarnings`({{變數}} 有上游來源)；codegen 過語法健檢(new AsyncFunction)；llm-decide 填了 choices 就強制答案在清單內(matchChoice)。prompt 裡寫「請不要…」約束不了弱模型，程式碼裡的 if 才約束得了。
@@ -82,3 +95,6 @@ This version has breaking changes — APIs, conventions, and file structure may 
 21. **觸發來源以 engine.ts 的 `TriggerSource` 為唯一真相**(目前是 manual/schedule/watch/webhook/form/error——別相信任何寫死的「只有N種」說法，以型別定義為準)。**非 manual 的一律是無人值守**——成功/失敗都要走 `notifyDesktop`(桌面通知是使用者唯一的回報管道)，新增觸發方式時判斷式寫 `trigger !== "manual"`，不要逐一列舉(會漏)。HistoryPanel 的觸發標籤也要同步補中文。
 22. **資料夾監聽(lib/watchers.ts)的初始化語意**：「首次啟用不觸發既有檔案」的判斷靠**路徑綁定哨兵** `#seeded#:<watchPath>`，不能用「這條流程有沒有任何 seen 記錄」——空資料夾第一輪掃不到東西=不會留任何記錄，之後丟進來的第一個檔案就被誤吞(踩過；「先建空收件匣再啟用」正是最常見用法)。哨兵同時讓「換監聽路徑」重新靜默登記一次，不會把新資料夾的歷史檔案補跑一輪。30 天清理**必須排除哨兵**(`NOT LIKE '#seeded#:%'`；別用底線開頭當哨兵字首，`_` 在 LIKE 是萬用字元)。多進程去重靠 watch_seen 的 PRIMARY KEY 搶佔(INSERT OR IGNORE 的 changes)。只監聽「正式」流程；觸發帶 `{{filePath}}`/`{{fileName}}` 給下游。
 23. **Webhook 的認證就是網址裡的 token**(lib/webhookStore.ts + app/api/hooks/[id]/[token]/route.ts)：常數時間比對；token 錯/流程不存在/沒啟用一律回同一句 404(不可探測)；proxy.ts 對「無 Origin 的請求」(curl/腳本/捷徑)本來就放行，所以 hooks 路由**不需要也不准加任何 proxy 豁免**。POST 的 JSON 欄位直接併進觸發參數變 `{{欄位}}`；非物件包進 `payload`。改觸發設定走 `/api/workflows/[id]/trigger-config`(重讀最新版→只改 watchPath/watchPattern→saveWorkflow，鐵則 2)。
+24. **部分執行(startWorkflowRun 的 `startAtNodeId`/`onlyNodeIds` + ResumeSpec.`skipUnseeded`)**：`startAtNodeId`＝「從這一步開始」(起點+它的所有下游，lib/workflow/partialRun.ts 的 downstreamNodeIds)；`onlyNodeIds`＝「執行選取的幾步」(畫布框選的集合，像 n8n)。**執行語意(2026-07-16 使用者拍板,不要改回去)**：部分執行預設「真的執行到底」(含寫入/發送/操作外部系統)——「圈起來執行的，那就執行到底，除非我有說只測試不更改任何資料」；UI 的「只測試,不更改資料」勾選(前端 partialTestOnly→/run body 的 dryRun:true)才走只讀安全排練。曾一度改成部分執行一律強制 dryRun,結果使用者框選的互動步驟永遠不會真的執行、也沒說明,被打回。安全排練模式下被攔的寫入步驟+分流沒走到的框選步驟,成功總結(runs.reason)會逐一點名原因,執行結束畫布會浮出完成橫幅(finishedSummary)——「安全機制攔了什麼」必須浮到總結,埋在逐節點紀錄=沒講。兩者共用同一機制：只執行 rerunNodeIds 裡的節點，其餘有最近一次執行的成功結果就沿用(collectRunSeeds——與 resumeRun 共用同一套「合併輸出+分支 port 反推」規則，改只能改那一份)、沒有就**老實標 skipped，絕不能掉進正常執行**——使用者驗證新段落/單一步驟時，不該被迫每次把登入/抓信/寫入整條從頭跑。**刻意不做** resumeRun 那種「自動把上游瀏覽器鏈排進重跑」：那會把 google-sheet 寫入這類有副作用的節點一起重跑，正好違背「只測後段」的本意；若真依賴前面步驟建立的登入狀態就讓它老實失敗，使用者再改用完整執行。UI 入口=節點面板「▶ 從這一步開始測」「▶ 只測這一步」+框選 2 步以上浮出的「▶ 只測這幾步」；builder prompt 已教對話 AI：使用者說「先跳過前面/只想確認某段/只測某幾步」要指引他用這些按鈕，不要叫人整條重跑。
+25. **對話的執行現場=失敗現場+成功證據+「每一步實況」三份,缺一不可(2026-07-16 真實踩雷後定下)**：使用者的流程「全綠但走樣」(部分執行跳過了生產資料的步驟→switch 收到字面 {{fileType}} 默默落到「其他」→發出誤導的「檔案格式不支援」通知),他去對話問「為什麼都停在這節點」,對話 AI 手上只有檔案證據(getLatestSuccessContext)、沒有任何執行行為資訊→只能瞎猜原因(掰了「共用資料夾載入慢」)、亂改 intent、使用者完全無法靠對話解決。修法:①`repairContext.ts` 的 `getLastRunTrace`/`buildRunTrace` 把最近一次執行的每一步實況(執行/沿用/跳過/分支節點實際收到的值/run 層警告/部分執行橫幅)濃縮進對話 prompt(成功、失敗、甚至只有 stopped 的 run 都附);prompt 明令「分類值是字面 {{欄位}}=上游沒提供,問題不在設定,要教使用者把生產那欄位的步驟一起跑,不要亂改設定」。②switch/if-condition 的決策欄位拿到字面 {{欄位}} 一律 PermanentError(nodeHelpers 的 `assertNoUnresolvedVars`,錯誤訊息直接指名缺哪個欄位+怎麼補跑)——決策值沒解析到=必然走錯路,默默 fallback 會把真正的問題蓋掉;prompt/template 欄位合法含 {{}} 不能套這個防護。**通則:平台的「AI 幫使用者除錯」能力上限=你餵給它的執行現場完整度;現場缺哪塊,AI 就在哪塊瞎掰**。
+26. **Google/Microsoft 登入絕不自動化——「🔐 手動登入一次」機制(2026-07-16,Owen 被「目前無法登入帳戶/這個瀏覽器可能有安全疑慮」擋下後定下)**：大平台用機器人偵測擋自動化登入,帳密全對也照擋,重試/AI 修復都救不了。正解=lib/workflow/manualLogin.ts+`/api/workflows/[id]/manual-login`(POST 開/DELETE 關/GET 狀態)：開「真 Chrome」(channel:"chrome",沒裝才退回 Chromium)+`--disable-blink-features=AutomationControlled`,載入這條流程既有 browser-sessions 狀態,讓**使用者本人**親手登入;登入期間每 3 秒把 storageState 落盤到 `data/browser-sessions/<wfId>.json`(跟 engine.makeSession 同一份檔、同格式——使用者隨手關視窗也不會丟狀態,不能等關閉才存,context 關了就讀不到)。之後自動化執行載入即為已登入,完全不經過登入頁。engine 的執行瀏覽器也加了 AutomationControlled 參數(降低已登入 session 被重新盤查的機率)。UI 入口=流程頁「⋯ → 🔐 手動登入一次」。builder prompt(熱門服務配方區)+codegen CODE_CONTRACT 都明令:不准設計/產生「自動輸入 Google 帳密」的步驟,一律「直接前往目標網址,未登入就 throw 指路到手動登入」。

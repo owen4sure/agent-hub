@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { getClient } from "@/lib/modelClient";
 import { getWorkflowModel } from "@/lib/settingsStore";
-import { getProposal, setProposalStatus, claimProposal } from "@/lib/workflow/fixProposals";
+import { getProposal, setProposalStatus, claimProposal, type ExtraFixEdit } from "@/lib/workflow/fixProposals";
 import { getWorkflow, saveWorkflow, backupWorkflow } from "@/lib/workflow/store";
-import { runWorkflowAndWait } from "@/lib/workflow/engine";
+import { resumeRunAndWait, runWorkflowAndWait } from "@/lib/workflow/engine";
 import { checkRunSemantics } from "@/lib/workflow/resultCheck";
 import { recordFix } from "@/lib/workflow/learnedFixes";
 import { resolveParams } from "@/lib/relativeDate";
@@ -55,14 +55,35 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   // await 空窗，也可能有另一個完全獨立的請求(例如使用者在節點面板手動微調)在這之前已經存了新版本。
   const fresh = getWorkflow(proposal.workflow_id);
   if (!fresh) return NextResponse.json({ error: "workflow 已被刪除" }, { status: 404 });
-  const newNodes = fresh.nodes.map((n) => (n.id === proposal.node_id ? { ...n, config: after } : n));
+  // 整圖感知修復可能同時改了主要節點以外的其他節點(extra_edits_json)——一起套用才是完整的修法，
+  // 只套主要那格會留下「AI 說連同上游一起改了，實際上游還是舊設定」的半套狀態。跟主要節點一樣，
+  // 每個額外節點也要核對「現在的設定是不是還跟提案建立當時一樣」，被改過的那個就跳過不套用，
+  // 不強行覆蓋使用者後來的修改；跳過的會在回應裡列出來，不能默默漏掉又講「已套用」。
+  const extraEdits: ExtraFixEdit[] = proposal.extra_edits_json ? (JSON.parse(proposal.extra_edits_json) as ExtraFixEdit[]) : [];
+  const skippedExtras: string[] = [];
+  const extraByNodeId = new Map<string, ExtraFixEdit>();
+  for (const e of extraEdits) {
+    const n = fresh.nodes.find((x) => x.id === e.nodeId);
+    if (!n) { skippedExtras.push(`「${e.nodeLabel}」(這一步已經不存在了)`); continue; }
+    if (JSON.stringify(n.config) !== JSON.stringify(e.before)) { skippedExtras.push(`「${e.nodeLabel}」(這一步在提案之後又被改過，未套用)`); continue; }
+    extraByNodeId.set(e.nodeId, e);
+  }
+  const newNodes = fresh.nodes.map((n) => {
+    if (n.id === proposal.node_id) return { ...n, config: after };
+    const extra = extraByNodeId.get(n.id);
+    return extra ? { ...n, config: extra.after } : n;
+  });
   saveWorkflow({ ...fresh, nodes: newNodes });
+  // 優先從當初失敗的那個 run 續跑：失敗前已經成功的步驟(可能已經寫入試算表/寄出通知)沿用上次結果，
+  // 不重跑一遍。只有續跑機制本身啟動不了(run 已被清理、圖改過找不到失敗節點等)才退回從頭整條執行——
+  // 真實顧慮：若一律從頭跑，失敗前已產生的副作用(寫入/寄信/通知)會在套用修復後重新發生一次。
+  const resumed = await resumeRunAndWait(proposal.run_id, { headed: false });
   const triggerParams = resolveParams(wf.triggerParams ?? [], {}, new Date());
-  const result = await runWorkflowAndWait(proposal.workflow_id, triggerParams, { headed: false });
+  const result = resumed.resumed ? resumed : await runWorkflowAndWait(proposal.workflow_id, triggerParams, { headed: false });
 
   // 套用後重跑一路跑到「等人簽核」＝修好了(等簽核是設計行為不是失敗)，交還使用者去簽核
   if (result.status === "waiting") {
-    return NextResponse.json({ ok: true, runId: result.runId, suspicion: undefined, waiting: "流程跑到「等人簽核」正確地停下來了——到首頁簽核卡按核准/拒絕就會繼續。" });
+    return NextResponse.json({ ok: true, runId: result.runId, suspicion: undefined, waiting: "流程跑到「等人簽核」正確地停下來了——到首頁簽核卡按核准/拒絕就會繼續。", skippedExtras });
   }
 
   if (result.status === "success" && result.varWarnings === 0) {
@@ -75,10 +96,10 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     if (!verdict.suspicious) {
       recordFix({ nodeType: node.type, error: proposal.error ?? "", before, after, note: "AI看守正式流程時的修法提案，使用者確認套用" });
     }
-    return NextResponse.json({ ok: true, runId: result.runId, suspicion: verdict.suspicious ? verdict.reason : undefined });
+    return NextResponse.json({ ok: true, runId: result.runId, suspicion: verdict.suspicious ? verdict.reason : undefined, skippedExtras });
   }
 
   // 套用後重跑還是失敗(或有變數警告)：提案維持 applied(claimProposal 時就標了——設定已經真的改了，
   // 不該讓使用者以為還在 pending)，但明確告訴他這次驗證沒過，需要再看一次
-  return NextResponse.json({ ok: false, runId: result.runId, error: result.error ?? "套用後重跑仍失敗，請到該流程查看詳情" });
+  return NextResponse.json({ ok: false, runId: result.runId, error: result.error ?? "套用後重跑仍失敗，請到該流程查看詳情", skippedExtras });
 }

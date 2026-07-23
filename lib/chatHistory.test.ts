@@ -22,6 +22,17 @@ test("持久化對話：長期使用不會無限灌爆 localStorage", () => {
   assert.equal(compacted.at(-1)?.id, 259);
 });
 
+test("長對話：中段已確認的使用者規則比舊助手回覆優先保留", () => {
+  const history = Array.from({ length: 20 }, (_, id) => ({
+    id,
+    role: id % 2 === 0 ? "user" : "assistant",
+    parts: [{ kind: "text", text: id === 4 ? "永遠不要寫入正式試算表" : `第 ${id} 則` }],
+  }));
+  const compacted = compactHistoryForRequest(history, 12);
+  assert.ok(compacted.some((message) => message.id === 4), "中段的使用者規則不能在長對話後消失");
+  assert.equal(compacted.length, 12);
+});
+
 test("安全試跑附件：只認本次上傳，舊附件要明確指名才沿用，網址附件不能冒充檔案", () => {
   const oldFile = { role: "user", parts: [{ kind: "file", name: "old.xlsx", assetId: "asset-old" }] };
   assert.equal(historyHasReusablePreviewFile([oldFile, { role: "user", parts: [{ kind: "text", text: "再測試看看" }] }]), false);

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { decryptSecret, encryptSecret } from "../secretVault";
 
 const DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), "data", "preview-inputs");
 const MAX_AGE_MS = 24 * 60 * 60_000;
@@ -26,12 +27,17 @@ function recordPath(token: string, claimed = false): string {
   return path.join(/*turbopackIgnore: true*/ DIR, `${token}${claimed ? ".claimed" : ""}.json`);
 }
 
+/** Preview input can include a one-time URL or credential override; never leave it readable in data/. */
+function readRecord(file: string): PreviewReplay {
+  return JSON.parse(decryptSecret(fs.readFileSync(file, "utf8"))) as PreviewReplay;
+}
+
 function cleanup(): void {
   if (!fs.existsSync(DIR)) return;
   for (const name of fs.readdirSync(DIR).filter((item) => item.endsWith(".json"))) {
     const file = path.join(/*turbopackIgnore: true*/ DIR, name);
     try {
-      const record = JSON.parse(fs.readFileSync(/*turbopackIgnore: true*/ file, "utf8")) as PreviewReplay;
+      const record = readRecord(file);
       if (Date.now() - record.createdAt <= MAX_AGE_MS) continue;
       for (const retained of record.retainedFiles ?? []) fs.rmSync(retained, { force: true });
       fs.rmSync(file, { force: true });
@@ -43,12 +49,12 @@ function cleanup(): void {
 
 /** 保存「使用者剛核對的確切輸入」；正式確認不能改拿 workflow 舊網址或已被刪掉的暫存附件。 */
 export function savePreviewReplay(input: Omit<PreviewReplay, "token" | "createdAt">): PreviewReplay {
-  fs.mkdirSync(DIR, { recursive: true });
+  fs.mkdirSync(DIR, { recursive: true, mode: 0o700 });
   cleanup();
   const record: PreviewReplay = { ...input, token: randomUUID(), createdAt: Date.now() };
   const target = recordPath(record.token);
   const tmp = `${target}.${process.pid}-${randomUUID().slice(0, 6)}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(record));
+  fs.writeFileSync(tmp, encryptSecret(JSON.stringify(record)), { mode: 0o600 });
   fs.renameSync(tmp, target);
   return record;
 }
@@ -60,7 +66,7 @@ export function claimPreviewReplay(token: string, workflowId: string): PreviewRe
   const claimed = recordPath(token, true);
   try { fs.renameSync(source, claimed); } catch { return null; }
   try {
-    const record = JSON.parse(fs.readFileSync(claimed, "utf8")) as PreviewReplay;
+    const record = readRecord(claimed);
     if (record.token !== token || record.workflowId !== workflowId || Date.now() - record.createdAt > MAX_AGE_MS) {
       fs.renameSync(claimed, source);
       return null;
@@ -83,7 +89,7 @@ export function discardPreviewReplay(token: string): void {
   for (const claimed of [false, true]) {
     const file = recordPath(token, claimed);
     try {
-      record ??= JSON.parse(fs.readFileSync(file, "utf8")) as PreviewReplay;
+      record ??= readRecord(file);
       fs.rmSync(file, { force: true });
     } catch { /* 不存在 */ }
   }

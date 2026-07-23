@@ -8,8 +8,8 @@ import { getWorkflowModel, setWorkflowModel } from "../settingsStore";
 // ESM 對這種「延遲取用」的循環是安全的。不要在模組頂層直接取用 registry 的值。
 import { getNodeDef } from "./registry";
 import { separateOverlappingNodes } from "./layout";
-import { deleteChatAttachmentsForWorkflow } from "../chatAttachments";
-import { deleteWorkflowChatState } from "./chatStateStore";
+import { copyChatAttachmentsForWorkflow, deleteChatAttachmentsForWorkflow } from "../chatAttachments";
+import { deleteWorkflowChatState, getWorkflowChatState } from "./chatStateStore";
 import type { Workflow } from "./types";
 
 const EXAMPLES_DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), "examples");
@@ -203,6 +203,8 @@ function isWorkflowFileShape(raw: unknown, expectedId: string): raw is Workflow 
   if (raw.defaultModel !== undefined && typeof raw.defaultModel !== "string") return false;
   if (raw.onFailureWorkflow !== undefined && typeof raw.onFailureWorkflow !== "string") return false;
   if (raw.group !== undefined && typeof raw.group !== "string") return false;
+  if (raw.copyHandoff !== undefined && (!isPlainObject(raw.copyHandoff) || typeof raw.copyHandoff.sourceName !== "string" || typeof raw.copyHandoff.summary !== "string" || typeof raw.copyHandoff.copiedAt !== "string" ||
+    (raw.copyHandoff.attachments !== undefined && (!Array.isArray(raw.copyHandoff.attachments) || !raw.copyHandoff.attachments.every((item) => isPlainObject(item) && typeof item.assetId === "string" && typeof item.name === "string" && (item.kind === "file" || item.kind === "image")))))) return false;
   return true;
 }
 
@@ -242,6 +244,7 @@ function readWorkflowFile(scope: "example" | "user", filename: string): Workflow
     onFailureWorkflow: raw.onFailureWorkflow,
     group: raw.group,
     importedUntrusted: raw.importedUntrusted === true,
+    copyHandoff: raw.copyHandoff as Workflow["copyHandoff"],
     nodes: raw.nodes ?? [],
     edges: raw.edges ?? [],
   });
@@ -341,10 +344,21 @@ function syncMeta(wf: Workflow) {
  * 為什麼要自動推導：設定頁的帳密輸入框完全來自 requiresSecrets，而 AI 從零建的圖沒有人手動宣告——
  * 不推導的話，含登入/通知節點的流程使用者根本沒有地方填帳密，卡死在「尚未填入帳密」。
  */
-function deriveRequiresSecrets(wf: Workflow): Workflow["requiresSecrets"] {
-  // sheetAppendUrl 已改成每個寫入節點自己的 scriptUrl。舊流程殘留的全域欄位要在任何一次
+export function deriveRequiresSecrets(wf: Workflow): Workflow["requiresSecrets"] {
+  // `requiresSecrets` 曾經是只會累加的清單：流程從「自動輸入 Google 帳密」改為「手動登入一次」後，
+  // 舊的 googleAccount/googlePassword 仍留在設定頁，使用者會誤以為必填、甚至把不該交給流程的
+  // Google 密碼貼進去。保留仍被節點實際引用的既有欄位(例如 http-request 的 {{serviceToken}})，
+  // 但淘汰已沒有任何節點使用的殘留欄位。
+  const graphText = wf.nodes.map((node) => JSON.stringify(node.config ?? {})).join("\n");
+  const isStillReferenced = (key: string) => {
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(?:\\{\\{\\s*${escaped}(?:[.\\s}]|$)|ctx\\.secrets\\??\\.\\s*${escaped}\\b|ctx\\.secrets\\[\\s*["']${escaped}["']\\s*\\])`).test(graphText);
+  };
+  // sheetAppendUrl 已改成每個寫入節點自己的 scriptUrl；舊流程殘留的全域欄位要在任何一次
   // saveWorkflow 時清掉，否則設定頁仍會冒出一個不該存在、又很容易和 sheetUrl 填反的欄位。
-  const byKey = new Map((wf.requiresSecrets ?? []).filter((f) => f.key !== "sheetAppendUrl").map((f) => [f.key, f]));
+  const byKey = new Map((wf.requiresSecrets ?? [])
+    .filter((f) => f.key !== "sheetAppendUrl" && isStillReferenced(f.key))
+    .map((f) => [f.key, f]));
   for (const node of wf.nodes) {
     const def = getNodeDef(node.type);
     for (const f of def?.secretFields?.(node.config ?? {}) ?? []) {
@@ -428,16 +442,83 @@ export function createWorkflow(name: string): Workflow {
   return wf;
 }
 
+/**
+ * 副本不該帶走完整聊天（含一次性檔案與已過期的嘗試），但「原本已講清楚什麼」不能消失。
+ * 從已保存對話擷取使用者說過的目的與最近調整，做成小型交接；附件只留下名稱，明講要在副本重新附上。
+ */
+function copyHandoffDetails(src: Workflow): {
+  summary: string;
+  attachments: { assetId: string; name: string; kind: "file" | "image" }[];
+  /** 對話超過 24 則使用者訊息、或附件超過 8 份時,交接摘要會截斷早期內容——這裡不能默默截斷卻不
+   * 講,不然使用者以為 AI 完整承接了原流程的脈絡，實際上一段早期的重要例外規則可能已經消失。 */
+  truncatedChat: boolean;
+  truncatedAttachments: boolean;
+} {
+  const pieces: string[] = [];
+  const overview = (src.longDescription || src.description || "").trim();
+  if (overview) pieces.push(`流程目的：${overview.slice(0, 600)}`);
+
+  const sourceNames = new Set<string>();
+  const state = getWorkflowChatState(src.id);
+  const allUserMessages = (state?.chat ?? [])
+    .filter((message): message is { role?: unknown; parts?: unknown } => Boolean(message) && typeof message === "object")
+    .filter((message) => message.role === "user");
+  const userMessages = allUserMessages.slice(-24);
+  const truncatedChat = allUserMessages.length > userMessages.length;
+  const rules: string[] = [];
+  const attachments: { assetId: string; name: string; kind: "file" | "image" }[] = [];
+  for (const message of userMessages) {
+    if (!Array.isArray(message.parts)) continue;
+    const text = message.parts
+      .filter((part): part is { kind?: unknown; text?: unknown } => Boolean(part) && typeof part === "object")
+      .filter((part) => part.kind === "text" && typeof part.text === "string")
+      .map((part) => String(part.text).replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .join(" ");
+    if (text && !rules.includes(text)) rules.push(text.slice(0, 520));
+    for (const part of message.parts) {
+      const typed = part && typeof part === "object" ? part as { kind?: unknown; name?: unknown; assetId?: unknown } : null;
+      const name = typed?.name;
+      if (typed?.kind !== "text" && typeof name === "string" && name.trim()) sourceNames.add(name.trim().slice(0, 120));
+      if ((typed?.kind === "file" || typed?.kind === "image") && typeof typed.assetId === "string" && typeof name === "string" && name.trim()) {
+        attachments.push({ assetId: typed.assetId, name: name.trim().slice(0, 120), kind: typed.kind });
+      }
+    }
+  }
+  // 標籤刻意不寫「已確認的規則」——這些只是原流程(複製來源)聊天裡使用者說過的話，套用到
+  // 副本的新用途上不一定還成立。真實踩過的事故：副本後來只要求「改成每月排程」，AI 卻連同
+  // 這裡收錄的舊分頁名稱／輸出檔名規則一起套用，回報成「同步套用先前確認的設定」——但那份
+  // 「先前確認」其實是來源流程的舊脈絡，不是這次對話裡使用者確認過的事。標籤與下面 builder.ts
+  // 的注入處都要讓模型清楚知道：這是背景參考，這次對話明確講的才是優先權更高的規格。
+  if (rules.length) pieces.push(`原流程(複製來源)的背景脈絡，僅供參考、不是這次對話裡確認過的事：${rules.map((rule) => `「${rule}」`).join("；")}`);
+  if (sourceNames.size) pieces.push(`原流程曾參考的資料：${[...sourceNames].slice(0, 8).join("、")}。副本會帶著這些資料供 AI 延續理解。`);
+  if (!pieces.length) pieces.push("這是從原流程複製的工作流程；請先確認資料來源、目標與寫入規則。");
+  const truncatedAttachments = attachments.length > 8;
+  return { summary: pieces.join("\n").slice(0, 7_000), attachments, truncatedChat, truncatedAttachments };
+}
+
 export function copyWorkflow(id: string): Workflow | null {
   const src = getWorkflow(id);
   if (!src) return null;
   const newId = `${id}-copy-${randomUUID().slice(0, 6)}`;
+  const handoff = copyHandoffDetails(src);
+  const copiedAttachments = copyChatAttachmentsForWorkflow(id, newId, handoff.attachments);
   const copy: Workflow = {
     ...src,
     id: newId,
     name: `${src.name}(複製)`,
     status: "draft",
     builtin: false,
+    // 副本承接「已確認的目的／規則」和使用者提供來定義流程的原始資料；不帶冗長聊天、
+    // 帳密或登入 cookie。這讓 AI 有足夠脈絡，但不把舊對話塞回新流程的畫面。
+    copyHandoff: {
+      sourceName: src.name,
+      summary: handoff.summary,
+      copiedAt: new Date().toISOString(),
+      attachments: copiedAttachments.length ? copiedAttachments : undefined,
+      truncatedChat: handoff.truncatedChat,
+      truncatedAttachments: handoff.truncatedAttachments,
+    },
   };
   try {
     saveWorkflow(copy);
@@ -554,6 +635,37 @@ export function backupWorkflow(id: string): void {
 
 export interface BackupInfo { filename: string; timestamp: string; name: string; nodeCount: number }
 
+function hasExecutableCustomCode(code: unknown): code is string {
+  const value = String(code ?? "").trim();
+  return Boolean(value) && !/^return\s*\{\s*\.\.\.\s*ctx\.input\s*,?\s*\}\s*;?$/.test(value);
+}
+
+/**
+ * 找回同一節點在本機版本歷史裡最近一份「真的可執行」的 custom-code。
+ *
+ * 這不是直接還原整張 workflow：AI 對話修改時可能只是不小心把 code 清空、但 intent 已更新。
+ * 修復器應把這份已知可用的程式當底稿，再依目前 intent/真實檔案修到新需求，而不是憑空從零寫一遍。
+ */
+export function findLatestExecutableCustomCode(workflowId: string, nodeId: string): { code: string; intent: string; filename: string } | null {
+  assertValidId(workflowId);
+  const dir = historyDir(workflowId);
+  if (!fs.existsSync(/* turbopackIgnore: true */ dir)) return null;
+  const files = fs.readdirSync(/* turbopackIgnore: true */ dir).filter((file) => file.endsWith(".json")).sort().reverse();
+  for (const filename of files) {
+    try {
+      const historical = JSON.parse(fs.readFileSync(/* turbopackIgnore: true */ path.join(/* turbopackIgnore: true */ dir, filename), "utf-8")) as Workflow;
+      const node = historical.nodes?.find((candidate) => candidate.id === nodeId && candidate.type === "custom-code");
+      const code = typeof node?.config?.code === "string" ? node.config.code : "";
+      if (hasExecutableCustomCode(code)) {
+        return { code, intent: typeof node?.config?.intent === "string" ? node.config.intent : "", filename };
+      }
+    } catch {
+      // 單一舊備份損毀不該讓修復失去其他版本可用的底稿。
+    }
+  }
+  return null;
+}
+
 /** 列出這個 workflow 所有版本備份(新到舊)，讓使用者看得到「AI 改了什麼、什麼時候改的」並可以還原 */
 export function listBackups(id: string): BackupInfo[] {
   assertValidId(id);
@@ -578,8 +690,27 @@ export function listBackups(id: string): BackupInfo[] {
     .filter((b): b is BackupInfo => b !== null);
 }
 
+/**
+ * 備份只存流程圖本身(節點/連線/參數/名稱)，排程、模型選擇、webhook/LINE token 這些「side-car」
+ * 狀態都活在別的 DB 表、沒有版本化——還原不會、也沒辦法把它們還原成備份當下的樣子。真正的風險是
+ * 使用者還原一張跟現在的排程/觸發設定用了不同觸發參數的舊圖，卻完全不知道自動觸發可能已經對不上
+ * (真實顧慮：舊圖可能沒有現在排程在用的某個參數欄位)。這裡不做成靜默覆蓋(那本身也是一種意外的
+ * 資料流失風險)，只在偵測到「有作用中的自動觸發、且觸發參數確實不一樣」時回一句警告，讓使用者
+ * 自己決定要不要去排程/觸發設定頁確認。
+ */
+function activeTriggerMismatchWarning(id: string, restoredTriggerParams: Workflow["triggerParams"], currentTriggerParams: Workflow["triggerParams"]): string | undefined {
+  const restoredKeys = JSON.stringify((restoredTriggerParams ?? []).map((p) => p.key).sort());
+  const currentKeys = JSON.stringify((currentTriggerParams ?? []).map((p) => p.key).sort());
+  if (restoredKeys === currentKeys) return undefined;
+  const db = getDb();
+  const hasSchedule = (db.prepare(`SELECT 1 FROM schedules WHERE workflow_id = ? AND enabled = 1 LIMIT 1`).get(id) as unknown) !== undefined;
+  const meta = db.prepare(`SELECT webhook_token, line_token FROM workflows_meta WHERE id = ?`).get(id) as { webhook_token: string | null; line_token: string | null } | undefined;
+  if (!hasSchedule && !meta?.webhook_token && !meta?.line_token) return undefined;
+  return "還原的是流程圖本身，不含排程/Webhook/LINE 這類觸發設定——這次還原的版本用的執行參數跟現在不一樣，而這條流程目前有作用中的自動觸發，請到「排程」或流程頁確認觸發設定是否還跟這個版本相符。";
+}
+
 /** 還原到某個版本備份：先把「還原前的現況」也存一份備份(還原本身可逆)，再套用備份內容 */
-export function restoreBackup(id: string, filename: string): Workflow | null {
+export function restoreBackup(id: string, filename: string): { workflow: Workflow; warning?: string } | null {
   assertValidId(id);
   if (!/^[0-9T-]+Z\.json$/.test(filename)) throw new Error("不合法的備份檔名");
   const dir = historyDir(id);
@@ -587,10 +718,11 @@ export function restoreBackup(id: string, filename: string): Workflow | null {
   if (!fs.existsSync(/* turbopackIgnore: true */ backupPath)) return null;
   const backup = JSON.parse(fs.readFileSync(/* turbopackIgnore: true */ backupPath, "utf-8")) as Workflow;
   const current = getWorkflow(id);
+  const warning = activeTriggerMismatchWarning(id, backup.triggerParams, current?.triggerParams);
   backupWorkflow(id); // 現況也存一份，還原這個動作本身還能再復原
   // 只還原「內容」(節點/連線/參數/名稱)，不還原 status——不然還原一個當初是草稿時存的備份，
   // 會把現在已經是正式的流程偷偷變回草稿(連帶讓之後手動執行變成有頭瀏覽器)。status 維持現況。
   const restored: Workflow = { ...backup, id, builtin: false, status: current?.status ?? backup.status };
   saveWorkflow(restored);
-  return restored;
+  return { workflow: restored, warning };
 }

@@ -67,7 +67,7 @@ export function ChatInputCard({ input, onSubmit, onCancel }: ChatInputCardProps)
       </div>
       <div className="flex flex-wrap gap-2">
         <button type="button" className="btn btn-primary text-xs" disabled={submitting} onClick={submit}>
-          {submitting ? "儲存中…" : "儲存並自動繼續"}
+          {submitting ? "儲存中…" : input.afterSave?.kind === "verify-google-slides" ? "儲存並安全驗證" : "儲存並自動繼續"}
         </button>
         <button type="button" className="btn btn-ghost text-xs" disabled={submitting} onClick={onCancel}>取消</button>
       </div>

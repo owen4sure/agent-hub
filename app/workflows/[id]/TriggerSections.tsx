@@ -84,7 +84,7 @@ export function MailSection({ workflowId }: { workflowId: string }) {
   return (
     <section className="border-t pt-4">
       <SectionTitle icon="📨" title="收信觸發" badge={<StateBadge on={enabled && wfStatus === "official"} onText="收信中" offText={enabled ? "待設為正式" : "未啟用"} />} />
-      <p className="text-xs muted leading-relaxed mb-2">收到符合條件的新 email 就自動跑。信的內容變成 <code className="font-mono">{"{{subject}}"}</code>/<code className="font-mono">{"{{body}}"}</code>，附件是 <code className="font-mono">{"{{filePath}}"}</code>，流程裡直接引用。</p>
+      <p className="text-xs muted leading-relaxed mb-2">收到符合條件的新信件時就自動執行，信件內容和附件會直接交給這條流程處理。</p>
       {!enabled ? (
         <button onClick={() => save({ mailWatch: "on" })} disabled={saving || builtin} className="btn btn-primary w-full justify-center">{saving ? "啟用中…" : "啟用收信觸發"}</button>
       ) : (
@@ -108,7 +108,7 @@ export function MailSection({ workflowId }: { workflowId: string }) {
         </div>
       )}
       {!credsOk && (
-        <p className="text-xs leading-relaxed mt-2" style={{ color: "var(--cat-trigger)" }}>⚠️ 還沒填 IMAP 帳密——到「設定 → 通知串接 → 收信(IMAP)」照教學填好（有「測試連線」），收信觸發才能動。</p>
+        <p className="text-xs leading-relaxed mt-2" style={{ color: "var(--cat-trigger)" }}>⚠️ 還沒連上收信帳號——到「設定 → 通知串接 → 收信」照教學連一次，並按「測試連線」確認成功後就能使用。</p>
       )}
       {enabled && wfStatus !== "official" && !builtin && (
         <p className="text-xs leading-relaxed mt-2" style={{ color: "var(--cat-trigger)" }}>⚠️ 收信觸發只對「正式」流程生效——先按右上角「⋯ → 設為正式」才會開始收信。</p>
@@ -149,7 +149,7 @@ export function TelegramSection({ workflowId }: { workflowId: string }) {
   return (
     <section className="border-t pt-4">
       <SectionTitle icon="✈️" title="Telegram 訊息" badge={<StateBadge on={enabled && wfStatus === "official"} onText="接收中" offText={enabled ? "待設為正式" : "未啟用"} />} />
-      <p className="text-xs muted leading-relaxed mb-2">傳訊息給你的 Telegram bot 就自動跑。訊息文字變成 <code className="font-mono">{"{{message}}"}</code>，流程裡直接引用。只接受設定頁綁定的 Chat ID，別人搜到 bot 也觸發不了。</p>
+      <p className="text-xs muted leading-relaxed mb-2">傳訊息給你的 Telegram 機器人時就自動執行。只有你已連上的帳號能啟動，別人找到這個機器人也無法執行你的流程。</p>
       {!enabled ? (
         <button onClick={() => save({ telegramWatch: "on" })} disabled={saving || builtin} className="btn btn-primary w-full justify-center">{saving ? "啟用中…" : "啟用 Telegram 觸發"}</button>
       ) : (
@@ -165,7 +165,7 @@ export function TelegramSection({ workflowId }: { workflowId: string }) {
         </div>
       )}
       {!credsOk && (
-        <p className="text-xs leading-relaxed mt-2" style={{ color: "var(--cat-trigger)" }}>⚠️ 還沒串 Telegram——到「設定 → 通知串接」照教學填 Bot Token 並偵測 Chat ID，訊息觸發才能動。</p>
+        <p className="text-xs leading-relaxed mt-2" style={{ color: "var(--cat-trigger)" }}>⚠️ 還沒連上 Telegram——到「設定 → 通知串接」依教學完成連線並按「測試發送」，成功後就能使用。</p>
       )}
       {enabled && wfStatus !== "official" && !builtin && (
         <p className="text-xs leading-relaxed mt-2" style={{ color: "var(--cat-trigger)" }}>⚠️ Telegram 觸發只對「正式」流程生效——先按右上角「⋯ → 設為正式」才會開始接收。</p>
@@ -228,7 +228,7 @@ export function LineSection({ workflowId }: { workflowId: string }) {
   return (
     <section className="border-t pt-4">
       <SectionTitle icon="💬" title="LINE 訊息" badge={<StateBadge on={enabled} onText="已啟用" offText="未啟用" />} />
-      <p className="text-xs muted leading-relaxed mb-2">有人傳訊息給你的 LINE 官方帳號就自動跑。訊息文字變成 <code className="font-mono">{"{{message}}"}</code>。</p>
+      <p className="text-xs muted leading-relaxed mb-2">有人傳訊息給你的 LINE 官方帳號時就自動執行。若還沒完成 LINE 連線，直接把遇到的畫面截圖傳給 AI，它會一步一步帶你設定。</p>
       {!enabled ? (
         <button onClick={() => call("POST")} disabled={busy} className="btn btn-primary w-full justify-center">{busy ? "啟用中…" : "啟用 LINE 觸發"}</button>
       ) : (
@@ -237,14 +237,11 @@ export function LineSection({ workflowId }: { workflowId: string }) {
             <input readOnly value={url ?? ""} className="input font-mono text-xs flex-1 min-w-0" onFocus={(e) => e.currentTarget.select()} />
             <button onClick={copy} className="btn btn-ghost shrink-0 text-sm">{copied ? "✓ 已複製" : "複製"}</button>
           </div>
-          <div className="card p-2.5 text-xs leading-relaxed space-y-1" style={{ background: "var(--surface-2)" }}>
-            <div className="font-medium">接上 LINE 的三步：</div>
-            <div>1. LINE 平台只能打「公網 HTTPS」——先用隧道把上面的網址開出去，例如：<code className="font-mono block mt-0.5">cloudflared tunnel --url http://127.0.0.1:3000 --http-host-header 127.0.0.1:3000</code>(或 <code className="font-mono">ngrok http 3000 --host-header=rewrite</code>)。拿到 https://xxx.trycloudflare.com 後，把網址的 http://127.0.0.1:3000 換成它。<b>--http-host-header 不能省</b>——本站的跨站防護只認本機 Host。</div>
-            <div>2. 到 LINE Developers 你的 Messaging API channel → Webhook URL 貼上、開「Use webhook」。</div>
-            <div>3. 把 channel 的 <b>Channel Secret</b> 填到本站「設定 → 通知串接」（驗簽章用，沒填一律拒收）。</div>
+          <div className="card p-2.5 text-xs leading-relaxed" style={{ background: "var(--surface-2)" }}>
+            LINE 需要先完成一次帳號連線，才能把外部訊息安全送到這台電腦。若你不熟悉 LINE 後台，請直接在右側對話說「帶我設定 LINE 訊息觸發」，再把 LINE 畫面截圖傳給 AI；它會依你目前卡住的畫面帶你完成。
           </div>
           {!hasSecret && (
-            <p className="text-xs leading-relaxed" style={{ color: "var(--cat-trigger)" }}>⚠️ 還沒填 LINE Channel Secret——沒有它無法驗證訊息真的來自 LINE，webhook 一律拒收。到「設定 → 通知串接」填好。</p>
+            <p className="text-xs leading-relaxed" style={{ color: "var(--cat-trigger)" }}>⚠️ LINE 的安全驗證還沒完成，所以目前不會接收任何訊息。到「設定 → 通知串接」依教學完成；看不懂就把畫面截圖傳給 AI。</p>
           )}
           <p className="text-xs faint leading-relaxed">網址本身就是鑰匙，別貼到公開的地方；不小心外流就按「重新產生」。就算網址外流，沒有 Channel Secret 簽章也觸發不了。</p>
           <div className="flex gap-1.5">

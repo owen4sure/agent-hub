@@ -23,12 +23,14 @@ import { autoLayout, compactLegacyLongChain, separateOverlappingNodes, simpleCha
 import {
   useWFChat, sendChatToAI, stopChatToAI, stopVerification, startAutoTest, stopAutoTest,
   clearPendingGraph, closeAutoTest, clearChat, discardWorkflowChat, appendAssistantNote, announceSheetSetupIfNeeded,
+  announceSheetScriptFailureIfNeeded, announceNeedsHumanIfNeeded,
+  announceSlidesOAuthSetupIfNeeded, announceSlidesOAuthFailureIfNeeded,
   verifyUnderstanding, confirmPendingExecution, cancelPendingExecution, submitChatInputs,
   cancelChatInput, stopAllChatWork, retryChatExecution, decideChatApproval,
-  trustImportedAndContinue, cancelPendingTrust, recoverChatRuntime,
+  trustImportedAndContinue, cancelPendingTrust, recoverChatRuntime, promptForMissingSecrets,
   type Part, type ChatMsg,
 } from "@/lib/wfChatStore";
-import { MODELS, KNOWN_WORKING_MODELS, supportsVision, supportsCaptchaVision } from "@/lib/models";
+import { MODELS, KNOWN_WORKING_MODELS } from "@/lib/models";
 import type { Workflow, NodeRun, RunRecord, ExplainData } from "./types";
 import { nodeTypes } from "./nodeVisuals";
 import { edgeTypes } from "./WFEdge";
@@ -36,8 +38,10 @@ import { AddNodePanel } from "./AddNodePanel";
 import { nodeSummary } from "@/lib/workflow/nodeSummary";
 import { plainChatMessage, plainLanguage } from "@/lib/workflow/plainLanguage";
 import { latestLiveRunDetail, type PublicRunLog } from "@/lib/workflow/liveProgress";
+import { directGoogleSlidesRefreshUrls } from "@/lib/workflow/directGoogleLinks";
 import { RunForm } from "./RunForm";
 import { ChatInputCard } from "./ChatInputCard";
+import { SlidesOAuthSetupCard } from "./SlidesOAuthSetupCard";
 import { SheetScriptCard } from "./SheetScriptCard";
 import { NodePanel } from "./NodePanel";
 import { HistoryPanel } from "./HistoryPanel";
@@ -99,8 +103,24 @@ export default function WorkflowPage() {
 
   const [wf, setWf] = useState<Workflow | null>(null);
   const [nodeRuns, setNodeRuns] = useState<Record<string, NodeRun>>({});
+  // 哪些帳密欄位已填(來自 GET 的 secretsSet)——缺帳密的失敗要直接給安全輸入卡,不是叫人「讓 AI 修」
+  const [secretsSet, setSecretsSet] = useState<Record<string, boolean>>({});
+  // 部分執行(從這步開始測/只測這幾步)要不要開有頭瀏覽器。預設關——之前寫死開視窗,
+  // 每按一次測試就跳一個瀏覽器把焦點搶走(使用者:「我電腦螢幕一直被拉走」)。想看畫面自己勾。
+  const [watchPartial, setWatchPartial] = useState(false);
+  // 部分執行預設「真的執行到底」(含寫入/發送)——使用者拍板:「圈起來執行的，那就執行到底，
+  // 除非我有說只測試不更改任何資料」。勾了這個才走只讀安全排練(不寫入/不發送/不動外部系統)。
+  const [partialTestOnly, setPartialTestOnly] = useState(false);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [activeRunStatus, setActiveRunStatus] = useState<string | null>(null);
+  // 執行結束後的完成橫幅(成功/失敗+完整說明)——之前結束後畫布上什麼都沒有,使用者根本不知道
+  // 「完成了沒、為什麼有些步驟沒跑」,總結埋在紀錄頁等於沒講。✕ 手動關掉,開新一次執行自動清掉。
+  const [finishedSummary, setFinishedSummary] = useState<{ status: string; reason: string } | null>(null);
+  // 引擎執行完就已經幫每次失敗分類好「AI 修得動(ai-fixable)」或「AI 猜不出來只能問人(needs-human)」
+  // (見 engine.ts 的 classifyFailure，缺帳密/缺網址/缺哪一筆資料這類都會被歸 needs-human)——
+  // 節點面板要用這份權威分類決定給不給「讓 AI 修」按鈕，不能自己另外土法煉鋼猜一套(以前只認得
+  // 帳密關鍵字，缺 Apps Script 網址/報表名稱不對這些同樣「AI 修不了」的情況卻還是給了修復按鈕)。
+  const [runResolution, setRunResolution] = useState<{ runId: string; resolution: string | null; reason: string | null; failedNode: string | null } | null>(null);
   const [activeRunDetail, setActiveRunDetail] = useState("");
   const [cancelling, setCancelling] = useState(false);
   const [stoppingAutoTest, setStoppingAutoTest] = useState(false);
@@ -186,6 +206,26 @@ export default function WorkflowPage() {
     const t = setInterval(poll, 1000);
     return () => { alive = false; clearInterval(t); };
   }, [thinking, id]);
+  // 真實回饋踩過的 bug：對話框沒有任何捲動管理，新訊息/思考中提示/待確認卡片一出現，捲軸
+  // 位置維持在使用者上次停留處(通常是最上面)，看起來像「訊息都跑到很上面」，其實是最新
+  // 內容長在畫面外看不到。前兩版都用「useRef + useEffect(空依賴陣列)」在容器上掛
+  // MutationObserver，但實測(加 console.log 逐步排查)發現：這顆容器所在的整個對話面板
+  // 是三選一 ternary 的其中一支(見上面 showVersions ? ... : (...))，元件第一次掛載當下
+  // 如果剛好走到別支(例如載入中畫面)，容器根本還沒存在——ref 依然是 null，空依賴陣列的
+  // effect 只會在「第一次掛載」跑那一次，之後對話面板真的掛上時不會再有第二次機會補設
+  // observer。改用 callback ref：只要這個 DOM 節點被掛上(不管是哪一輪 render、哪個
+  // 分支造成的)，React 都會呼叫這個函式一次，掛在這裡設定 observer 才不會錯過。
+  const chatScrollObserverRef = useRef<MutationObserver | null>(null);
+  const chatScrollCallbackRef = useCallback((el: HTMLDivElement | null) => {
+    chatScrollObserverRef.current?.disconnect();
+    chatScrollObserverRef.current = null;
+    if (!el) return;
+    const scrollToBottom = () => { el.scrollTop = el.scrollHeight; };
+    scrollToBottom();
+    const observer = new MutationObserver(scrollToBottom);
+    observer.observe(el, { childList: true, subtree: true, characterData: true });
+    chatScrollObserverRef.current = observer;
+  }, []);
   // 免費/共用的模型服務有時會不穩定，AI 這邊會自動重試到成功而不是一次失敗就放棄(見 lib/aiRetry.ts)，
   // 但這樣使用者會看到「思考中」卡很久——加一句提示讓他知道「還在動，不是壞掉」，不要只讓他猜。
   useEffect(() => {
@@ -223,6 +263,8 @@ export default function WorkflowPage() {
     }
   }, [id]);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+  // 模型名稱、API 服務這類不是建立流程所需的知識。平常完全收起，真的有進階需求的人才從「更多動作」打開。
+  const [showModelSettings, setShowModelSettings] = useState(false);
   const moreMenuRef = useRef<HTMLDivElement>(null);
   const [notFound, setNotFound] = useState(false);
   const [renamingWf, setRenamingWf] = useState(false);
@@ -285,9 +327,10 @@ export default function WorkflowPage() {
       r.readAsDataURL(f);
     });
 
-  // 處理拖進來/貼上/上傳的檔案：依「使用者操作的順序」加入素材(先收當前文字再接檔案)，順序不亂。
-  // PDF/Word(.docx/.doc)/RTF/Excel(.xlsx/.xls)/PowerPoint(.pptx) 這些瀏覽器讀不懂的格式，交給伺服器用真正的函式庫解析成純文字(不用逼使用者自己轉檔)。
-  const processFiles = useCallback(async (files: File[]) => {
+  // 解析拖進來/貼上/上傳的檔案，回傳 Part[]——純函式,不碰任何 state，讓「整條流程對話」跟
+  // 「單一節點微調」兩個不同的目的地都能共用同一套解析管線(PDF/Word/Excel/PowerPoint 等瀏覽器讀不懂
+  // 的格式交給伺服器用真正的函式庫解析成純文字，不用逼使用者自己轉檔)。
+  const extractParts = useCallback(async (files: File[]): Promise<{ parts: Part[]; truncatedCount: number }> => {
     const selectedFiles = files.slice(0, 12);
     const newParts: Part[] = [];
     // 解析檔案(尤其 Excel 要伺服器渲染表格圖、PDF 逐頁渲染)通常要好幾秒，一定要給進度提示，
@@ -341,13 +384,19 @@ export default function WorkflowPage() {
     } finally {
       setBusyHint(null);
     }
-    if (files.length > selectedFiles.length) {
+    return { parts: newParts, truncatedCount: files.length - selectedFiles.length };
+  }, [id]);
+
+  // 整條流程對話用：解析完接到 draftParts(對話輸入框上方的附件列)，並清空文字輸入。
+  const processFiles = useCallback(async (files: File[]) => {
+    const { parts: newParts, truncatedCount } = await extractParts(files);
+    if (truncatedCount > 0) {
       newParts.push({
         kind: "file",
         name: "尚未讀取的檔案",
-        content: `這次選了 ${files.length} 個檔案；為避免瀏覽器卡住，只讀取前 ${selectedFiles.length} 個。其餘 ${files.length - selectedFiles.length} 個沒有送給 AI，請分批再附上。`,
+        content: `這次選了 ${files.length} 個檔案；為避免瀏覽器卡住，只讀取前 ${files.length - truncatedCount} 個。其餘 ${truncatedCount} 個沒有送給 AI，請分批再附上。`,
       });
-      flashToast(`一次最多處理 12 個檔案；其餘 ${files.length - selectedFiles.length} 個請分批傳`);
+      flashToast(`一次最多處理 12 個檔案；其餘 ${truncatedCount} 個請分批傳`);
     }
     if (newParts.length === 0) return;
     setDraftParts((prev) => {
@@ -356,7 +405,38 @@ export default function WorkflowPage() {
       return [...committed, ...newParts];
     });
     setChatInput("");
-  }, [id, flashToast]);
+  }, [extractParts, flashToast]);
+
+  // 節點面板用：使用者正在改某個節點時貼上/拖進圖片或檔案，附件要進「這個節點的微調輸入」，
+  // 不進整條流程對話——否則附件永遠只能餵給整條流程的聊天，沒辦法針對「這一個節點」給截圖/檔案
+  // (使用者真實回報:某節點出錯想傳截圖給 AI 看，卻被拉回整條工作流的對話畫面，沒辦法只改這一格)。
+  const [nodeAttachParts, setNodeAttachParts] = useState<Part[]>([]);
+  // 節點微調的指令文字也提升到這裡(不是 NodePanel 自己的 local state)——window 層級的拖放/貼上
+  // 才有辦法在附加新素材「之前」先把目前打好但還沒送出的文字封存進有序序列，順序才不會亂
+  // (使用者要的是「先打字說明、再貼圖、再打字」這種交錯順序,AI 才知道在講哪一張圖)。
+  const [nodeInstruction, setNodeInstruction] = useState("");
+  const nodeInstructionRef = useRef("");
+  useEffect(() => { nodeInstructionRef.current = nodeInstruction; }, [nodeInstruction]);
+  // 附件跟指令文字都是「針對這一個節點」的。切換節點時由同一個事件一起清掉，不能等 render 後的 effect
+  // 才清(會多一次帶著前一格附件的畫面，也會觸發 React 的同步 setState-effect 警告)。
+  const selectNode = useCallback((nodeId: string | null) => {
+    setNodeAttachParts([]);
+    setNodeInstruction("");
+    setSelectedNode(nodeId);
+  }, []);
+  const processFilesForNode = useCallback(async (files: File[]) => {
+    const { parts: newParts, truncatedCount } = await extractParts(files);
+    if (truncatedCount > 0) flashToast(`一次最多處理 12 個檔案；其餘 ${truncatedCount} 個請分批傳`);
+    if (newParts.length === 0) return;
+    // 跟整條流程對話的 processFiles 同一套「封存目前文字→接新素材」順序邏輯：不管這次附加是從
+    // 節點面板的按鈕、輸入框內貼上、還是全視窗拖放/貼上進來的，都走這唯一一個函式，順序才會一致。
+    setNodeAttachParts((prev) => {
+      const t = nodeInstructionRef.current.trim();
+      const committed = t ? [...prev, { kind: "text", text: t } as Part] : prev;
+      return [...committed, ...newParts];
+    });
+    if (nodeInstructionRef.current.trim()) setNodeInstruction("");
+  }, [extractParts, flashToast]);
 
   // macOS 的 .rtfd(富文字檔「目錄」，不是單一檔案)拖進來時，瀏覽器的 dataTransfer.files 拿到的是
   // 讀不出內容的空殼——要用 webkitGetAsEntry() 走訪目錄，把裡面真正的 TXT.rtf 抓出來當 RTF 處理。
@@ -395,7 +475,9 @@ export default function WorkflowPage() {
     return out;
   }
 
-  // 全視窗層級的拖檔 & 貼上：比綁在畫布上可靠(React Flow 會吃掉事件)
+  // 全視窗層級的拖檔 & 貼上：比綁在畫布上可靠(React Flow 會吃掉事件)。
+  // 有節點面板開著時，附件要進「這個節點的微調輸入」，不能無條件搶回整條流程對話——
+  // 使用者正在對某個節點傳截圖/檔案時，不該被強制切走視圖、失去正在改的節點焦點。
   useEffect(() => {
     const hasFiles = (dt: DataTransfer | null) => !!dt && Array.from(dt.types).includes("Files");
     const onDragOver = (e: DragEvent) => { if (hasFiles(e.dataTransfer)) { e.preventDefault(); setDragOver(true); } };
@@ -407,7 +489,9 @@ export default function WorkflowPage() {
       // 優先用 items + webkitGetAsEntry() 走訪(能認出 .rtfd 這種「目錄型」檔案)；沒有這個 API 才退回陽春的 .files
       const resolve = dt.items && dt.items.length > 0 ? resolveDroppedFiles(dt.items) : Promise.resolve(Array.from(dt.files));
       resolve.then((files) => {
-        if (files.length) { setSelectedNode(null); setShowHistory(false); processFiles(files); }
+        if (!files.length) return;
+        if (selectedNode) processFilesForNode(files);
+        else { selectNode(null); setShowHistory(false); processFiles(files); }
       });
     };
     const onDragLeave = (e: DragEvent) => { if (!e.relatedTarget) setDragOver(false); };
@@ -416,7 +500,9 @@ export default function WorkflowPage() {
         .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
         .map((it) => it.getAsFile())
         .filter((f): f is File => !!f);
-      if (imgs.length) { setSelectedNode(null); setShowHistory(false); processFiles(imgs); }
+      if (!imgs.length) return;
+      if (selectedNode) processFilesForNode(imgs);
+      else { selectNode(null); setShowHistory(false); processFiles(imgs); }
     };
     window.addEventListener("dragover", onDragOver);
     window.addEventListener("drop", onDrop);
@@ -428,7 +514,7 @@ export default function WorkflowPage() {
       window.removeEventListener("dragleave", onDragLeave);
       window.removeEventListener("paste", onPaste);
     };
-  }, [processFiles]);
+  }, [processFiles, processFilesForNode, selectedNode, selectNode]);
 
   // ── Ctrl-Z 復原:每個「手動改到流程」的操作都記一筆反向操作,Cmd/Ctrl+Z 逐筆還原。
   // 反向操作走伺服器端合併欄位(addNodes/addEdges/removeEdges/positions/rename),
@@ -481,6 +567,7 @@ export default function WorkflowPage() {
         ? { ...data.workflow, nodes: candidateNodes.map((n: Workflow["nodes"][number]) => ({ ...n, position: separated.positions[n.id] })) }
         : compacted ? { ...data.workflow, nodes: candidateNodes } : data.workflow;
       setWf(workflow);
+      setSecretsSet(data.secretsSet ?? {});
       // 既有流程若曾存進重疊座標或舊版超寬單列，載入時一次性修正；只送座標，不會覆蓋 AI 同時修好的 config。
       if (separated.changed || compacted) {
         void fetch(`/api/workflows/${id}`, {
@@ -621,7 +708,7 @@ export default function WorkflowPage() {
           stepNumber: stepById.has(n.id) ? stepById.get(n.id)! + 1 : undefined,
           summary: plainLanguage(nodeSummary(n.type, n.config)),
           onClick: () => {
-            setSelectedNode(n.id);
+            selectNode(n.id);
             if (stepById.has(n.id)) setChainStepIndex(stepById.get(n.id)!);
           },
           onRename: (name: string) => renameNode(n.id, name),
@@ -652,15 +739,28 @@ export default function WorkflowPage() {
   // 執行狀態輪詢 → 只更新節點顏色，不動位置
   useEffect(() => {
     if (!activeRunId) return;
+    const runId = activeRunId; // 閉包裡窄化成 string，避免下面每次使用都要跟 state 的 string|null 打架
+    // 同一輪 poll 的 fetch 慢過下一輪(伺服器忙/網路抖動)時，較晚才 resolve 的舊回應可能在
+    // 「更新的那輪已經偵測到執行完成、清掉 interval、把 activeRunId 設回 null」之後才回來；
+    // 若不擋，這則過期回應會用「running」蓋掉剛剛才正確顯示的完成橫幅，畫面卡在「執行中」
+    // 卻再也不會有新的一輪 poll 來更正(activeRunId 已經是 null)。同樣的道理，換到新一次執行時
+    // 舊執行殘留的回應也可能蓋掉新執行的追蹤狀態。cleanup 一定會在 activeRunId 變動(含被設回
+    // null)或卸載時執行，用它把「這個 effect 實例是否還算數」的旗標打開，任何在那之後才 resolve
+    // 的回應一律不套用。
+    let cancelled = false;
     async function poll() {
       // 掛在 1.5 秒 interval 上，一定要接錯誤(伺服器重啟期間會連續失敗)
-      let data: { nodeRuns?: NodeRun[]; run?: { status: string }; logs?: PublicRunLog[] };
+      let data: { nodeRuns?: NodeRun[]; run?: { status: string; resolution?: string | null; reason?: string | null; failed_node?: string | null }; logs?: PublicRunLog[] };
       try {
-        const res = await fetch(`/api/runs/${activeRunId}`);
+        const res = await fetch(`/api/runs/${runId}`);
         if (!res.ok) return;
         data = await res.json();
       } catch {
         return; // 暫時連不上就等下一輪
+      }
+      if (cancelled) return; // 這個 effect 已經被清理，這份回應已經過期，不能再套用
+      if (data.run) {
+        setRunResolution({ runId, resolution: data.run.resolution ?? null, reason: data.run.reason ?? null, failedNode: data.run.failed_node ?? null });
       }
       if (data.nodeRuns) {
         const map = Object.fromEntries(data.nodeRuns.map((nr: NodeRun) => [nr.node_id, nr])) as Record<string, NodeRun>;
@@ -686,18 +786,57 @@ export default function WorkflowPage() {
       if (data.run && data.run.status !== "running" && data.run.status !== "queued") {
         if (pollRef.current) clearInterval(pollRef.current);
         setCancelling(false);
+        // 結束時把完整總結(成功/失敗+哪些步驟為什麼沒跑)直接浮上畫布——不能只讓節點變色就沒了,
+        // 使用者盯著畫布根本不知道「完成了沒」,總結埋在紀錄頁等於沒講(真實抱怨)。
+        setFinishedSummary({
+          status: data.run.status,
+          reason: data.run.reason ?? (data.run.status === "success" ? "執行完成" : `執行結束(${data.run.status})`),
+        });
         // 執行結束就把追蹤中的 run 清掉(節點顏色保留)——不清的話「每 5 秒偵測新執行」的
         // watcher 會因為 activeRunId 還在而永久停用，之後排程/修復觸發的新執行畫布上完全看不到
         setActiveRunId(null);
         loadRuns();
+        // 任何節點失敗、且被引擎分類為 needs-human 時主動在對話講清楚缺什麼——不能只看整條 run
+        // 的 resolution/failed_node：使用者自己畫了「出錯時」備援分支的話，run 會回報 success、
+        // run.resolution 和 failed_node 都是 null，但被備援接手的那個節點本身仍然是真的失敗
+        // (真實踩過：Slides OAuth 憑證錯誤，因為使用者好心接了通知備援分支，整條 run 就被歸類成
+        // success，需要主動指引的人就永遠不會被提醒)。改成掃「每個節點自己的分類」，這個分類是
+        // /api/runs/[runId] 用 classifyFailure 對每個失敗節點各自算好回傳的，不在前端重猜一次。
+        for (const nr of data.nodeRuns ?? []) {
+          if (nr.status !== "failed" || nr.resolution !== "needs-human") continue;
+          const failedNodeInfo = wfRef.current?.nodes.find((n) => n.id === nr.node_id);
+          if (!failedNodeInfo) continue;
+          if (failedNodeInfo.type === "google-sheet-update" || failedNodeInfo.type === "google-sheet-append") {
+            announceSheetScriptFailureIfNeeded(id, failedNodeInfo.label);
+          } else if ((failedNodeInfo.type === "google-slides-refresh" || failedNodeInfo.type === "google-slides-create") && /OAuth/.test(nr.error ?? "")) {
+            announceSlidesOAuthFailureIfNeeded(id, failedNodeInfo.label, failedNodeInfo.id);
+          } else {
+            // 每行截斷長度、行數上限——證據要「看得懂」不是「看得全」，完整內容執行紀錄頁本來就有。
+            // 沒有這個上限的話,像「掃描過的整頁內容」這種本來就很長的 log 行會讓對話訊息變成一大堆文字，
+            // 使用者要滑很久才找得到重點，違背「AI 改了什麼、需要什麼」必須簡單講清楚的原則。
+            const EVIDENCE_LINE_MAX = 200;
+            const evidence = (data.logs ?? [])
+              .filter((l) => l.node_id === nr.node_id && l.line && !/^\[.+] 失敗：/.test(l.line))
+              .slice(-4)
+              .map((l) => {
+                const line = l.line as string;
+                return line.length > EVIDENCE_LINE_MAX ? `${line.slice(0, EVIDENCE_LINE_MAX)}…(完整內容在執行紀錄頁)` : line;
+              })
+              .join("\n");
+            announceNeedsHumanIfNeeded(id, failedNodeInfo.label, nr.error ?? "", evidence);
+          }
+        }
+      } else {
+        setFinishedSummary(null); // 新一輪執行進行中,舊的完成橫幅要收掉
       }
     }
     poll();
     pollRef.current = setInterval(poll, 1500);
     return () => {
+      cancelled = true;
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [activeRunId, setNodes, setEdges, loadRuns]);
+  }, [activeRunId, id, setNodes, setEdges, loadRuns]);
 
   // 從「執行紀錄」點某次過去(不是本頁剛跑的)失敗紀錄的節點時，載入那次 run 的節點結果，
   // 不然 selRun 會是 undefined——節點面板既不會標紅、也不會出現「讓 AI 修這一步」，等於「去修這一步」按了却沒反應。
@@ -707,6 +846,9 @@ export default function WorkflowPage() {
       const map = Object.fromEntries(data.nodeRuns.map((nr: NodeRun) => [nr.node_id, nr])) as Record<string, NodeRun>;
       setNodeRuns(map);
       setNodes((prev) => prev.map((n) => ({ ...n, data: { ...n.data, status: map[n.id]?.status } })));
+    }
+    if (data.run) {
+      setRunResolution({ runId, resolution: data.run.resolution ?? null, reason: data.run.reason ?? null, failedNode: data.run.failed_node ?? null });
     }
   }, [setNodes]);
 
@@ -1017,6 +1159,19 @@ export default function WorkflowPage() {
     [drawer, id, load, flashToast],
   );
 
+  // 首頁卡片按「執行」會帶 ?run=1 導進來：流程載入後自動走跟頁內「執行」同一條路(有期間/參數要選
+  // 就先跳執行表單)，使用者不用再按一次。網址參數要立刻清掉，不然重整頁面會再觸發一次執行。
+  // (必須放在下面的 early return 之前——hooks 不能在條件 return 後面呼叫)
+  const autoRunTriggered = useRef(false);
+  useEffect(() => {
+    if (!wf || autoRunTriggered.current) return;
+    if (new URLSearchParams(window.location.search).get("run") !== "1") return;
+    autoRunTriggered.current = true;
+    window.history.replaceState(null, "", window.location.pathname);
+    onClickRun();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wf]);
+
   if (notFound)
     return (
       <div className="flex flex-col items-center justify-center h-screen gap-3 text-center px-6">
@@ -1038,8 +1193,13 @@ export default function WorkflowPage() {
     else alert((await res.json()).error ?? "刪除失敗");
   }
 
-  async function run(params: Record<string, string>, headed?: boolean) {
+  async function run(params: Record<string, string>, headed?: boolean, partial?: { startAtNodeId?: string; onlyNodeIds?: string[] }) {
     if (starting) return; // 啟動請求還在飛就別重複按
+    if (!wf!.nodes.some((node) => node.type !== "trigger")) {
+      selectNode(null);
+      flashToast("先在右側說你想完成什麼；AI 建好至少一個步驟後才能執行。");
+      return;
+    }
     setStarting(true);
     try {
     // 使用者直接改欄位後就按執行，不需要記得再按一次儲存；而且一定等伺服器確認存好才啟動。
@@ -1068,6 +1228,9 @@ export default function WorkflowPage() {
       if (inProgress) {
         setActiveRunId(inProgress.id);
         setShowHistory(false);
+        // 剛才按的這次執行(可能是只選了某幾步)沒有真的送出——接上的是已經在跑的那一次，
+        // 範圍可能完全不同。不講清楚的話，使用者會以為自己剛才選的那幾步正在跑，其實看到的是別次執行。
+        flashToast("已有一次執行正在進行中，先顯示那一次的進度(剛才這個請求沒有另外送出)");
         return;
       }
     } catch { /* 查不到就照舊執行 */ }
@@ -1075,7 +1238,8 @@ export default function WorkflowPage() {
       let res = await fetch(`/api/workflows/${id}/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ params, headed }),
+        // 部分執行預設真的執行;只有勾了「只測試,不更改資料」才帶 dryRun:true 走安全排練
+        body: JSON.stringify({ params, headed, startAtNodeId: partial?.startAtNodeId, onlyNodeIds: partial?.onlyNodeIds, dryRun: partial ? partialTestOnly : undefined }),
       });
       let data = await res.json();
       if (res.status === 409 && data.code === "IMPORTED_WORKFLOW_CONFIRMATION_REQUIRED") {
@@ -1086,7 +1250,7 @@ export default function WorkflowPage() {
         res = await fetch(`/api/workflows/${id}/run`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ params, headed, confirmImported: true }),
+          body: JSON.stringify({ params, headed, startAtNodeId: partial?.startAtNodeId, onlyNodeIds: partial?.onlyNodeIds, dryRun: partial ? partialTestOnly : undefined, confirmImported: true }),
         });
         data = await res.json();
         if (res.ok) await load();
@@ -1094,7 +1258,14 @@ export default function WorkflowPage() {
       if (res.ok && data.runId) {
         setNodeRuns({});
         setActiveRunId(data.runId);
+        setFinishedSummary(null);
         setShowHistory(false);
+      } else if (data.code === "MISSING_REQUIRED_SETTINGS" && Array.isArray(data.missing) && data.missing.length > 0) {
+        // 缺帳密不是「一句錯誤」能解決的——直接在對話掛出安全輸入卡讓使用者填(值只進本機設定)。
+        // 關掉節點面板,對話區才看得到卡。
+        selectNode(null);
+        setShowRunForm(false);
+        promptForMissingSecrets(id, data.missing as { key: string; label?: string; type?: "text" | "password" }[]);
       } else {
         // 失敗一定要讓使用者知道——之前這裡默默結束，按「執行」看起來完全沒反應
         alert(data.error ?? "執行失敗，請稍後再試");
@@ -1126,9 +1297,33 @@ export default function WorkflowPage() {
   };
 
   function onClickRun() {
+    if (!wf!.nodes.some((node) => node.type !== "trigger")) {
+      selectNode(null);
+      flashToast("先在右側說你想完成什麼；AI 建好至少一個步驟後才能執行。");
+      return;
+    }
     const visible = (wf!.triggerParams ?? []).filter((f) => !f.derived);
     if (visible.length > 0 || needsTestFile() || messageTestMode()) setShowRunForm(true);
     else run({}, wf!.status === "draft");
+  }
+
+  // 「🔐 手動登入一次」：Google/Microsoft 這類網站會用機器人偵測擋自動化登入(帳密全對也擋)。
+  // 開一個真 Chrome 讓使用者親手登入,cookies 自動存進這條流程的瀏覽器狀態,之後執行直接是已登入。
+  async function manualLogin() {
+    const url = prompt("要開哪個網站讓你手動登入？(登入完成後直接關掉那個視窗即可)", "https://accounts.google.com/");
+    if (!url) return;
+    try {
+      const res = await fetch(`/api/workflows/${id}/manual-login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { alert((data as { error?: string }).error ?? "無法開啟瀏覽器"); return; }
+      flashToast("🔐 已開啟登入視窗——親手登入完成後關掉那個視窗即可");
+    } catch {
+      alert("連不上伺服器，請再試一次");
+    }
   }
 
   async function cancelActiveRun() {
@@ -1150,6 +1345,11 @@ export default function WorkflowPage() {
   // fetch 在 store(模組層)發動，切走畫面也不中斷；跑完後(若還在本頁)刷新畫布。
   async function runAutoTest() {
     if (autoTest?.running) { setAutoTestMinimized(false); return; } // 已在跑就是把縮小的視窗叫回來
+    if (!wf!.nodes.some((node) => node.type !== "trigger")) {
+      selectNode(null);
+      flashToast("先在右側說你想完成什麼；AI 建好至少一個步驟後才能測試。");
+      return;
+    }
     setAutoTestMinimized(false);
     // 自動修復也只能以已儲存設定為起點；否則 AI 會對著舊設定修，既慢又會讓人誤以為它不懂指令。
     for (const [nodeId, config] of Object.entries(pendingNodeConfigs)) {
@@ -1199,8 +1399,21 @@ export default function WorkflowPage() {
     // 讓 AI「看得到那個網站」——跟人點開連結看是一樣的。這段要幾秒，一定要顯示進度+擋重複送，
     // 不然訊息文字瞬間消失、聊天區毫無變化，使用者會以為沒送出而重貼重送(開兩條 chromium 重複抓)。
     const allUrls = [...new Set(text.match(/https?:\/\/[^\s，。、）)】」]+/g) ?? [])];
-    const urls = allUrls.slice(0, 3);
-    const omittedUrls = allUrls.slice(3);
+    // Google 簡報圖表「重新整理」的兩個網址只是官方 API 的目標，不該先花 20~50 秒打開
+    // 私人 Google 文件。直接把網址和目的交給 builder，套用後由 google-slides-refresh 在
+    // 安全試跑中驗證 OAuth/簡報/圖表；一般「讀 Google Sheet 內容」仍照舊真的讀取。
+    const directGoogleUrls = directGoogleSlidesRefreshUrls(text, allUrls);
+    const readableUrls = allUrls.filter((url) => !directGoogleUrls.includes(url));
+    const urls = readableUrls.slice(0, 3);
+    const omittedUrls = readableUrls.slice(3);
+    if (directGoogleUrls.length) {
+      parts.push({
+        kind: "file",
+        name: "Google 簡報圖表更新網址",
+        content: `使用者要直接用 Google 官方簡報功能更新連結圖表；以下網址不必在聊天階段打開，請建立 google-slides-refresh 節點並原樣使用：\n${directGoogleUrls.join("\n")}`,
+      });
+      flashToast("已直接交給 Google 簡報整合，不會先卡在讀取私人文件");
+    }
     if (urls.length) {
       const controller = new AbortController();
       urlReadAbortRef.current = controller;
@@ -1247,9 +1460,9 @@ export default function WorkflowPage() {
         parts.push({
           kind: "file",
           name: "尚未讀取的網址",
-          content: `為避免一次等待過久，這則訊息只實際讀取前 3 個網址；以下 ${omittedUrls.length} 個還沒有打開，AI 不可以假裝已驗證：\n${omittedUrls.join("\n")}\n請分成下一則訊息再傳，我會接續同一份流程。`,
+          content: `為避免一次等待過久，這則訊息只實際讀取前 3 個一般網址；以下 ${omittedUrls.length} 個還沒有打開，AI 不可以假裝已驗證：\n${omittedUrls.join("\n")}\n請分成下一則訊息再傳，我會接續同一份流程。`,
         });
-        flashToast(`這則有 ${allUrls.length} 個網址；已讀前 3 個，其餘請下一則再傳`);
+        flashToast(`這則有 ${readableUrls.length} 個需要讀取的網址；已讀前 3 個，其餘請下一則再傳`);
       }
       // 不再靜默吞掉失敗：AI 和使用者都要知道這次其實沒有讀到網頁內容，避免模型只看網址後假裝驗證過。
       if (controller.signal.aborted) {
@@ -1288,7 +1501,7 @@ export default function WorkflowPage() {
       appendAssistantNote(id, `⚠️ 套用到畫布時出錯了${errText ? `:${errText}` : ""}——你的流程圖預覽還留著，可以再按一次「套用」。`);
       return;
     }
-    const applied = (await res.json().catch(() => ({}))) as { webhookUrl?: string | null; formUrl?: string | null; lineUrl?: string | null; onFailureLinked?: string | null; onFailureMissing?: string | null };
+    const applied = (await res.json().catch(() => ({}))) as { webhookUrl?: string | null; formUrl?: string | null; lineUrl?: string | null; onFailureLinked?: string | null; onFailureMissing?: string | null; missingSecrets?: { key: string; label?: string; type?: "text" | "password" }[] };
     clearPendingGraph(id);
     // 觸發自動套用的結果講清楚:webhook/表單/LINE 網址直接給、失敗備援關聯建了沒——不用使用者去面板翻
     const extras = [
@@ -1301,6 +1514,22 @@ export default function WorkflowPage() {
     ].join("");
     appendAssistantNote(id, `✅ 已套用到畫布，共 ${count} 個節點。${extras}`);
     announceSheetSetupIfNeeded(id, pendingGraph.nodes);
+    void announceSlidesOAuthSetupIfNeeded(id, pendingGraph.nodes);
+    // 真實踩過的落差：對話裡自動套用(applyPendingGraphFromChat)會讀 API 回傳的 missingSecrets
+    // 立刻掛出安全輸入卡，但畫面上這顆「套用到畫布」按鈕走的是同一支 API、卻從沒讀過這個欄位——
+    // 使用者從這顆按鈕套用時，缺帳密只會在真正執行失敗時才發現，而不是套用當下就看到安全輸入卡。
+    // Google Slides 有專屬的「存好就只讀驗證」授權卡(announceSlidesOAuthSetupIfNeeded 已經處理)，
+    // 一般帳密欄位才需要這裡補上，避免兩張卡搶著顯示。
+    const slidesKeys = new Set(["googleOAuthClientId", "googleOAuthClientSecret", "googleOAuthRefreshToken"]);
+    const usesSlides = pendingGraph.nodes.some((node) => node.type === "google-slides-refresh" || node.type === "google-slides-create");
+    const missingSecrets = (applied.missingSecrets ?? []).filter((field) => !usesSlides || !slidesKeys.has(field.key));
+    if (missingSecrets.length > 0) {
+      promptForMissingSecrets(
+        id,
+        missingSecrets,
+        `這條流程還需要連接 ${missingSecrets.map((field) => `「${field.label || field.key}」`).join("、")}。直接在下面安全欄位填入即可；不用離開這段對話找設定頁。`,
+      );
+    }
     // 「以使用者擺好的位置為準」：已經存在的節點(同 id)保留它目前的座標，只有全新的節點才自動排版。
     // 之前不管三七二十一對整張圖重跑 autoLayout，會把使用者辛苦拖好的排列整個洗掉、還可能擠成一團(踩過)。
     // (要整張重新自動對齊是「排列」按鈕的事，套用/修改流程不該偷改使用者的手動位置)
@@ -1371,9 +1600,11 @@ export default function WorkflowPage() {
 
   async function promote() {
     const res = await fetch(`/api/workflows/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "official" }) });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) { flashToast((data as { error?: string }).error ?? "設為正式失敗"); return; }
-    flashToast("已設為正式；已啟用的自動觸發現在會開始運作");
+    const data = (await res.json().catch(() => ({}))) as { error?: string; warning?: string };
+    if (!res.ok) { flashToast(data.error ?? "設為正式失敗"); return; }
+    // data.warning：這個版本的圖結構合法但還沒有任何一次成功執行過(見後端 workflows/[id]/route.ts)——
+    // 不擋下設為正式(很多流程第一次設定時確實還沒條件測試)，但要讓使用者知道，不能悄悄啟用自動觸發。
+    flashToast(data.warning ? `已設為正式；${data.warning}` : "已設為正式；已啟用的自動觸發現在會開始運作");
     load();
   }
   // 這個流程實際執行要用哪個模型：之前設定頁那個下拉選單只是給「測試連線」用的，跟 workflow 真正執行完全無關
@@ -1393,9 +1624,17 @@ export default function WorkflowPage() {
   }
   async function copy() {
     const res = await fetch(`/api/workflows/${id}/copy`, { method: "POST" });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !(data as { id?: string }).id) { flashToast((data as { error?: string }).error ?? "複製失敗"); return; }
-    router.push(`/workflows/${(data as { id: string }).id}`);
+    const data = (await res.json().catch(() => ({}))) as { id?: string; error?: string; warning?: string };
+    if (!res.ok || !data.id) { flashToast(data.error ?? "複製失敗"); return; }
+    const newId = data.id;
+    if (data.warning) {
+      // 立刻導去新副本頁面的話，這個頁面(舊流程)的 toast 狀態會跟著卸載，使用者根本來不及看到
+      // 警告——複製對話較長時被截斷的內容/附件這件事很重要，值得讓使用者停留一下再跳轉。
+      flashToast(data.warning);
+      setTimeout(() => router.push(`/workflows/${newId}`), 2800);
+      return;
+    }
+    router.push(`/workflows/${newId}`);
   }
 
   const selNode = wf.nodes.find((n) => n.id === selectedNode);
@@ -1441,46 +1680,6 @@ export default function WorkflowPage() {
           )}
           {wf.status === "draft" && <span className="badge badge-amber shrink-0 whitespace-nowrap">草稿</span>}
           {wf.builtin && <span className="badge badge-neutral shrink-0 whitespace-nowrap">內建範例</span>}
-          {showCustomModel || !(MODELS as readonly string[]).includes(wf.model) ? (
-            <input
-              key={wf.id}
-              defaultValue={wf.model}
-              onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== wf.model) changeModel(v); }}
-              onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-              placeholder="輸入你接的 API 服務實際支援的模型代號"
-              className="input text-xs py-1 shrink-0"
-              style={{ width: 200 }}
-              title="這個流程實際執行時用的模型代號——填你接的 API 服務(設定頁的 Base URL/Key)實際支援的名稱"
-            />
-          ) : (
-            <select
-              value={wf.model}
-              onChange={(e) => changeModel(e.target.value)}
-              className="input text-xs py-1 min-w-[80px] max-w-[110px] min-[1400px]:max-w-[190px]"
-              style={{ width: "auto" }}
-              title="這個流程實際執行時用的模型(✓=文字實測可用；🖼️=能看一般圖片；🔤=圖形驗證碼也實測可用。Claude Code 能看一般圖片，但會拒絕解 CAPTCHA，系統會在驗證碼步驟自動改用 🔤 模型)。"
-            >
-              {MODELS.map((m) => (
-                <option key={m} value={m}>{(KNOWN_WORKING_MODELS as readonly string[]).includes(m) || m.startsWith("claude-code") ? "✓ " : ""}{supportsVision(m) ? "🖼️ " : ""}{supportsCaptchaVision(m) ? "🔤 " : ""}{m}</option>
-              ))}
-            </select>
-          )}
-          <button
-            onClick={() => setShowCustomModel((v) => !v)}
-            className="text-xs faint hover:text-[var(--text)] shrink-0 hidden min-[1400px]:inline"
-            title="切換成清單選擇/自訂輸入模型代號"
-          >
-            {showCustomModel ? "清單" : "自訂"}
-          </button>
-          {wf.nodes.some((n) => n.type === "browser-login") && !supportsCaptchaVision(wf.model) && (
-            <span
-              className="text-xs truncate max-w-[230px] hidden min-[1500px]:inline"
-              style={{ color: "var(--amber, #b45309)" }}
-              title="這個流程可能遇到圖形驗證碼；目前模型不是驗證碼實測候選（Claude Code 也會拒絕 CAPTCHA）。系統會在那一步自動改用有 🔤 標記的模型。"
-            >
-              ⚠️ 驗證碼會自動改用 🔤 模型
-            </span>
-          )}
           <div className="workflow-toolbar-actions ml-auto flex items-center gap-1.5">
             {/* AI 對話還在處理中，但目前右側面板顯示的是別的東西(節點/紀錄/說明…)——不加這個提示的話，
                 點一下節點看內容會讓「AI 正在想…」整個從畫面消失，使用者以為 AI 停下來了。
@@ -1488,7 +1687,7 @@ export default function WorkflowPage() {
                 點一下直接跳回對話面板，跟關掉節點面板的視覺回饋一致。 */}
             {thinking && (selNode || showHistory || showSchedule || showExplain || showVersions) && (
               <button
-                onClick={() => { setSelectedNode(null); setShowHistory(false); setShowSchedule(false); setShowExplain(false); setShowVersions(false); }}
+                onClick={() => { selectNode(null); setShowHistory(false); setShowSchedule(false); setShowExplain(false); setShowVersions(false); }}
                 className="btn btn-ghost shrink-0 text-xs"
                 style={{ color: "var(--accent)" }}
                 title="AI 還在處理你的對話，點一下回去看"
@@ -1508,7 +1707,7 @@ export default function WorkflowPage() {
               </button>
             )}
             {wf.status === "draft" && (
-              <button onClick={runAutoTest} disabled={autoTest?.running} className="btn shrink-0" style={{ background: "var(--accent)", color: "#fff" }} title="實際執行、失敗就讓 AI 看整條流程修正後再測；會受安全時間與重試預算限制，修不掉會明確停下回報">
+              <button onClick={runAutoTest} disabled={autoTest?.running || !wf.nodes.some((node) => node.type !== "trigger")} className="btn shrink-0" style={{ background: "var(--accent)", color: "#fff" }} title={wf.nodes.some((node) => node.type !== "trigger") ? "實際測試整條流程；出錯時 AI 會先找原因、改好後再測。真的需要你補資料時才會停下來說明" : "先在右側描述你想完成的事，建立步驟後才可以測試"}>
                 {autoTest?.running ? "測試中…" : "🪄 測到會跑"}
               </button>
             )}
@@ -1517,15 +1716,22 @@ export default function WorkflowPage() {
                 {cancelling ? "停止中…" : "⏹ 停止執行"}
               </button>
             ) : (
-              <button onClick={onClickRun} disabled={starting} className="btn btn-primary shrink-0">{starting ? "啟動中…" : "▶ 執行"}</button>
+              <button
+                onClick={onClickRun}
+                disabled={starting || !wf.nodes.some((node) => node.type !== "trigger")}
+                className="btn btn-primary shrink-0"
+                title={wf.nodes.some((node) => node.type !== "trigger") ? "執行這條流程" : "先在右側描述你想完成的事，建立步驟後才可以執行"}
+              >
+                {starting ? "啟動中…" : "▶ 執行"}
+              </button>
             )}
-            <button onClick={() => { setShowExplain((v) => !v); setShowHistory(false); setShowSchedule(false); setShowVersions(false); setSelectedNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showExplain ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="說明：這個流程每一步在做什麼" aria-label="說明">📖</button>
-            <button onClick={() => { setShowHistory((v) => !v); setShowSchedule(false); setShowExplain(false); setShowVersions(false); setSelectedNode(null); loadRuns(); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showHistory ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="紀錄：最近的執行結果" aria-label="紀錄">📋</button>
-            <button onClick={() => { setShowSchedule((v) => !v); setShowHistory(false); setShowExplain(false); setShowVersions(false); setSelectedNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showSchedule ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="觸發：排程 / 資料夾監聽 / Webhook / 收信 / Telegram / LINE" aria-label="觸發">⚡</button>
+            <button onClick={() => { setShowExplain((v) => !v); setShowHistory(false); setShowSchedule(false); setShowVersions(false); selectNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showExplain ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="說明：這個流程每一步在做什麼" aria-label="說明">📖</button>
+            <button onClick={() => { setShowHistory((v) => !v); setShowSchedule(false); setShowExplain(false); setShowVersions(false); selectNode(null); loadRuns(); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showHistory ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="紀錄：最近的執行結果" aria-label="紀錄">📋</button>
+            <button onClick={() => { setShowSchedule((v) => !v); setShowHistory(false); setShowExplain(false); setShowVersions(false); selectNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showSchedule ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="設定這條流程何時自動開始：固定時間、收到檔案、收到信件或收到訊息" aria-label="設定自動開始">⚡</button>
             {/* 次要動作收進「⋯」：工具列擠到溢出要橫向捲(1440 寬就被截斷)是真實踩過的 UX 問題 */}
             <div className="relative shrink-0" ref={moreMenuRef}>
               <button
-                onClick={() => setShowMoreMenu((v) => !v)}
+                onClick={() => setShowMoreMenu((v) => { if (v) setShowModelSettings(false); return !v; })}
                 className="btn btn-ghost"
                 aria-label="更多動作"
                 title="設為正式 / 版本 / 排列 / 複製 / 匯出 / 刪除"
@@ -1543,12 +1749,49 @@ export default function WorkflowPage() {
                       <div className="menu-sep" />
                     </>
                   )}
-                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); setShowVersions(true); setShowHistory(false); setShowSchedule(false); setShowExplain(false); setSelectedNode(null); }}>
+                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); setShowVersions(true); setShowHistory(false); setShowSchedule(false); setShowExplain(false); selectNode(null); }}>
                     <span>🕓</span> 版本備份
                   </button>
                   <button className="menu-item" onClick={() => { setShowMoreMenu(false); arrange(); }}>
                     <span>⌗</span> 自動排列
                   </button>
+                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); void manualLogin(); }}>
+                    <span>🔐</span> 手動登入一次(Google等)
+                  </button>
+                  <div className="menu-sep" />
+                  <button className="menu-item" onClick={() => setShowModelSettings((v) => !v)}>
+                    <span>🧠</span> AI 選擇（進階）
+                  </button>
+                  {showModelSettings && (
+                    <div className="px-3 pb-3 pt-1 space-y-2" style={{ maxWidth: 310 }}>
+                      <p className="text-xs leading-relaxed faint">一般不需要調整，平台會自動處理圖片與驗證碼等情況。只有你自己有指定 AI 服務時才修改。</p>
+                      {showCustomModel || !((KNOWN_WORKING_MODELS as readonly string[]).includes(wf.model) || wf.model.startsWith("claude-code")) ? (
+                        <input
+                          key={wf.id}
+                          defaultValue={wf.model}
+                          onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== wf.model) changeModel(v); }}
+                          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                          placeholder="輸入 AI 名稱"
+                          aria-label="自訂 AI 名稱"
+                          className="input text-xs py-1 w-full"
+                        />
+                      ) : (
+                        <select
+                          value={wf.model}
+                          onChange={(e) => changeModel(e.target.value)}
+                          aria-label="選擇 AI"
+                          className="input text-xs py-1 w-full"
+                        >
+                          {MODELS.filter((m) => (KNOWN_WORKING_MODELS as readonly string[]).includes(m) || m.startsWith("claude-code")).map((m) => (
+                            <option key={m} value={m}>{m}</option>
+                          ))}
+                        </select>
+                      )}
+                      <button onClick={() => setShowCustomModel((v) => !v)} className="text-xs faint hover:text-[var(--text)]">
+                        {showCustomModel ? "從內建 AI 選擇" : "改用自訂 AI 名稱"}
+                      </button>
+                    </div>
+                  )}
                   <button className="menu-item" onClick={() => { setShowMoreMenu(false); copy(); }}>
                     <span>⧉</span> 複製流程
                   </button>
@@ -1626,7 +1869,10 @@ export default function WorkflowPage() {
             defaultViewport={{ x: 10, y: 40, zoom: 0.8 }}
             minZoom={0.2}
             selectionMode={SelectionMode.Partial}
-            panOnDrag
+            // 像 n8n:左鍵在空白處拖曳=框選節點;平移用滾輪/觸控板或中鍵、右鍵拖曳。
+            // (使用者:「要支援用滑鼠框,不要都要一個一個點」——之前左鍵拖曳是平移,框選要按住 Shift 才行)
+            selectionOnDrag
+            panOnDrag={[1, 2]}
             panOnScroll
             selectionKeyCode="Shift"
             multiSelectionKeyCode={["Meta", "Shift"]}
@@ -1647,6 +1893,59 @@ export default function WorkflowPage() {
               onPick={pickNodeType}
               onClose={() => setDrawer(null)}
             />
+          )}
+          {/* 框選了 2 步以上:浮出「只測這幾步」(像 n8n)——按住 Shift 拖曳框選節點 */}
+          {(() => {
+            const picked = nodes.filter((n) => n.selected).map((n) => n.id);
+            if (picked.length < 2 || activeRunStatus === "running" || activeRunStatus === "queued" || finishedSummary) return null;
+            return (
+              <div
+                className="absolute left-1/2 bottom-5 z-20 -translate-x-1/2 flex items-center gap-3 rounded-2xl px-5 py-2.5 text-sm max-w-[calc(100%-2rem)]"
+                style={{ background: "var(--menu-bg)", border: "1px solid var(--border-strong)", boxShadow: "var(--shadow-lg)", backdropFilter: "blur(18px)" }}
+              >
+                <span className="text-xs faint">已框選 {picked.length} 步(其餘步驟沿用最近結果或跳過)</span>
+                <label className="flex items-center gap-1 text-xs faint cursor-pointer select-none">
+                  <input type="checkbox" checked={watchPartial} onChange={(e) => setWatchPartial(e.target.checked)} />
+                  看畫面
+                </label>
+                {/* 預設「真的執行」(含寫入/發送)——使用者拍板:圈起來就是要執行到底;勾了才走只讀安全排練 */}
+                <label className="flex items-center gap-1 text-xs faint cursor-pointer select-none" title="勾了就只測試:不寫入、不發送、不動任何外部資料">
+                  <input type="checkbox" checked={partialTestOnly} onChange={(e) => setPartialTestOnly(e.target.checked)} />
+                  只測試,不更改資料
+                </label>
+                <button
+                  onClick={() => { flashToast(`▶ ${partialTestOnly ? "只測" : "執行"}選取的 ${picked.length} 步${watchPartial ? "" : "(背景執行,不開視窗)"}`); void run({}, watchPartial, { onlyNodeIds: picked }); }}
+                  disabled={starting}
+                  className="btn btn-primary text-xs"
+                >
+                  {partialTestOnly ? "▶ 只測這幾步" : "▶ 執行這幾步"}
+                </button>
+              </div>
+            );
+          })()}
+          {/* 執行結束的完成橫幅:成功綠/失敗紅+完整總結(哪些步驟為什麼沒跑都在裡面),✕ 關掉。
+              沒有這個的話執行結束畫布只有節點變色,使用者根本不知道「完成了沒」(真實抱怨)。 */}
+          {finishedSummary && activeRunStatus !== "running" && activeRunStatus !== "queued" && (
+            <div
+              className="absolute left-1/2 bottom-5 z-20 -translate-x-1/2 flex items-start gap-3 rounded-2xl px-5 py-3 text-sm max-w-[min(720px,calc(100%-2rem))]"
+              style={{
+                background: "var(--menu-bg)",
+                border: `1px solid ${finishedSummary.status === "success" ? "var(--green, #22c55e)" : finishedSummary.status === "failed" ? "var(--red)" : "var(--border-strong)"}`,
+                boxShadow: "var(--shadow-lg)",
+                backdropFilter: "blur(18px)",
+              }}
+            >
+              <span className="shrink-0 text-base leading-5">
+                {finishedSummary.status === "success" ? "✅" : finishedSummary.status === "failed" ? "❌" : "⏸"}
+              </span>
+              <div className="min-w-0">
+                <p className="font-medium text-xs mb-0.5">
+                  {finishedSummary.status === "success" ? "執行完成" : finishedSummary.status === "failed" ? "執行失敗" : "執行結束"}
+                </p>
+                <p className="text-xs faint whitespace-pre-wrap break-words max-h-32 overflow-y-auto">{finishedSummary.reason}</p>
+              </div>
+              <button onClick={() => setFinishedSummary(null)} className="faint hover:text-[var(--text)] shrink-0 text-xs leading-5">✕</button>
+            </div>
           )}
           {/* 執行中狀態列:跑到第幾步/正在跑哪一步,不用盯著節點顏色猜進度 */}
           {(activeRunStatus === "running" || activeRunStatus === "queued") && (() => {
@@ -1681,8 +1980,19 @@ export default function WorkflowPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none" style={{ background: "color-mix(in srgb, var(--accent) 14%, transparent)" }}>
           <div className="card px-8 py-6 text-center" style={{ borderColor: "var(--accent)", borderStyle: "dashed", borderWidth: 2, boxShadow: "var(--shadow-lg)" }}>
             <div className="text-3xl mb-2">📎</div>
-            <p className="text-sm font-medium">放開以加入檔案</p>
-            <p className="text-xs muted mt-1">圖片/文件會交給 AI 理解你的需求</p>
+            {/* 有節點面板開著時放開檔案會進「這個節點的微調」，不是整條流程對話——拖曳當下就要讓使用者
+                知道會進哪裡，不然明明對著某節點傳截圖，卻搞不清楚它到底附去哪了。 */}
+            {selNode ? (
+              <>
+                <p className="text-sm font-medium">放開以附加到「{selNode.label}」這一步</p>
+                <p className="text-xs muted mt-1">只給這個節點看，不會送進整條流程的對話</p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm font-medium">放開以加入檔案</p>
+                <p className="text-xs muted mt-1">圖片/文件會交給 AI 理解你的需求</p>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -1734,8 +2044,8 @@ export default function WorkflowPage() {
               <div className="border-t p-4 shrink-0 space-y-3">
                 {autoTest.ok ? (
                   <div className="flex items-center gap-2">
-                    <span className="text-sm" style={{ color: "var(--green)" }}>這條流程已經測到會跑了！</span>
-                    <button onClick={() => { closeAutoTest(id); promote(); }} className="btn btn-ghost ml-auto" style={{ color: "var(--green)" }}>設為正式</button>
+                    <span className="text-sm" style={{ color: autoTest.canPromote ? "var(--green)" : "var(--amber)" }}>{autoTest.canPromote ? "已用真實資料完成只讀驗證！" : "流程接線通過，仍需要真實資料驗證。"}</span>
+                    {autoTest.canPromote && <button onClick={() => { closeAutoTest(id); promote(); }} className="btn btn-ghost ml-auto" style={{ color: "var(--green)" }}>設為正式</button>}
                     <button onClick={() => closeAutoTest(id)} className="btn btn-ghost">關閉</button>
                   </div>
                 ) : (
@@ -1792,11 +2102,25 @@ export default function WorkflowPage() {
             run={selRun}
             explainStep={explainData?.steps.find((s) => s.id === selNode.id) ?? null}
             readonly={wf.builtin}
-            onClose={() => setSelectedNode(null)}
+            onClose={() => selectNode(null)}
             onChanged={load}
             onToast={flashToast}
             onRename={(name) => renameNode(selNode.id, name)}
             onDraftChange={trackNodeDraft}
+            onRunFromHere={() => { flashToast(`▶ 從「${selNode.label}」開始${partialTestOnly ? "測" : "執行"}(前面的步驟不重跑${watchPartial ? "" : "、背景執行"})`); void run({}, watchPartial, { startAtNodeId: selNode.id }); }}
+            failureResolution={runResolution?.failedNode === selNode.id ? runResolution.resolution : null}
+            failureReason={runResolution?.failedNode === selNode.id ? runResolution.reason : null}
+            onRunOnlyThis={() => { flashToast(`▶ 只${partialTestOnly ? "測" : "執行"}「${selNode.label}」這一步${watchPartial ? "" : "(背景執行,不開視窗)"}`); void run({}, watchPartial, { onlyNodeIds: [selNode.id] }); }}
+            watchRun={watchPartial}
+            onWatchRunChange={setWatchPartial}
+            testOnly={partialTestOnly}
+            onTestOnlyChange={setPartialTestOnly}
+            missingSecrets={(wf.requiresSecrets ?? []).filter((f) => !secretsSet[f.key])}
+            attachParts={nodeAttachParts}
+            onAttachPartsChange={setNodeAttachParts}
+            onAttachFiles={processFilesForNode}
+            instruction={nodeInstruction}
+            onInstructionChange={setNodeInstruction}
           />
         ) : showHistory ? (
           <HistoryPanel
@@ -1804,7 +2128,7 @@ export default function WorkflowPage() {
             nodeLabels={Object.fromEntries(wf.nodes.map((n) => [n.id, n.label]))}
             focusRunId={focusedHistoryRun}
             onClose={() => setShowHistory(false)}
-            onPickFailedNode={(nodeId, runId) => { setShowHistory(false); loadHistoricalRunNode(runId); setSelectedNode(nodeId); }}
+            onPickFailedNode={(nodeId, runId) => { setShowHistory(false); loadHistoricalRunNode(runId); selectNode(nodeId); }}
             onResume={async (runId) => {
               // 從失敗那步續跑：成功回 null 並讓畫布開始追蹤這次執行；失敗回錯誤訊息給紀錄卡顯示
               try {
@@ -1824,7 +2148,7 @@ export default function WorkflowPage() {
         ) : showSchedule ? (
           <SchedulePanel workflowId={id} onClose={() => setShowSchedule(false)} />
         ) : showExplain ? (
-          <ExplainPanel workflowId={id} onClose={() => setShowExplain(false)} onPickNode={(nodeId) => { setShowExplain(false); setSelectedNode(nodeId); }} />
+          <ExplainPanel workflowId={id} onClose={() => setShowExplain(false)} onPickNode={(nodeId) => { setShowExplain(false); selectNode(nodeId); }} />
         ) : showVersions ? (
           <VersionsPanel workflowId={id} onClose={() => setShowVersions(false)} onRestored={() => { setShowVersions(false); setNodeRuns({}); setActiveRunId(null); load(); }} />
         ) : (
@@ -1842,7 +2166,14 @@ export default function WorkflowPage() {
               )}
             </div>
             {/* overflow-x-hidden:最後一道防線——就算某個氣泡/膠囊還是偏寬,也絕不讓整欄橫向捲動/溢出 */}
-            <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-3 text-sm">
+            <div ref={chatScrollCallbackRef} className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-3 text-sm">
+              {wf.copyHandoff && chat.length === 0 && (
+                <div className="card p-3 text-xs leading-relaxed" style={{ borderColor: "color-mix(in srgb, var(--accent) 35%, var(--border))" }}>
+                  <p className="font-medium mb-1">已承接「{wf.copyHandoff.sourceName}」的流程脈絡</p>
+                  <p className="muted">{plainLanguage(wf.copyHandoff.summary)}</p>
+                  <p className="faint mt-2">沒有複製：對話全文、帳密、登入狀態、一次性檔案與執行紀錄。需要私有資料時，請在這份副本重新手動登入或附檔。</p>
+                </div>
+              )}
               {chat.length === 0 && (
                 <div className="pt-6 px-1 space-y-4">
                   <div className="text-center space-y-1.5">
@@ -1874,7 +2205,7 @@ export default function WorkflowPage() {
                     ))}
                   </div>
                   <p className="text-[11px] leading-relaxed faint px-1">
-                    📎 也可以直接拖檔案進來、⌘V 貼截圖、或貼網址——文件、試算表、簡報、程式碼、壓縮檔、Email 與照片都會讀取實際內容和邏輯，不只看檔名或截圖。
+                    📎 也可以直接拖檔案進來、⌘V 貼截圖、或貼網址——文件、試算表、簡報、程式碼、壓縮檔、Email 與照片都會讀取實際內容和邏輯，不只看檔名或截圖。更新 Google 簡報連結圖表時，會直接使用官方功能，不會先卡在讀取私人文件。
                   </p>
                 </div>
               )}
@@ -1902,6 +2233,8 @@ export default function WorkflowPage() {
                         <p key={j} className="text-xs faint break-all">🖼 {p.name ?? "圖片"}（送出時會重新載入）</p>
                       ) : p.kind === "sheet-script" ? (
                         <SheetScriptCard key={j} nodeLabels={p.nodeLabels} />
+                      ) : p.kind === "slides-oauth-setup" ? (
+                        <SlidesOAuthSetupCard key={j} nodeLabels={p.nodeLabels} />
                       ) : (
                         // 附上的常是長網址：break-all 讓它一定斷得掉，不跟著撐爆氣泡
                         <p key={j} className="text-xs faint break-all">📄 {p.name}</p>
@@ -1963,7 +2296,11 @@ export default function WorkflowPage() {
                     )}
                     {activeExecution.status === "failed" && (
                       <>
-                        <button type="button" className="btn btn-primary text-xs" onClick={() => startAutoTest(id, undefined, { source: "chat" })}>🛠 讓 AI 修到會跑</button>
+                        {activeExecution.resolution === "needs-human" ? (
+                          <p className="text-xs muted leading-relaxed">這一步缺少只有你手上才有的資料或授權；先依上方提示補好再試，AI 不會假裝能替你猜出來。</p>
+                        ) : (
+                          <button type="button" className="btn btn-primary text-xs" onClick={() => startAutoTest(id, undefined, { source: "chat" })}>🛠 讓 AI 安全修復並測試</button>
+                        )}
                         <button type="button" className="btn btn-ghost text-xs" onClick={() => retryChatExecution(id)}>
                           {activeExecution.mode === "preview" ? "以只讀模式從失敗處再試" : "從失敗處再試"}
                         </button>

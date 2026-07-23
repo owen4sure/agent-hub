@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { PageHeader, EmptyState, formatDate, humanizeCron } from "@/components/ui";
+import { PageHeader, EmptyState, formatScheduleNextRun, humanizeCron } from "@/components/ui";
 import { SCHEDULE_MODES, WEEKDAY_NAMES, buildCron, parseCron, timeValid, type ScheduleForm } from "@/lib/cron";
 
 interface ScheduleRow { id: string; workflowId: string; workflowName: string; enabled: number; cron: string; nextRunAt: string | null; orphan: boolean }
@@ -142,7 +142,7 @@ export default function SchedulesPage() {
                     : <Link href={`/workflows/${s.workflowId}`} className="text-sm font-medium hover:underline truncate">{s.workflowName}</Link>}
                   {!s.enabled && <span className="badge badge-neutral">已暫停</span>}
                 </div>
-                <div className="text-xs muted mt-0.5">{humanizeCron(s.cron)}{s.nextRunAt && s.enabled && <span className="faint"> · 下次 {formatDate(s.nextRunAt)}</span>}</div>
+                <div className="text-xs muted mt-0.5">{humanizeCron(s.cron)}{s.nextRunAt && s.enabled && <span className="faint"> · 下次 {formatScheduleNextRun(s.nextRunAt)}</span>}</div>
               </div>
               {!s.orphan && (
                 <button onClick={() => runNow(s.workflowId)} disabled={running[s.workflowId]} className="btn btn-ghost text-xs shrink-0" title="需要填資料時會先帶你到執行設定">{running[s.workflowId] ? "已開始" : workflows.find((w) => w.id === s.workflowId)?.needsRunInput ? "填資料執行" : "▶ 立即執行"}</button>

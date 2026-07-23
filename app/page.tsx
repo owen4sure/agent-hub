@@ -42,6 +42,8 @@ interface FixProposal {
   nodeLabel: string;
   error: string | null;
   createdAt: string;
+  /** 整圖感知修復除了主要節點外，還一併改了幾個節點——套用時會一起套 */
+  extraCount: number;
 }
 
 export default function HomePage() {
@@ -56,7 +58,7 @@ export default function HomePage() {
   const [dismissedFailures, setDismissedFailures] = useState<string[]>([]);
   const [proposals, setProposals] = useState<FixProposal[]>([]);
   const [applying, setApplying] = useState<Record<string, boolean>>({});
-  const [applyResult, setApplyResult] = useState<Record<string, { ok: boolean; error?: string }>>({});
+  const [applyResult, setApplyResult] = useState<Record<string, { ok: boolean; error?: string; skippedExtras?: string[] }>>({});
 
   async function loadProposals() {
     try { setProposals((await (await fetch("/api/fix-proposals")).json()).proposals ?? []); } catch {}
@@ -94,7 +96,7 @@ export default function HomePage() {
     setApplying((a) => ({ ...a, [id]: true }));
     try {
       const res = await (await fetch(`/api/fix-proposals/${id}/apply`, { method: "POST" })).json();
-      setApplyResult((r) => ({ ...r, [id]: { ok: !!res.ok, error: res.error } }));
+      setApplyResult((r) => ({ ...r, [id]: { ok: !!res.ok, error: res.error, skippedExtras: res.skippedExtras } }));
       if (res.ok) {
         setProposals((ps) => ps.filter((p) => p.id !== id));
         load();
@@ -250,12 +252,41 @@ export default function HomePage() {
     }
   }
 
+  // ── 拖曳排序(Owen:「不能自己排順序」)：抓卡片右上的 ⠿ 拖到另一張卡上放開，
+  // 順序存伺服器(settings)，重整/換裝置都一致。樂觀更新:先動畫面再送後端,失敗就重載回真實順序。 ──
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  async function handleDrop(targetId: string) {
+    const sourceId = dragId;
+    setDragId(null);
+    setDropTargetId(null);
+    if (!sourceId || sourceId === targetId || !workflows) return;
+    const ids = workflows.filter((w) => w.status === "official").map((w) => w.id);
+    const from = ids.indexOf(sourceId);
+    const to = ids.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    ids.splice(from, 1);
+    ids.splice(to, 0, sourceId);
+    const rank = new Map(ids.map((wfId, i) => [wfId, i]));
+    setWorkflows((ws) => ws && [...ws].sort((a, b) => (rank.get(a.id) ?? 9999) - (rank.get(b.id) ?? 9999)));
+    try {
+      const res = await fetch("/api/workflows/reorder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      if (!res.ok) throw new Error();
+    } catch {
+      load(); // 存失敗就撤回樂觀更新，畫面回到伺服器的真實順序
+    }
+  }
+
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-8 py-6 sm:py-8">
       <PageHeader
-        title="Workflows"
-        subtitle="用白話跟 AI 建立自動化流程，一鍵執行與監控"
-        actions={<button onClick={createNew} disabled={creating} className="btn btn-primary">{creating ? "建立中…" : "＋ 新建 workflow"}</button>}
+        title="我的流程"
+        subtitle="用白話跟 AI 建立、測試和執行工作流程"
+        actions={<button onClick={createNew} disabled={creating} className="btn btn-primary">{creating ? "建立中…" : "＋ 建立新流程"}</button>}
       />
       {loadError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>載入失敗，請確認伺服器是否正常，<button onClick={load} className="underline">重試</button>。</div>}
       {createError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>建立失敗，請確認伺服器是否正常後再試一次。</div>}
@@ -264,11 +295,11 @@ export default function HomePage() {
       {health && (!health.ok || (health.missingSecretKeys?.length ?? 0) > 0 || !health.modelApiConfigured) && (
         <div className="card px-4 py-3 mb-5 text-sm space-y-1.5" style={{ borderColor: health.ok ? "var(--amber)" : "var(--red)" }}>
           <p className="font-medium" style={{ color: health.ok ? "var(--amber)" : "var(--red)" }}>🩺 上線準備檢查</p>
-          {(health.failedComponents?.length ?? 0) > 0 && <p>有 {health.failedComponents!.length} 個背景服務沒有正常啟動；排程或監聽可能不會觸發。請重新啟動 Agent Hub，仍出現就查看終端機錯誤。</p>}
+          {(health.failedComponents?.length ?? 0) > 0 && <p>有 {health.failedComponents!.length} 個背景功能沒有正常啟動；自動執行可能暫時不會發生。請重新開啟 Agent Hub；仍出現的話，把這段提示截圖傳給 AI 協助處理。</p>}
           {(health.invalidWorkflows?.length ?? 0) > 0 && <p>有 {health.invalidWorkflows!.length} 條流程結構不完整，已禁止執行以避免做錯事；請打開流程讓 AI 修正。</p>}
           {(health.workflowFileIssues?.length ?? 0) > 0 && <p>有 {health.workflowFileIssues!.length} 份流程檔案損毀或格式不完整，系統已隔離以免整站故障；請從該流程的版本備份還原。</p>}
-          {health.dataPermissionsPrivate === false && <p>本機資料權限過寬，其他 OS 帳號可能讀到執行資料；請執行 <code>npm run doctor</code> 自動修正。</p>}
-          {!health.modelApiConfigured && <p>尚未設定模型 API Key；若流程沒有選用本機 Claude Code，建圖與 AI 節點會無法使用。 <Link href="/settings" className="underline">前往設定</Link></p>}
+          {health.dataPermissionsPrivate === false && <p>這台電腦的資料保護設定不完整，其他登入這台電腦的人可能看得到流程資料。請先不要輸入帳密，並把這段提示截圖交給協助你安裝的人處理。</p>}
+          {!health.modelApiConfigured && <p>AI 服務尚未連上，所以目前不能建立或修正流程。 <Link href="/settings" className="underline">前往設定</Link>，依頁面說明貼上服務提供者給你的金鑰即可。</p>}
           {(health.missingSecretKeys?.length ?? 0) > 0 && <p>正式流程仍缺 {health.missingSecretKeys!.length} 個需要的帳密欄位。 <Link href="/settings" className="underline">補齊帳密</Link></p>}
         </div>
       )}
@@ -313,7 +344,7 @@ export default function HomePage() {
               <div className="flex items-start gap-2 text-sm flex-wrap sm:flex-nowrap">
                 <div className="min-w-0 flex-1">
                   <Link href={`/workflows/${p.workflowId}`} className="font-medium hover:underline">{p.workflowName}</Link>
-                  <span className="faint"> · 「{p.nodeLabel}」這步 · {formatDate(p.createdAt)}</span>
+                  <span className="faint"> · 「{p.nodeLabel}」這步{p.extraCount > 0 ? `(連同其他 ${p.extraCount} 步一併調整)` : ""} · {formatDate(p.createdAt)}</span>
                   {p.error && <p className="text-xs muted mt-0.5 line-clamp-2">{p.error}</p>}
                 </div>
                 <button onClick={() => applyProposal(p.id)} disabled={applying[p.id]} className="btn btn-primary text-xs shrink-0">
@@ -324,6 +355,7 @@ export default function HomePage() {
               {applyResult[p.id] && (
                 <p className="text-xs" style={{ color: applyResult[p.id].ok ? "var(--green)" : "var(--red)" }}>
                   {applyResult[p.id].ok ? "✅ 套用後重跑成功！" : `⚠️ 套用後重跑還是失敗：${applyResult[p.id].error ?? ""}`}
+                  {applyResult[p.id].skippedExtras?.length ? `（另外 ${applyResult[p.id].skippedExtras!.join("、")} 因為之後又被改過，沒有套用）` : ""}
                 </p>
               )}
             </div>
@@ -396,7 +428,7 @@ export default function HomePage() {
         const showHeader = groups.length > 0 || title !== "未分組";
         const collapsed = showHeader && collapsedGroups.has(title);
         return (
-        <div key={title} className="mb-8">
+        <div key={title} className="mb-6">
           {showHeader && (
             <button
               onClick={() => toggleGroupCollapsed(title)}
@@ -409,45 +441,67 @@ export default function HomePage() {
             </button>
           )}
           {!collapsed && (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {items.map((w, i) => (
-          <article key={w.id} className="card card-hover card-glow p-5 relative rise-in" style={{ animationDelay: `${Math.min(i, 8) * 45}ms` }}>
+          <article
+            key={w.id}
+            className="card card-hover p-3.5 relative rise-in"
+            style={{
+              animationDelay: `${Math.min(i, 8) * 45}ms`,
+              ...(dropTargetId === w.id && dragId !== w.id ? { outline: "2px dashed var(--accent)", outlineOffset: "2px" } : {}),
+              ...(dragId === w.id ? { opacity: 0.4 } : {}),
+            }}
+            onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTargetId(w.id); } }}
+            onDragLeave={() => { if (dropTargetId === w.id) setDropTargetId(null); }}
+            onDrop={(e) => { e.preventDefault(); handleDrop(w.id); }}
+          >
             <Link href={`/workflows/${w.id}`} className="absolute inset-0 rounded-[var(--radius-md)] z-0" aria-label={`開啟流程：${w.name}`} />
-            <div className="flex items-start gap-3 mb-2 relative z-[1] pointer-events-none">
-              <span
-                className="grid place-items-center w-9 h-9 rounded-lg text-base shrink-0"
-                style={{ background: "var(--accent-soft)", border: "1px solid color-mix(in srgb, var(--accent) 22%, transparent)" }}
-              >
-                ◈
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="font-medium tracking-tight truncate">{w.name}</span>
-                  {w.builtin && <span className="badge badge-neutral shrink-0">內建範例</span>}
-                </div>
-                <p className="text-xs faint mt-0.5 flex items-center gap-1.5">
-                  <span>{w.nodeCount} 個步驟</span>
-                  {w.triggers?.schedule && <span title="有啟用的排程，時間到自動執行">⏰ 排程</span>}
-                  {w.triggers?.watch && <span title="正在監聽資料夾，新檔案會自動觸發">📁 監聽</span>}
-                  {w.triggers?.webhook && <span title="Webhook 已啟用，外部工具可觸發">🔗 Webhook</span>}
-                  {w.triggers?.email && <span title="收信觸發已開啟，符合條件的新 email 會自動觸發">📨 收信</span>}
-                  {w.triggers?.telegram && <span title="Telegram 訊息觸發已開啟，傳訊息給 bot 就自動執行">✈️ Telegram</span>}
-                  {w.triggers?.line && <span title="LINE 訊息觸發已啟用，傳訊息給官方帳號就自動執行">💬 LINE</span>}
-                </p>
-              </div>
-              {!w.builtin && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); setGroupMenuFor((cur) => (cur === w.id ? null : w.id)); }}
-                  className="faint hover:text-[var(--text)] text-sm shrink-0 w-8 h-8 grid place-items-center rounded-lg pointer-events-auto relative z-10 focus-visible:outline-2 focus-visible:outline-offset-2"
-                  title="移到群組(工作/私人…)"
-                  aria-label="移到群組"
+            <div className="flex items-center gap-2 relative z-[1] pointer-events-none">
+              <span className="text-sm font-medium tracking-tight truncate">{w.name}</span>
+              {w.builtin && <span className="badge badge-neutral shrink-0">內建範例</span>}
+              <span className="ml-auto flex items-center shrink-0 pointer-events-auto relative z-10">
+                <span
+                  draggable
+                  onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDragId(w.id); }}
+                  onDragEnd={() => { setDragId(null); setDropTargetId(null); }}
+                  className="faint hover:text-[var(--text)] text-sm w-7 h-7 grid place-items-center rounded-md cursor-grab active:cursor-grabbing select-none"
+                  title="拖到另一張卡片上調整順序"
+                  aria-label="拖曳排序"
                 >
-                  🗂
-                </button>
-              )}
+                  ⠿
+                </span>
+                {!w.builtin && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setGroupMenuFor((cur) => (cur === w.id ? null : w.id)); }}
+                    className="faint hover:text-[var(--text)] text-sm w-7 h-7 grid place-items-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-2"
+                    title="移到群組(工作/私人…)"
+                    aria-label="移到群組"
+                  >
+                    🗂
+                  </button>
+                )}
+              </span>
             </div>
+            <p className="text-[11px] faint mt-0.5 flex items-center gap-1.5 relative z-[1] pointer-events-none">
+              <span>{w.nodeCount} 步</span>
+              {w.triggers?.schedule && <span title="有啟用的排程，時間到自動執行">⏰</span>}
+              {w.triggers?.watch && <span title="正在監聽資料夾，新檔案會自動觸發">📁</span>}
+              {w.triggers?.webhook && <span title="Webhook 已啟用，外部工具可觸發">🔗</span>}
+              {w.triggers?.email && <span title="收信觸發已開啟，符合條件的新 email 會自動觸發">📨</span>}
+              {w.triggers?.telegram && <span title="Telegram 訊息觸發已開啟，傳訊息給 bot 就自動執行">✈️</span>}
+              {w.triggers?.line && <span title="LINE 訊息觸發已啟用，傳訊息給官方帳號就自動執行">💬</span>}
+              <span className="mx-0.5">·</span>
+              {w.lastRun ? (
+                <span className="flex items-center gap-1" style={{ color: w.lastRun.status === "failed" ? "var(--red)" : w.lastRun.status === "success" ? "var(--green)" : "var(--text-faint)" }}>
+                  <StatusDot status={w.lastRun.status} size={5} />
+                  {statusLabel(w.lastRun.status)} {formatDate(w.lastRun.started_at)}
+                </span>
+              ) : (
+                <span>還沒執行過</span>
+              )}
+            </p>
             {groupMenuFor === w.id && (
-              <div className="menu absolute right-3 top-12 z-30" onClick={(e) => e.stopPropagation()}>
+              <div className="menu absolute right-3 top-10 z-30" onClick={(e) => e.stopPropagation()}>
                 <p className="text-[11px] faint px-2.5 pt-1.5 pb-1">移到群組</p>
                 {groups.map((g) => (
                   <button key={g} className="menu-item" onClick={() => assignGroup(w.id, g)}>
@@ -477,19 +531,11 @@ export default function HomePage() {
                 </div>
               </div>
             )}
-            <p className="text-sm muted line-clamp-2 min-h-[2.5rem] relative z-[1] pointer-events-none">{w.description || <span className="faint italic">點進去跟 AI 對話，說明會自動補上 ✨</span>}</p>
-            <div className="flex items-center gap-2 mt-4 pt-3 border-t text-xs relative z-[1] pointer-events-none">
-              {w.lastRun ? (
-                <span className="flex items-center gap-1.5" style={{ color: w.lastRun.status === "failed" ? "var(--red)" : w.lastRun.status === "success" ? "var(--green)" : "var(--text-faint)" }}>
-                  <StatusDot status={w.lastRun.status} size={6} />
-                  {statusLabel(w.lastRun.status)} · {formatDate(w.lastRun.started_at)}
-                </span>
-              ) : (
-                <span className="faint">還沒執行過</span>
-              )}
-              <button onClick={(e) => runNow(e, w)} disabled={running[w.id]} title={w.needsRunInput ? "先填這次執行需要的資料" : "用預設參數立即執行"} className="btn btn-ghost text-xs ml-auto shrink-0 pointer-events-auto relative z-10">{running[w.id] ? "啟動中…" : w.needsRunInput ? "填資料執行" : "▶ 執行"}</button>
+            <div className="flex items-end gap-2 mt-1.5 relative z-[1] pointer-events-none">
+              <p className="text-xs muted line-clamp-1 flex-1 min-w-0">{w.description || <span className="faint italic">點進去跟 AI 對話，說明會自動補上 ✨</span>}</p>
+              <button onClick={(e) => runNow(e, w)} disabled={running[w.id]} title={w.needsRunInput ? "先填這次執行需要的資料" : "用預設參數立即執行"} className="btn btn-ghost text-xs shrink-0 pointer-events-auto relative z-10 py-0.5">{running[w.id] ? "啟動中…" : w.needsRunInput ? "填資料執行" : "▶ 執行"}</button>
             </div>
-            {runErrors[w.id] && <p className="text-xs mt-2 relative z-[1]" style={{ color: "var(--red)" }}>{runErrors[w.id]}</p>}
+            {runErrors[w.id] && <p className="text-xs mt-1.5 relative z-[1]" style={{ color: "var(--red)" }}>{runErrors[w.id]}</p>}
           </article>
             ))}
           </div>

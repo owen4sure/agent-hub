@@ -1,6 +1,6 @@
 import type { NodeDefinition } from "../types";
 import { PermanentError, RetryableError } from "../types";
-import { cfgStr, makeClient, resolveTemplate } from "../nodeHelpers";
+import { assertNoUnresolvedVars, cfgStr, makeClient, resolveTemplate } from "../nodeHelpers";
 import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../../claudeCodeClient";
 import { callAIWithRetry } from "../../aiRetry";
 import { fetchWithUrlGuard } from "../../urlGuard";
@@ -136,7 +136,7 @@ export const ifConditionNode: NodeDefinition = {
   type: "if-condition",
   category: "logic",
   label: "條件判斷",
-  description: "依條件決定走 true 或 false 分支。例如「如果找到的資料筆數大於 0」。下游連線的 fromPort 標 true/false。",
+  description: "依條件決定走 true 或 false 分支。例如「如果找到的資料筆數大於 0」。下游連線的「fromPort」標 true/false。",
   icon: "🔀",
   outputs: "result(條件是否成立)；成立走「是」的連線,不成立走「否」",
   configSchema: [
@@ -149,6 +149,10 @@ export const ifConditionNode: NodeDefinition = {
     const left = cfgStr(ctx, "left");
     const op = cfgStr(ctx, "op", "==");
     const right = cfgStr(ctx, "right");
+    // 比較值沒解析到=必然走錯分支(字面 "{{count}}" 跟任何門檻比都是垃圾結果)，老實失敗(同 switch)。
+    // 查的是「left」/「right」欄位本身的原始字串，不是解析完的值——避免上游資料剛好含字面 {{...}} 的誤判。
+    assertNoUnresolvedVars(ctx, "left", "條件判斷「左值」");
+    assertNoUnresolvedVars(ctx, "right", "條件判斷「右值」");
     let result = false;
     // 大小比較的三段規則(迴圈工程：垃圾值要老實失敗，不能靜默走錯分支)：
     // ①先把「含逗號/貨幣符號的數字」正規化(1,234 / $50 → 1234 / 50)，兩邊都是有限數字→數值比較。

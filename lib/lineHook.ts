@@ -64,6 +64,10 @@ export interface LineTextEvent {
   message: string;
   userId: string;
   replyToken: string;
+  /** 訊息來源型別：user(1對1) / group(群組) / room(多人聊天室) */
+  sourceType: string;
+  /** 群組訊息才有值(C 開頭那串)；把官方帳號加進群組、群組裡傳一句話，run 紀錄就看得到 */
+  groupId: string;
 }
 
 /** 純函式：從 LINE webhook payload 抽出文字訊息事件(其他事件型別——貼圖/加好友/已讀——一律略過) */
@@ -75,7 +79,7 @@ export function extractLineTextEvents(payload: unknown): LineTextEvent[] {
     const e = ev as {
       type?: string;
       replyToken?: string;
-      source?: { userId?: string };
+      source?: { type?: string; userId?: string; groupId?: string; roomId?: string };
       message?: { type?: string; text?: string };
     };
     if (e?.type !== "message" || e.message?.type !== "text" || !e.message.text) continue;
@@ -83,6 +87,9 @@ export function extractLineTextEvents(payload: unknown): LineTextEvent[] {
       message: e.message.text,
       userId: e.source?.userId ?? "",
       replyToken: e.replyToken ?? "",
+      sourceType: e.source?.type ?? "user",
+      // room(多人聊天室)沒有 groupId、只有 roomId——push 目標同樣吃 roomId，統一放同一欄
+      groupId: e.source?.groupId ?? e.source?.roomId ?? "",
     });
   }
   return out;

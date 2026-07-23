@@ -4,7 +4,7 @@ import fs from "node:fs";
 import ExcelJS from "exceljs";
 import type { NodeDefinition } from "../types";
 import { PermanentError } from "../types";
-import { cfgStr, cfgNum } from "../nodeHelpers";
+import { cfgStr, cfgNum, cfgBool } from "../nodeHelpers";
 
 /** 把日期欄的值正規化成 YYYYMMDD 數字(吃 20260701 數字、Date 物件、"2026-07-01"/"2026/7/1" 字串)；不是日期回 0 */
 function toYYYYMMDD(v: unknown): number {
@@ -100,6 +100,7 @@ export const excelProcessNode: NodeDefinition = {
     { key: "highlightColumn", label: "要 highlight 的欄(標題文字)", type: "text", default: "已完成" },
     { key: "highlight", label: "Highlight 顏色(hex)", type: "text", default: "FFC000" },
     { key: "outputName", label: "輸出檔名(不含.xlsx)", type: "text", default: "output" },
+    { key: "allowEmptyResult", label: "篩選結果 0 筆時仍正常完成(不當失敗)", type: "boolean", default: "false", help: "適用於固定週期結算(如每季結算)本來就可能剛好那期沒有資料的情境；預設關閉，0 筆會照常視為失敗提醒你可能選錯日期或來源檔" },
   ],
   outputs: "outputPath(產出檔路徑), filename(檔名), rowCount(筆數)",
   retryable: false,
@@ -152,7 +153,29 @@ export const excelProcessNode: NodeDefinition = {
     }
     const dataCount = srcRowIndexes.length - 1;
     ctx.log(`篩選日期區間 ${startNum} ~ ${endNum}，共 ${dataCount} 筆符合`);
-    if (dataCount === 0) throw new PermanentError("篩選區間內沒有資料，請確認日期區間或來源檔");
+    if (dataCount === 0) {
+      if (!cfgBool(ctx, "allowEmptyResult")) {
+        throw new PermanentError("篩選區間內沒有資料，請確認日期區間或來源檔");
+      }
+      ctx.log("篩選結果 0 筆，但這個節點已設定「0 筆時仍正常完成」，繼續產出只有標題列的檔案");
+    }
+
+    // 只讀驗證到此為止——上面對來源檔的讀取、找欄位、日期篩選全部是真的跑過，足以證明邏輯正確；
+    // 但這個節點的本質是「產出一份新檔案」，往下會真的寫進 ctx.outputDir、還會真的複製一份到
+    // 使用者實際的桌面(os.homedir()/Desktop)。之前完全沒有這個判斷，安全試跑會真的在使用者桌面
+    // 留下一個檔案——這正是「安全試跑不會改你的東西」這個承諾要擋的事，親自跑過一次才抓到。
+    if (ctx.dryRun) {
+      ctx.log(`只讀驗證：已確認要 highlight「${highlightColumnName}」欄、共 ${dataCount} 筆符合日期區間，不會真的寫出檔案或複製到桌面`);
+      return {
+        output: {
+          outputPath: "",
+          desktopPath: null,
+          rowCount: dataCount,
+          filename: `${outputName}.xlsx`,
+          validationOnly: true,
+        },
+      };
+    }
 
     const outWb = new ExcelJS.Workbook();
     const outSheet = outWb.addWorksheet("工作表1");
