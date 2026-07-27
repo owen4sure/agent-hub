@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { MODELS, KNOWN_WORKING_MODELS, DEFAULT_MODEL, supportsVision, supportsCaptchaVision } from "@/lib/models";
 import { isClaudeCodeModel } from "@/lib/claudeCodeShared";
 import { PageHeader } from "@/components/ui";
+import { RevealCopyButton } from "./RevealCopyButton";
 
 interface SecretField { key: string; label: string; type: string; }
 /** 跨所有 workflow 去重後的一個共用帳密欄位 + 有哪些 workflow 用到它 */
@@ -236,6 +237,7 @@ export default function SettingsPage() {
             placeholder={hasApiKey ? "••••••••（已設定，留空不變）" : ""}
             className="input mt-1"
           />
+          {hasApiKey && <RevealCopyButton endpoint="/api/settings/reveal" />}
         </label>
         <div className="flex items-center gap-2">
           <button onClick={saveGlobal} className="btn btn-primary">儲存</button>
@@ -347,6 +349,7 @@ export default function SettingsPage() {
                   onChange={(e) => setSecretInputs((prev) => ({ ...prev, [field.key]: e.target.value }))}
                   className="input mt-1"
                 />
+                {secretsSet[field.key] && <RevealCopyButton endpoint={`/api/secrets/reveal?key=${encodeURIComponent(field.key)}`} />}
                 <span className="text-xs faint">用於：{field.usedBy.join("、")}</span>
               </label>
             ))}
@@ -383,11 +386,13 @@ export default function SettingsPage() {
             <span className="muted">Bot Token {secretsSet.telegramBotToken && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
             <input type="password" className="input mt-1" placeholder={secretsSet.telegramBotToken ? "••••••••（已設定，留空不變）" : "貼上 BotFather 給你的 token"}
               value={notifyInputs.telegramBotToken ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, telegramBotToken: e.target.value }))} />
+            {secretsSet.telegramBotToken && <RevealCopyButton endpoint="/api/secrets/reveal?key=telegramBotToken" />}
           </label>
           <label className="block text-sm">
             <span className="muted">Chat ID {secretsSet.telegramChatId && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
             <input type="text" className="input mt-1" placeholder={secretsSet.telegramChatId ? "（已設定，留空不變）" : "不用手填，按下面的「自動偵測」"}
               value={notifyInputs.telegramChatId ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, telegramChatId: e.target.value }))} />
+            {secretsSet.telegramChatId && <RevealCopyButton endpoint="/api/secrets/reveal?key=telegramChatId" />}
           </label>
           <div className="flex items-center gap-2 flex-wrap">
             <button className="btn btn-ghost" disabled={notifyBusy !== null}
@@ -419,16 +424,19 @@ export default function SettingsPage() {
             <span className="muted">Channel Access Token {secretsSet.lineChannelAccessToken && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
             <input type="password" className="input mt-1" placeholder={secretsSet.lineChannelAccessToken ? "••••••••（已設定，留空不變）" : "貼上 Issue 出來的 token"}
               value={notifyInputs.lineChannelAccessToken ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, lineChannelAccessToken: e.target.value }))} />
+            {secretsSet.lineChannelAccessToken && <RevealCopyButton endpoint="/api/secrets/reveal?key=lineChannelAccessToken" />}
           </label>
           <label className="block text-sm">
             <span className="muted">你的 User ID {secretsSet.lineUserId && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
             <input type="text" className="input mt-1" placeholder={secretsSet.lineUserId ? "（已設定，留空不變）" : "Basic settings 最下面的 Your user ID(U 開頭)"}
               value={notifyInputs.lineUserId ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, lineUserId: e.target.value }))} />
+            {secretsSet.lineUserId && <RevealCopyButton endpoint="/api/secrets/reveal?key=lineUserId" />}
           </label>
           <label className="block text-sm">
             <span className="muted">Channel Secret(選填，「LINE 訊息觸發」才需要) {secretsSet.lineChannelSecret && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
             <input type="password" className="input mt-1" placeholder={secretsSet.lineChannelSecret ? "••••••••（已設定，留空不變）" : "Basic settings 分頁的 Channel secret"}
               value={notifyInputs.lineChannelSecret ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, lineChannelSecret: e.target.value }))} />
+            {secretsSet.lineChannelSecret && <RevealCopyButton endpoint="/api/secrets/reveal?key=lineChannelSecret" />}
             <span className="text-xs faint block mt-1">發通知用不到它；想讓「傳 LINE 給官方帳號就觸發流程」動起來才要填(驗 webhook 簽章用)。</span>
           </label>
           <div className="flex items-center gap-2">
@@ -454,6 +462,7 @@ export default function SettingsPage() {
             <span className="muted">Incoming Webhook 網址 {secretsSet.slackWebhookUrl && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
             <input type="password" className="input mt-1" placeholder={secretsSet.slackWebhookUrl ? "••••••••（已設定，留空不變）" : "https://hooks.slack.com/services/…"}
               value={notifyInputs.slackWebhookUrl ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, slackWebhookUrl: e.target.value }))} />
+            {secretsSet.slackWebhookUrl && <RevealCopyButton endpoint="/api/secrets/reveal?key=slackWebhookUrl" />}
           </label>
           <div className="flex items-center gap-2">
             <button className="btn btn-primary" disabled={notifyBusy !== null}
@@ -481,22 +490,26 @@ export default function SettingsPage() {
               <span className="muted">SMTP 主機 {secretsSet.smtpHost && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
               <input type="text" className="input mt-1" placeholder={secretsSet.smtpHost ? "（已設定，留空不變）" : "smtp.gmail.com"}
                 value={notifyInputs.smtpHost ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, smtpHost: e.target.value }))} />
+              {secretsSet.smtpHost && <RevealCopyButton endpoint="/api/secrets/reveal?key=smtpHost" />}
             </label>
             <label className="block text-sm">
               <span className="muted">連接埠 {secretsSet.smtpPort && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
               <input type="text" className="input mt-1" placeholder={secretsSet.smtpPort ? "（已設定，留空不變）" : "465"}
                 value={notifyInputs.smtpPort ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, smtpPort: e.target.value }))} />
+              {secretsSet.smtpPort && <RevealCopyButton endpoint="/api/secrets/reveal?key=smtpPort" />}
             </label>
           </div>
           <label className="block text-sm">
             <span className="muted">Email 帳號(寄件人) {secretsSet.smtpAccount && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
             <input type="text" className="input mt-1" placeholder={secretsSet.smtpAccount ? "（已設定，留空不變）" : "you@gmail.com"}
               value={notifyInputs.smtpAccount ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, smtpAccount: e.target.value }))} />
+            {secretsSet.smtpAccount && <RevealCopyButton endpoint="/api/secrets/reveal?key=smtpAccount" />}
           </label>
           <label className="block text-sm">
             <span className="muted">Email 密碼 {secretsSet.smtpPassword && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
             <input type="password" className="input mt-1" placeholder={secretsSet.smtpPassword ? "••••••••（已設定，留空不變）" : "Gmail 填 16 碼應用程式密碼"}
               value={notifyInputs.smtpPassword ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, smtpPassword: e.target.value }))} />
+            {secretsSet.smtpPassword && <RevealCopyButton endpoint="/api/secrets/reveal?key=smtpPassword" />}
           </label>
           <div className="flex items-center gap-2">
             <button className="btn btn-primary" disabled={notifyBusy !== null}
@@ -524,22 +537,26 @@ export default function SettingsPage() {
               <span className="muted">IMAP 主機 {secretsSet.imapHost && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
               <input type="text" className="input mt-1" placeholder={secretsSet.imapHost ? "（已設定，留空不變）" : "imap.gmail.com"}
                 value={notifyInputs.imapHost ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, imapHost: e.target.value }))} />
+              {secretsSet.imapHost && <RevealCopyButton endpoint="/api/secrets/reveal?key=imapHost" />}
             </label>
             <label className="block text-sm">
               <span className="muted">連接埠 {secretsSet.imapPort && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
               <input type="text" className="input mt-1" placeholder={secretsSet.imapPort ? "（已設定，留空不變）" : "993(留空即可)"}
                 value={notifyInputs.imapPort ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, imapPort: e.target.value }))} />
+              {secretsSet.imapPort && <RevealCopyButton endpoint="/api/secrets/reveal?key=imapPort" />}
             </label>
           </div>
           <label className="block text-sm">
             <span className="muted">Email 帳號 {secretsSet.imapAccount && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
             <input type="text" className="input mt-1" placeholder={secretsSet.imapAccount ? "（已設定，留空不變）" : "you@gmail.com"}
               value={notifyInputs.imapAccount ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, imapAccount: e.target.value }))} />
+            {secretsSet.imapAccount && <RevealCopyButton endpoint="/api/secrets/reveal?key=imapAccount" />}
           </label>
           <label className="block text-sm">
             <span className="muted">Email 密碼 {secretsSet.imapPassword && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
             <input type="password" className="input mt-1" placeholder={secretsSet.imapPassword ? "••••••••（已設定，留空不變）" : "Gmail 填 16 碼應用程式密碼"}
               value={notifyInputs.imapPassword ?? ""} onChange={(e) => setNotifyInputs((p) => ({ ...p, imapPassword: e.target.value }))} />
+            {secretsSet.imapPassword && <RevealCopyButton endpoint="/api/secrets/reveal?key=imapPassword" />}
           </label>
           <div className="flex items-center gap-2">
             <button className="btn btn-primary" disabled={notifyBusy !== null}
@@ -556,13 +573,14 @@ export default function SettingsPage() {
         <section className="card p-5 space-y-3">
           <div>
             <h2 className="font-medium">🔐 已儲存帳密管理</h2>
-            <p className="text-sm muted mt-0.5">只顯示欄位名稱，不會顯示內容。停用整合或交接電腦時，可在這裡真正撤銷，不只是把輸入框留空。</p>
+            <p className="text-sm muted mt-0.5">預設只顯示欄位名稱，按「顯示並複製」才會讀出內容（例如搬到另一台電腦時用）。停用整合或交接電腦時，可在這裡真正撤銷，不只是把輸入框留空。</p>
           </div>
           <div className="divide-y">
             {Object.keys(secretsSet).sort().map((key) => (
-              <div key={key} className="flex items-center gap-3 py-2.5">
+              <div key={key} className="flex flex-wrap items-center gap-3 py-2.5">
                 <span className="text-sm flex-1 min-w-0 truncate">{fields.find((f) => f.key === key)?.label ?? SECRET_LABELS[key] ?? key}</span>
                 <span className="text-xs" style={{ color: "var(--green)" }}>已設定</span>
+                <RevealCopyButton endpoint={`/api/secrets/reveal?key=${encodeURIComponent(key)}`} />
                 <button onClick={() => clearSecret(key)} className="btn btn-ghost text-xs" style={{ color: "var(--red)" }}>清除</button>
               </div>
             ))}
