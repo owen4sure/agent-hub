@@ -3,7 +3,6 @@ import { callAIWithRetry } from "../aiRetry";
 import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../claudeCodeClient";
 import { getBuilderEffort } from "../settingsStore";
 import { dumpFileExcerpt, findFilePathInInput } from "./repairContext";
-import { compileDailyChannelMetrics } from "./structuredExcelCompiler";
 import type { NodeContext } from "./types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -241,16 +240,6 @@ export async function generateCustomCode(
     return code;
   };
 
-  // 對欄位、來源分頁、資料列都已明確寫在白話需求裡的日報通路計算，先編譯成可驗證的
-  // 確定性程式。這避免把 5 個欄位對照 + 舊 code + Excel 節錄丟給模型，等兩分鐘還沒第一行。
-  // 偵測條件很嚴，任何不完整需求仍走下面的一般 AI codegen，不會假裝理解。
-  const structuredCode = compileDailyChannelMetrics(intent);
-  if (structuredCode) {
-    const syntaxError = customCodeSyntaxError(structuredCode);
-    if (syntaxError) throw new Error(`內建 Excel 計算編譯器產出的程式碼語法不正確：${syntaxError}`);
-    ctx.log("已辨識到明確的多通路日報規格，直接建立可驗證的計算程式碼（不等待通用模型從零猜欄位）");
-    return await persistGeneratedCode(structuredCode);
-  }
 
   const inputKeys = Object.keys(ctx.input);
   // 【關鍵】如果這一步要處理的是一個真實檔案(下載的 Excel/CSV…),就把那個檔案的「真實欄位+樣本」讀進來

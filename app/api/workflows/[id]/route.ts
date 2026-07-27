@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { getWorkflow, saveWorkflow, deleteWorkflow, deriveRequiresSecrets, isBuiltin } from "@/lib/workflow/store";
-import { getWorkflowModel, setWorkflowModel, getWorkflowSecrets, setWorkflowSecrets } from "@/lib/settingsStore";
+import { getWorkflowModel, setWorkflowModel, getWorkflowSecrets, setWorkflowSecrets, normalizeFolderPath } from "@/lib/settingsStore";
 import { listRuns } from "@/lib/workflow/engine";
 import { autorunActive } from "@/lib/workflow/busyLocks";
 import { getNodeDef } from "@/lib/workflow/registry";
@@ -343,11 +343,13 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
         : typeof body.onFailureWorkflow === "string" && body.onFailureWorkflow.trim()
           ? body.onFailureWorkflow.trim().slice(0, 120)
           : undefined;
+    // group 現在是資料夾路徑(可能巢狀，"/" 分層，如「工作專案/子資料夾」)，用共用的
+    // normalizeFolderPath 驗證/清理，跟「新增資料夾」API 走同一套規則，兩邊不會對不上。
     const group =
       body.group === undefined
         ? cur.group
-        : typeof body.group === "string" && body.group.trim()
-          ? body.group.trim().slice(0, 30)
+        : typeof body.group === "string"
+          ? (normalizeFolderPath(body.group) ?? undefined)
           : undefined;
     saveWorkflow({
       ...cur,

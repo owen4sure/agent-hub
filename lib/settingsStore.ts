@@ -79,6 +79,73 @@ export function setWorkflowSortOrder(ids: string[]) {
   getDb().prepare(`INSERT INTO settings (key, value) VALUES ('workflowSortOrder', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(v);
 }
 
+/** 排程頁的手動排序：使用者拖曳決定的 schedule id 順序(存整份有序 id 清單)。
+ * 不在清單裡的 id(新排程、或還沒拖過的)不會被硬塞到清單末端——呼叫端(見 /api/schedules)
+ * 會先照「下次執行時間」排好預設順序，只有這裡有記錄的那幾筆才會被搬到手動指定的位置，
+ * 其餘的維持在時間排序裡原本的相對順序，兩種排序邏輯才不會打架。 */
+export function getScheduleSortOrder(): string[] {
+  const row = getDb().prepare(`SELECT value FROM settings WHERE key = 'scheduleSortOrder'`).get() as { value: string } | undefined;
+  try {
+    const parsed: unknown = JSON.parse(row?.value ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function setScheduleSortOrder(ids: string[]) {
+  const v = JSON.stringify(ids.slice(0, 500));
+  getDb().prepare(`INSERT INTO settings (key, value) VALUES ('scheduleSortOrder', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(v);
+}
+
+/** 資料夾路徑驗證(工作流搬到巢狀資料夾/新增資料夾共用)：用 "/" 分層，每一段去頭尾空白、
+ * 不能是空字串(擋雙斜線、前導/尾端斜線自動收斂掉)，單段長度上限 40、整條路徑上限 150(約可放 5 層)。
+ * 回傳 null 代表整段輸入清乾淨後沒有任何合法內容，呼叫端應視為「沒有輸入」處理。 */
+export function normalizeFolderPath(raw: string): string | null {
+  // 單段超過 40 字用截斷、不是濾掉整段——濾掉會讓「公司/一個過長的子資料夾名稱」悄悄退化成
+  // 只剩「公司」(已存在的路徑)，新增資料夾 API 回 {ok:true} 卻什麼都沒建立、使用者的輸入整段消失，
+  // 改名 PATCH 更會把工作流意外移出資料夾(整段變空字串)。截斷才會留下使用者實際打的內容。
+  const segments = raw.split("/").map((s) => s.trim()).filter(Boolean).map((s) => s.slice(0, 40));
+  if (segments.length === 0) return null;
+  const joined = segments.join("/");
+  return joined.length <= 150 ? joined : segments.slice(0, 1).join("/").slice(0, 150);
+}
+
+/** 資料夾清單(可能巢狀，用 "/" 表示階層，如 "工作專案/子資料夾")。
+ * 工作流的 group 欄位本身就是路徑字串，所以有工作流在裡面的資料夾不需要出現在這份清單也看得到——
+ * 這份清單存在的唯一理由是讓「還沒放任何工作流的空資料夾」也能被記住，不會因為沒有東西引用它就消失。 */
+export function getFolderPaths(): string[] {
+  const row = getDb().prepare(`SELECT value FROM settings WHERE key = 'folderPaths'`).get() as { value: string } | undefined;
+  try {
+    const parsed: unknown = JSON.parse(row?.value ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function setFolderPaths(paths: string[]) {
+  const v = JSON.stringify([...new Set(paths)].slice(0, 500));
+  getDb().prepare(`INSERT INTO settings (key, value) VALUES ('folderPaths', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(v);
+}
+
+/** 資料夾在同一層裡的手動排序，跟 workflowSortOrder/scheduleSortOrder 同一套模式：
+ * 存整份路徑順序，沒排過的(新資料夾)接在後面、維持原本相對順序。 */
+export function getFolderSortOrder(): string[] {
+  const row = getDb().prepare(`SELECT value FROM settings WHERE key = 'folderSortOrder'`).get() as { value: string } | undefined;
+  try {
+    const parsed: unknown = JSON.parse(row?.value ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function setFolderSortOrder(paths: string[]) {
+  const v = JSON.stringify(paths.slice(0, 500));
+  getDb().prepare(`INSERT INTO settings (key, value) VALUES ('folderSortOrder', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(v);
+}
+
 export type BuilderEffort = "low" | "medium" | "high";
 const BUILDER_EFFORT_VALUES: readonly BuilderEffort[] = ["low", "medium", "high"];
 

@@ -28,9 +28,8 @@ import { extractAppsScriptExecUrl, putSheetUrlIntoAllWriteNodes } from "@/lib/sh
 import { probeSheetScript } from "@/lib/workflow/nodes/googleSheet";
 import { sheetWriteNodesNeedingSetup } from "@/lib/googleSheetScriptTemplate";
 import { slidesRefreshNodesNeedingOAuthSetup } from "@/lib/googleSlidesApi";
-import { applyGraphStructureEdits } from "@/lib/workflow/graphStructure";
+import { applyGraphStructureEdits, hasStructureChanges } from "@/lib/workflow/graphStructure";
 import { tryApplySimpleChatStructure } from "@/lib/workflow/simpleChatStructure";
-import { tryApplySimpleChatCodeRecovery } from "@/lib/workflow/simpleChatCodeRecovery";
 import { shouldAutoInspectRuntime } from "@/lib/workflow/runtimeInspectionIntent";
 
 // 提出建圖(可能回問題、回可套用的圖、或直接改好現有節點)
@@ -235,16 +234,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
     // 其他控制語意也不能掉進建圖模型。實際控制由前端狀態機執行；第三方或舊版前端直接打 /build
     // 時至少會拿到明確命令，而不是讓模型把「停止」「核准」誤解成改圖需求。
-    // 「幫我修好」通常會被辨識為 repair-run。若這次是已能確定重建的空白日報計算步驟，
-    // 必須先走確定性修復；否則它會在這裡提早回 control，使用者又得等一輪通用 AI 修復。
-    // 這條只會寫回已通過編譯器規格辨識的單一步驟，且絕不自行執行流程。
-    if (chatCommand === "repair-run" && !autorunActive.has(id)) {
-      const directCodeRecovery = tryApplySimpleChatCodeRecovery(id, rawLastUserCommandText);
-      if (directCodeRecovery) {
-        return NextResponse.json({ phase: "edits", message: directCodeRecovery.message, changes: directCodeRecovery.changes });
-      }
-    }
-
     if (chatCommand) {
       return NextResponse.json({
         phase: "control",
@@ -313,12 +302,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       const simpleStructure = tryApplySimpleChatStructure(id, lastUserText);
       if (simpleStructure) {
         return NextResponse.json({ phase: "edits", message: simpleStructure.message, changes: simpleStructure.changes });
-      }
-      // 明確欄位對照的日報計算碼被清空時，使用者在對話說「幫我修」就直接重建；不用等模型
-      // 重新發明數千字程式，也不會因為這只是「修」而偷偷開始執行或寫入任何外部資料。
-      const simpleCodeRecovery = tryApplySimpleChatCodeRecovery(id, lastUserText);
-      if (simpleCodeRecovery) {
-        return NextResponse.json({ phase: "edits", message: simpleCodeRecovery.message, changes: simpleCodeRecovery.changes });
       }
     }
 
@@ -598,7 +581,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       const configPreflight = needsConfigApply
         ? applyNodeConfigEdits(id, result.edits, { apply: false, triggerParams: result.triggerParams })
         : { edits: [], skipped: [], triggerParamsChanged: false };
-      const structurePreflight = result.structure
+      // hasStructureChanges 而非單純 truthy 檢查——防禦性寫法：builder.ts 已在源頭把模型照抄範例
+      // JSON 形狀殘留的空殼 structure(如 {})正規化成 undefined，這裡多一層檢查避免任何未來/其他
+      // 呼叫路徑萬一繞過那層正規化，又把空殼 structure 送進 applyGraphStructureEdits 誤判失敗。
+      const structurePreflight = hasStructureChanges(result.structure)
         ? applyGraphStructureEdits(id, result.structure, { apply: false })
         : null;
       const preflightProblems = [
@@ -617,7 +603,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       const configApplied = needsConfigApply
         ? applyNodeConfigEdits(id, result.edits, { triggerParams: result.triggerParams })
         : configPreflight;
-      const structureApplied = result.structure
+      const structureApplied = hasStructureChanges(result.structure)
         ? applyGraphStructureEdits(id, result.structure)
         : structurePreflight;
       // 剛套用完那一刻的磁碟狀態，用來之後判斷「測試這段期間有沒有人又動過」(拖位置/另一個對話再改)——
@@ -699,8 +685,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           } else {
             const short = (v: unknown) => { const s = v === undefined || v === "" ? "(空)" : String(v); return s.length > 40 ? s.slice(0, 40) + "…" : s; };
             // 這裡顯示的是「實際設定值」(分頁名稱、檔名…)，不是 AI 寫的說明文字——不能套完整的
-            // plainLanguage()：它的抓漏規則會把長得像識別字的字面值(例如真實分頁名稱「BrandA」)
-            // 誤判成「未知程式欄位」，改寫成「前面步驟提供的「BrandA」資料」，等於使用者看到的
+            // plainLanguage()：它的抓漏規則會把長得像識別字的字面值(例如真實分頁名稱「ProductX」)
+            // 誤判成「未知程式欄位」，改寫成「前面步驟提供的「ProductX」資料」，等於使用者看到的
             // 確認內容不是真值，沒辦法核對 AI 到底改了什麼(真實踩過的事故)。只用 humanizeTemplates
             // 把值裡真正的 {{欄位}} 模板token轉白話，其餘字面內容原樣顯示。
             const showValue = humanizeTemplates({});
@@ -860,6 +846,12 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
     return typeof e.from === "string" && typeof e.to === "string" && (e.fromPort === undefined || typeof e.fromPort === "string");
   });
   if (!nodeShapeOk || !edgeShapeOk) return NextResponse.json({ error: "流程圖的節點或連線格式不正確" }, { status: 400 });
+  // JSON 的 null 一律當「沒有提供」：模型/API 客戶端常把選填欄位寫成 null 而不是省略。
+  // 不做這層正規化的話，triggerParams:null 會被誤判成「格式不正確」擋掉整次套用，
+  // schedule:null 更會在下面讀 schedule.cron 時直接 TypeError 變 500(實測踩過)。
+  for (const key of ["triggerParams", "schedule", "autoWebhook", "onFailureWorkflow"] as const) {
+    if (body[key] === null) body[key] = undefined;
+  }
   const graphNodes = body.nodes as WorkflowNode[];
   const graphEdges = body.edges as WorkflowEdge[];
   const graphErrors = lintGraph(graphNodes, graphEdges);

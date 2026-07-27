@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BUILDER_MAX_OUTPUT_TOKENS, buildWorkflow, builderGatewayTimeoutMs, builderModelForHistory, describeSuggestedSchedule, effectiveRequirementText, existingGraphEditSystemPrompt, explicitTriggerInputKeys, inferAttachmentRoleHint, isLikelyExistingGraphEdit, looksLikeBrokenStructuredOutput, needsBusinessDataSourceClarification, normalizeBuilderGraphObject, readinessNotes, systemPrompt, trimHistoryForBuilder, userRequirementText, validateSuggestedSchedule, wantsAutoWebhook, wantsFullGraphReplacement, wireManualFileUpload } from "./builder";
+import { BUILDER_MAX_OUTPUT_TOKENS, bareTechnicalTokens, buildWorkflow, builderGatewayTimeoutMs, builderModelForHistory, describeSuggestedSchedule, effectiveRequirementText, existingGraphEditSystemPrompt, explicitTriggerInputKeys, inferAttachmentRoleHint, isLikelyExistingGraphEdit, looksLikeBrokenStructuredOutput, needsBusinessDataSourceClarification, normalizeBuilderGraphObject, readinessNotes, systemPrompt, trimHistoryForBuilder, userRequirementText, validateSuggestedSchedule, wantsAutoWebhook, wantsFullGraphReplacement, wireManualFileUpload } from "./builder";
 import type { WorkflowNode } from "./types";
 
 test("builder schedule：接受常用中文需求會產生的排程", () => {
@@ -13,6 +13,19 @@ test("builder schedule：在進入預覽前攔截錯誤 cron", () => {
   assert.ok(validateSuggestedSchedule({ cron: "每天九點" }).length > 0);
   assert.ok(validateSuggestedSchedule({ cron: "99 25 32 13 8" }).length >= 5);
   assert.ok(validateSuggestedSchedule({ cron: "0 9 * * MON" }).length > 0);
+});
+
+test("bareTechnicalTokens：抓出字母+數字混合的裸字代碼，連同字根一起回傳", () => {
+  const tokens = bareTechnicalTokens("要抓的代碼改成：agg1~agg6、agg19");
+  assert.ok(tokens.includes("agg1"));
+  assert.ok(tokens.includes("agg6"));
+  assert.ok(tokens.includes("agg19"));
+  assert.ok(tokens.includes("agg"), "字根(去掉數字後)也要回傳，才能比對到舊代碼「agg8」所在的節點");
+});
+
+test("bareTechnicalTokens：一般描述性中文/英文語句不會誤觸發", () => {
+  assert.deepEqual(bareTechnicalTokens("把每週業績折線圖改成長條圖"), []);
+  assert.deepEqual(bareTechnicalTokens("Please update the summary report"), []);
 });
 
 test("builder schedule：對話只顯示白話時間，不洩漏 cron 語法", () => {
@@ -204,7 +217,7 @@ test("builder 既有流程修改：明確增刪改走精簡修改模式，單純
 // 參數)，沒有「把/將/請/幫我」這種完整句型前綴，被誤判成「不是明確編輯」，掉進更重、更慢、
 // 還會比對社群範本的從零建圖模式，畫面卡在「理解需求、對照社群藍圖」跑了好幾輪都跑不完。
 test("builder 既有流程修改：條列式直接陳述(沒有把/將/請/幫我前綴)也要判成既有流程編輯", () => {
-  assert.equal(isLikelyExistingGraphEdit("代碼:agg1~agg6、agg19\n產出檔案名稱也改成：\nBrandA,BrandB"), true);
+  assert.equal(isLikelyExistingGraphEdit("代碼:agg1~agg6、agg19\n產出檔案名稱也改成：\nProductX,ProductY"), true);
   assert.equal(isLikelyExistingGraphEdit("篩選欄位改成B欄"), true);
 });
 
@@ -535,6 +548,132 @@ test("builder 既有流程修改：模型把 triggerParams 錯塞進 structure �
   assert.equal(result.phase, "edits");
   assert.equal(calls, 1);
   assert.equal(result.phase === "edits" ? result.triggerParams?.[0]?.key : undefined, "filePath");
+});
+
+// 真實踩過的事故(wf-0d10f38d-copy-8eed43-copy-060a04)：模型照抄範例 JSON 形狀，即使只是改
+// custom-code 裡的內容也常常順手附一個空的 structure:{}——以前只看「structure 這個 key 存不存在」，
+// 會把空殼送進 planGraphStructureEdits 判定「沒有任何實際修改」而擋下整包原本合法的 edits，
+// 逼模型不斷重試直到整個建圖請求燒光 5 分鐘逾時。使用者實際卡住的請求就是這種情況。
+test("builder 既有流程修改：模型附上空殼 structure(照抄範本殘留)不能讓合法 edits 被誤判成結構修改失敗、白白重試", async () => {
+  let calls = 0;
+  const client = { chat: { completions: { create: async () => {
+    calls++;
+    return { choices: [{ message: { content: JSON.stringify({
+      phase: "edits",
+      message: "已更新程式碼裡的代碼與檔名",
+      edits: [{ nodeId: "calc", config: { intent: "新意圖", code: "return { ...ctx.input };" } }],
+      structure: {},
+    }) }, finish_reason: "stop" }] };
+  } } } } as never;
+  const result = await buildWorkflow(
+    client,
+    "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "改一下程式碼引用的代碼跟檔名" }] }],
+    {
+      nodes: [
+        { id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
+        { id: "calc", type: "custom-code", label: "計算", config: { intent: "舊意圖", code: "return {};" }, position: { x: 300, y: 0 } },
+      ],
+      edges: [{ from: "trigger", to: "calc" }],
+    },
+  );
+  assert.equal(result.phase, "edits");
+  assert.equal(calls, 1, "空殼 structure 不該被當成結構修改失敗而觸發重試");
+  assert.equal(result.phase === "edits" ? result.edits.length : 0, 1);
+  assert.equal(result.phase === "edits" ? result.structure : "unset", undefined, "空殼 structure 應視為沒帶，不殘留在回傳值裡");
+});
+
+// 真實踩過的事故(wf-0d10f38d-copy-8eed43-copy-060a04)：使用者說「要抓的代碼改成：agg1~agg6、agg19」，
+// 完全沒加引號(自然口語就是這樣講)。以前只有加引號的字串才會讓相關節點的程式碼保留原文，這句話
+// 因此沒有任何節點被保留——repeat-steps 內嵌近 6000 字的擷取邏輯全部被截成「(已有程式碼約N字)」
+// 標記，模型只能從零盲寫整段邏輯，本機 Claude Code 連續兩次跑滿 5 分鐘都生不出來，使用者只收到
+// 「已停止」。修法是新增 bareTechnicalTokens 抓「agg1」這類字母+數字的裸字代碼，連同其字根「agg」
+// 一起比對節點的 label／intent／code，只要任一處出現這個字根就保留程式碼原文。
+test("builder 既有流程修改：裸字代碼(沒加引號，如「改成agg1」)也要讓相關節點的程式碼保留原文，不能盲寫", async () => {
+  let lastPrompt = "";
+  const client = {
+    chat: {
+      completions: {
+        create: async (params: { messages: { role: string; content: string }[] }) => {
+          lastPrompt = params.messages.map((m) => m.content).join("\n");
+          return { choices: [{ message: { content: JSON.stringify({
+            phase: "edits",
+            message: "已更新代碼範圍",
+            edits: [{ nodeId: "loop1", stepIndex: 0, config: { code: "return { ...ctx.input };" } }],
+          }) }, finish_reason: "stop" }] };
+        },
+      },
+    },
+  } as never;
+  const uniqueMarker = "__UNIQUE_MARKER_AGG_EXTRACTION_LOGIC__";
+  const longCode = `const x = 1; // ${uniqueMarker}\n` + "// filler\n".repeat(20);
+  await buildWorkflow(
+    client,
+    "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "要抓的代碼改成：agg1~agg6、agg19" }] }],
+    {
+      nodes: [
+        { id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
+        {
+          id: "loop1", type: "repeat-steps", label: "對每個月重複", position: { x: 300, y: 0 },
+          config: {
+            items: "{{monthItems}}", itemVar: "item",
+            steps: JSON.stringify([{ type: "custom-code", label: "擷取agg8~agg17資料", config: { intent: "擷取邏輯", code: longCode } }]),
+          },
+        },
+      ],
+      edges: [{ from: "trigger", to: "loop1" }],
+    },
+  );
+  assert.match(lastPrompt, new RegExp(uniqueMarker), "裸字代碼「agg1」該讓字根「agg」比對到節點名稱「擷取agg8~agg17資料」，保留程式碼原文，不能截斷成盲寫");
+});
+
+// 真實踩過的事故：修好上一個問題後，發現裸字比對若也比對 intent 欄位會反過來過度保留——某個完全
+// 不相干的節點，intent 只是「舉例說明」提到同一個字根(如「D欄=該筆代碼(如agg8)」，純粹描述表格
+// 格式長怎樣，這個節點本身不需要改)，也會被誤判成相關節點，把它自己動輒 8000+ 字的程式碼一起保留，
+// 讓提示從該有的約 6500 字暴增到 18513 字——原本想解決「盲寫」卻意外造成「提示灌爆」，兩者都會讓
+// 本機 Claude Code 在時限內回不了應。修法是裸字比對只看 label／code，不看 intent。
+test("builder 既有流程修改：裸字代碼比對不能誤觸發到只在 intent 裡舉例提到、本身不相關的節點", async () => {
+  let lastPrompt = "";
+  const client = {
+    chat: {
+      completions: {
+        create: async (params: { messages: { role: string; content: string }[] }) => {
+          lastPrompt = params.messages.map((m) => m.content).join("\n");
+          return { choices: [{ message: { content: JSON.stringify({
+            phase: "edits",
+            message: "已更新",
+            edits: [{ nodeId: "loop1", stepIndex: 0, config: { code: "return { ...ctx.input };" } }],
+          }) }, finish_reason: "stop" }] };
+        },
+      },
+    },
+  } as never;
+  const irrelevantMarker = "__UNIQUE_MARKER_UNRELATED_EXCEL_FORMAT_LOGIC__";
+  const irrelevantCode = `const y = 2; // ${irrelevantMarker}\n` + "// filler\n".repeat(20);
+  await buildWorkflow(
+    client,
+    "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "要抓的代碼改成：agg1~agg6、agg19" }] }],
+    {
+      nodes: [
+        { id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
+        {
+          id: "loop1", type: "repeat-steps", label: "對每個月重複", position: { x: 300, y: 0 },
+          config: {
+            items: "{{monthItems}}", itemVar: "item",
+            steps: JSON.stringify([{ type: "custom-code", label: "擷取代碼資料", config: { intent: "擷取邏輯", code: "return {};" } }]),
+          },
+        },
+        {
+          id: "n13", type: "custom-code", label: "彙整成結算表並存桌面", position: { x: 500, y: 0 },
+          config: { intent: "D欄=該筆代碼(如agg8)，其餘欄位依序填入", code: irrelevantCode },
+        },
+      ],
+      edges: [{ from: "trigger", to: "loop1" }, { from: "loop1", to: "n13" }],
+    },
+  );
+  assert.doesNotMatch(lastPrompt, new RegExp(irrelevantMarker), "n13 的 intent 只是舉例提到「agg8」，本身跟這次要改的代碼無關，不該把它的程式碼也保留下來灌爆提示");
 });
 
 test("builder 附檔手動流程：模型誤把上傳檔案當資料夾監聽時，系統要求直接建立選檔流程", async () => {

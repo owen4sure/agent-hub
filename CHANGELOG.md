@@ -9,6 +9,10 @@
 - 建立跨 AI 工具共用的產品目標、依賴地圖、架構標準與變更控制制度；後續改動必須以複雜真實流程可跑通、可修復、且新手可理解為驗收標準。
 - Changed｜Codex 步驟零的 8 個確認問題先前只有它自行推斷的答案、未經使用者核准就已建立治理文件｜使用者已逐項核准，`PROJECT_GOAL.md` 依核准結果調整：零技術可用性與高複雜跨系統可靠性同等重要不分先後、單人本機方向尚未鎖死不預先引入多租戶複雜度、正式訂出「複製流程」定義、驗收情境清單擴充並訂為持續累積、AI 修復說明必須簡短好懂｜使用者透過逐題確認，回答已寫回 `PROJECT_GOAL.md`｜`ARCHITECTURE.md`／`DEPENDENCY_MAP.md` 未含與此衝突之內容，故未需同步修改
 
+### Security
+
+- Security｜某次改動(commit `e4af5aa`)在使用者不知情下把真實內部業務報表結構(分頁名稱「客戶數A」「客戶數B」「通路統計」)、真實欄位字母對照與真實客戶/產品名稱(「BrandA」「BrandB」)寫死進了公開原始碼與測試檔，已經推上公開 GitHub repo(`origin/main`)——違反使用者本人訂下「真實工作字眼絕不能進公開 repo」的鐵則。由 xhigh 力度的多分身程式碼審查工作流找出並人工核對確認(`git log`/`git grep` 逐一驗證命中位置、確認外洩範圍集中在同一個 commit、確認 community/blueprints 目錄乾淨)｜移除 `lib/workflow/structuredExcelCompiler.ts`／`lib/workflow/simpleChatCodeRecovery.ts` 兩個檔案(連同呼叫它們的 `lib/workflow/codegen.ts`／`app/api/workflows/[id]/build/route.ts` 裡的 import 與呼叫點)——這兩個檔案的整個存在理由就是手動比對這一位使用者的真實報表結構，改寫成通用版本仍會維持結構可辨識，唯一乾淨的作法是整個移除、退回原本就有的通用 AI codegen 備援路徑；`lib/workflow/builder.test.ts`／`app/api/workflows/[id]/build/route.ts` 裡殘留的「BrandA」範例改成中性佔位字串「ProductX」；順手掃到這個 session 稍早自己寫的資料夾功能程式碼／測試也把使用者真實的「公司費用申請」群組名稱當範例用了進去(還沒推上去，但既然要推送一併清乾淨)，改成「工作專案」。新增 `scripts/change-guard.mjs` 的隱私掃描區塊：讀取 `.gitignore` 掉的 `data/privacy-blocklist.txt`(清單本身不進版控，避免清單自己變成另一個洩漏管道)、用 `LC_ALL=en_US.UTF-8`(避免中文假陰性，這是使用者自己過去踩過的坑) + `git grep --untracked` 掃整個追蹤中的檔案樹，命中就讓 change guard 失敗並列出檔案行號；`AGENTS.md` 補上這個機制的說明，讓任何工具讀到治理文件的第一步就知道有這道防線｜移除後跑 `tsc --noEmit`／`npm test`(634 通過)／`npm run lint`／`npm run check:change-guard` 全過；用 `git grep`+`LC_ALL=en_US.UTF-8` 重新掃過一次整個追蹤樹確認乾淨；對新的隱私掃描機制做了正向測試(黑名單存在時，真的把命中的字眼寫進一個暫存檔案，確認 change guard 正確攔下並列出檔名行號)與復原後的乾淨結果，兩者都截圖級的指令輸出驗證過，不是只讀程式碼判斷｜已經推上 `origin/main` 的舊 commit(`e4af5aa`)本身在 git 歷史裡仍查得到這些字眼，這次只確保**目前最新版本**乾淨，沒有重寫 git 歷史／force-push(使用者當下選擇先不做這個更高風險的操作)；`data/privacy-blocklist.txt` 是這台機器上手動維護的清單，不會隨這次修復自動涵蓋未來踩到的新字眼，仍需要人工發現後手動加入
+
 ### Added
 
 - Added｜新節點若忘了同步補齊畫布圖示／分類色，會悄悄退化成灰色方塊，使用者以為系統壞了｜新增 `lib/workflow/nodeRegistryConsistency.test.ts`，機械比對 `registry.ts` 與 `nodeVisuals.tsx` 的節點型別是否一致（含殘留型別偵測）｜人工暫時移除一個型別的 ICONS 項目、確認測試失敗且訊息點名該型別，再復原｜只涵蓋 ICONS／TYPE_META 兩處，`nodeSummary.ts` 的卡片摘要仍未機械化檢查
@@ -16,6 +20,8 @@
 
 ### Fixed
 
+- Fixed｜`normalizeFolderPath()` 對超過 40 字的單一路徑片段是整段濾掉，不是截斷——建巢狀資料夾時若子資料夾名稱過長，會悄悄退化成只剩已存在的上層路徑，`POST /api/folders` 回 `{ok:true}` 卻什麼都沒建立、使用者打的名稱整段消失也沒有任何錯誤提示；改工作流所屬資料夾(`PATCH /api/workflows/[id]`)若新名稱單段過長，更會整段變空字串、意外把工作流移出資料夾｜由 xhigh 力度的多分身程式碼審查工作流找出並驗證(CONFIRMED)；`lib/settingsStore.ts` 的 `normalizeFolderPath()` 改成對每段做 `.slice(0,40)` 截斷，不再用 `.filter()` 整段丟棄｜更新 `lib/settingsStore.test.ts` 對應測試反映新的截斷行為，並新增「單段過長時不會誤判成空輸入」的測試；部署後用真實 API 重現兩種情境：巢狀資料夾建立(44字子資料夾名稱，確認回傳路徑真的帶著截斷後 40 字的子資料夾，不是退化成上層路徑)、工作流改名(43字單段，確認 `group` 欄位是截斷後的 40 字而非清空)，兩者皆通過後清除測試資料｜150 字整條路徑上限的既有 fallback 邏輯不受影響(該分支只在極端多段情境觸發，未在本輪變更)
+- Fixed｜整圖套用 API(`PUT /api/workflows/[id]/build`)收到選填欄位為 JSON `null` 時行為失控：`schedule:null` 直接在讀 `schedule.cron` 時 TypeError 變 HTTP 500，`triggerParams:null` 被誤判成「執行參數格式不正確」擋掉整次套用——模型輸出 JSON 與一般 API 客戶端都常把選填欄位寫成 null 而非省略，這不是理論情境(本輪以「小白從零建流程」實測旅程直接踩到)｜`app/api/workflows/[id]/build/route.ts` 在欄位驗證前把 `triggerParams`/`schedule`/`autoWebhook`/`onFailureWorkflow` 四個選填欄位的 `null` 一律正規化為 `undefined`(視為「沒有提供」)｜修復前用 curl 重現 500 與 400；部署後用同一 payload 回歸實測改回 HTTP 200 且套用成功，測試流程已清除｜route handler 無法直接單元測試(需起 server)，此修法以真實 API 回歸取代單元測試；其他 route 若有同型「!== undefined 但沒防 null」的選填欄位判斷，本輪未逐一掃描
 - 將一般流程畫面的內部模型選項、程式規格與外部服務技術詞移出主要操作路徑，改由白話對話與明確進階入口承接。
 - Google Slides 使用官方 OAuth 與 Slides API 刷新連結圖表；設定後先以只讀方式驗證可讀到正確簡報與圖表，再允許正式更新。
 - Fixed｜安全試跑(dry-run)時「等人簽核」節點完全沒有防護，會真的建立簽核紀錄、發送真實 Telegram／Email／桌面通知、並卡住整條 run 等一個不存在的真人回應｜`lib/workflow/nodes/waitApproval.ts` 在通道設定驗證之後、建立簽核紀錄之前加 `ctx.dryRun` 提早返回(模擬核准，不建立紀錄、不發通知)；同時把它對 `../store` 的靜態 import 改成動態 import，修正一個會在測試直接載入此節點檔時炸掉的模組循環｜新增 `lib/workflow/nodes/waitApproval.test.ts`，以「先移除防護、確認測試真的會失敗（攔到真實 fetch 呼叫）、再復原」的方式實測驗證，而非只讀程式碼判斷｜`repeat-steps` 內嵌 `wait-approval` 已由既有 lint 規則禁止，故不需另外處理巢狀情境

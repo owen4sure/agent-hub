@@ -15,6 +15,8 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 改完務必跑 `npm run check:change-guard`（連同 `npx tsc --noEmit && npm test`）；這支腳本除了輕量煙霧測試(確認治理文件與幾條不能被順手刪掉的產品底線還在)，也會跑 lint 並在有錯誤時讓整個 change guard 失敗——這是真實踩過的教訓：lint 曾經一度只被寫在文件裡提醒「另外記得跑」，結果 14 個錯誤在測試檔裡累積了一段時間都沒被發現，因為沒有任何一支「大家都會跑」的腳本真正執行它。change guard 仍不是測試的替代品，完整驗收仍照 `CHANGE_CONTROL.md`。這套機制存在的理由：不同 AI 工具在同一個 repo 上輪流改動時，光靠各自的訓練直覺很容易在別人看不到的地方悄悄破壞已經驗證過的功能——這四份文件+這支腳本就是讓「換工具」不等於「換規則」的唯一防線。
 
+change guard 也會掃隱私黑名單(真實踩過：某次改動把使用者真實工作用的內部報表分頁名稱、客戶產品名稱寫死進了程式碼與測試，一路推上了公開 GitHub repo 才被發現)。黑名單內容放在 `.gitignore` 掉的 `data/privacy-blocklist.txt`(不會出現在公開 repo 裡，避免清單本身變成另一個洩漏管道)——這份清單只有這台機器上才有；不管你是哪個 AI 工具，只要它存在，change guard 就會自動用它掃過整個追蹤中的檔案樹，命中就讓 change guard 失敗並列出檔案與行號。踩到新的真實字眼直接加進那份清單即可，不用改這支腳本。
+
 # 第一次打開這個 repo：自動幫使用者裝好環境
 
 如果 `node_modules/` 不存在，或 `data/agent-hub.db` 不存在，代表這是全新 clone、使用者第一次打開——**不用等使用者開口，直接照下面步驟把環境弄好，讓他打開瀏覽器就能用**：

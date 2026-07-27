@@ -31,6 +31,36 @@ for (const [name, file, pattern] of checks) {
   try { if (!pattern.test(read(file))) failures.push(`產品底線遺失：${name} (${file})`); }
   catch { failures.push(`無法讀取防護檔案：${file}`); }
 }
+
+// 隱私掃描：真實踩過的事故——不知道這條規則的 AI 工具把真實內部報表分頁名稱/客戶產品名稱
+// 寫死進了公開原始碼跟測試，一路推上了公開 GitHub repo(commit e4af5aa)才被發現。黑名單內容放在
+// gitignore 掉的 data/privacy-blocklist.txt(見該檔說明)，這裡只負責讀取+掃描，不管理名單本身；
+// 檔案不存在(例如別人 clone 這個 repo 沒有這份私人清單)就靜默跳過，不影響其他人使用這支腳本。
+const blocklistPath = path.join(root, "data/privacy-blocklist.txt");
+if (fs.existsSync(blocklistPath)) {
+  const terms = fs.readFileSync(blocklistPath, "utf8")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+  if (terms.length > 0) {
+    try {
+      // LC_ALL=en_US.UTF-8 是關鍵：預設的 C locale 下 grep 對多位元組中文字元會有假陰性
+      // (真實踩過)，看起來乾淨其實是 locale 沒比對到，不是真的沒有命中。
+      // --untracked 一併掃還沒 git add 的新檔，不能只查已追蹤的舊檔案。
+      const pattern = terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+      // git grep 的 exit code 語意：0=找到相符內容、1=乾淨沒命中、其他=指令本身出錯。
+      // execSync 對非 0 exit code 會 throw，所以「沒 throw」代表真的命中、要當失敗處理；
+      // catch 到的 exit code 1 才是我們要的正常/乾淨結果，不能一律吞掉，其他 code 仍要老實報錯。
+      const hits = execSync(
+        `git grep -InE --untracked "${pattern}" -- . ':!data/privacy-blocklist.txt'`,
+        { cwd: root, encoding: "utf8", env: { ...process.env, LC_ALL: "en_US.UTF-8" } },
+      );
+      failures.push(`隱私黑名單命中(真實工作字眼流進公開 repo)：\n${hits.trim().slice(0, 3000)}`);
+    } catch (err) {
+      if (err.status !== 1) failures.push(`隱私掃描本身執行失敗：${(err.stderr?.toString() ?? err.message).slice(0, 500)}`);
+    }
+  }
+}
 try {
   execSync("npx eslint . --ext .ts,.tsx", { cwd: root, stdio: "pipe" });
 } catch (err) {
