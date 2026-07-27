@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
-import { listWorkflows, saveWorkflow } from "@/lib/workflow/store";
+import { getWorkflow, listWorkflows, saveWorkflow } from "@/lib/workflow/store";
+import { getWorkflowSecrets } from "@/lib/settingsStore";
 import { DEFAULT_MODEL } from "@/lib/models";
 import { lintGraph } from "@/lib/workflow/graphLint";
 import type { Workflow, WorkflowNode, WorkflowEdge, ParamField } from "@/lib/workflow/types";
@@ -28,22 +29,37 @@ function strField(o: Record<string, unknown>, k: string): boolean {
  * 沒有這段遞迴的話，惡意程式碼藏在迴圈節點內嵌步驟裡就能繞過清空、原封不動被匯入(踩過的安全漏洞：
  * 第一次執行 repeatSteps.ts 判斷內嵌步驟不是空殼，直接用 new AsyncFunction 執行，帶著 ctx.secrets)。
  */
-function sanitizeConfig(type: string, config: Record<string, unknown>): Record<string, unknown> {
+/** 匯入時實際清掉了多少內容——用來讓使用者一進來就知道要補什麼，不用等執行失敗才發現。
+ * clearedEmailLabels 記下「哪些步驟」被清空收件人——只講數量不講是哪一步，使用者得自己
+ * 把整張畫布掃過一遍才找得到要補的節點；寄信是「要動手補值」的項目，跟純粹自動重生的
+ * custom-code 不同，必須讓使用者能直接點對地方，不是自己找。 */
+interface SanitizeCounters {
+  clearedCodeCount: number;
+  clearedEmailCount: number;
+  clearedEmailLabels: string[];
+  needsManualLogin: boolean;
+}
+
+function sanitizeConfig(type: string, config: Record<string, unknown>, counters: SanitizeCounters, label: string): Record<string, unknown> {
   let out = config;
   if (type === "custom-code" && out.code) {
     out = { ...out, code: "" };
+    counters.clearedCodeCount++;
   }
   // 寄信的「收件人」也是外送通道：惡意流程檔可以組「讀檔(指向敏感檔)→寄Email(收件人=攻擊者)」，
   // 使用者匯入後一跑,檔案就寄出去了(不用任何 custom-code,清 code 擋不到)。收件人清空=寄給自己
   // (SMTP 帳號),外洩通道直接失效;真的要寄給別人,匯入的人自己填回去,一眼就會看到填的是誰。
   if (type === "send-email" && out.to) {
     out = { ...out, to: "" };
+    counters.clearedEmailCount++;
+    counters.clearedEmailLabels.push(label);
   }
+  if (type === "browser-login") counters.needsManualLogin = true;
   if (type === "repeat-steps" && typeof out.steps === "string") {
     try {
       const steps = JSON.parse(out.steps) as { type: string; label?: string; config?: Record<string, unknown> }[];
       if (Array.isArray(steps)) {
-        const cleaned = steps.map((s) => (s && typeof s === "object" ? { ...s, config: sanitizeConfig(String(s.type), s.config ?? {}) } : s));
+        const cleaned = steps.map((s) => (s && typeof s === "object" ? { ...s, config: sanitizeConfig(String(s.type), s.config ?? {}, counters, s.label?.trim() || s.type) } : s));
         out = { ...out, steps: JSON.stringify(cleaned) };
       }
     } catch { /* steps 不是合法 JSON，維持原樣(執行期會因為解析失敗而報錯，不會默默跑起來) */ }
@@ -78,21 +94,23 @@ export async function POST(req: Request) {
   if (!edges.every((e) => isObj(e) && strField(e, "from") && strField(e, "to") && (e.fromPort === undefined || typeof e.fromPort === "string"))) return bad();
 
   const nodes: WorkflowNode[] = [];
+  const counters: SanitizeCounters = { clearedCodeCount: 0, clearedEmailCount: 0, clearedEmailLabels: [], needsManualLogin: false };
   for (const raw of body.nodes as unknown[]) {
     if (!raw || typeof raw !== "object") return bad();
     const n = raw as Record<string, unknown>;
     if (typeof n.id !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(n.id) || typeof n.type !== "string" || !n.type || n.type.length > 100) return bad();
     const pos = (n.position ?? {}) as Record<string, unknown>;
+    const label = typeof n.label === "string" && n.label.trim() ? n.label.trim().slice(0, 120) : n.id;
     let config = n.config && typeof n.config === "object" && !Array.isArray(n.config) ? (n.config as Record<string, unknown>) : {};
     // 安全關鍵：custom-code 的 code 是「執行時直接在本機以完整權限跑」的程式碼，而且 ctx.secrets
     // 帶著全域共用的所有帳密——照單全收等於「匯入別人分享的流程 = 在自己電腦上執行別人的任意程式
     // + 帳密可被整包外送」。匯入時一律把 code 清空(含 repeat-steps 內嵌步驟)，第一次執行會由可信的
     // codegen 依節點的「意圖」說明重新生成，功能不變、但別人夾帶的程式碼不會被執行。
-    config = sanitizeConfig(n.type, config);
+    config = sanitizeConfig(n.type, config, counters, label);
     nodes.push({
       id: n.id,
       type: n.type,
-      label: typeof n.label === "string" && n.label.trim() ? n.label.trim().slice(0, 120) : n.id,
+      label,
       config,
       position: {
         x: typeof pos.x === "number" && Number.isFinite(pos.x) && Math.abs(pos.x) <= 1_000_000 ? pos.x : 0,
@@ -130,5 +148,18 @@ export async function POST(req: Request) {
     edges: edges as WorkflowEdge[],
   };
   saveWorkflow(wf);
-  return NextResponse.json({ id: newId });
+  // saveWorkflow 內部會用 deriveRequiresSecrets 依實際節點圖重算 requiresSecrets(比外來檔案
+  // 宣告的更準確)，回應前重讀一次存好的版本才能算出真正還缺哪些帳密——不能直接用上面組的
+  // wf.requiresSecrets，那是匯入檔案宣告的舊值，可能跟實際節點需要的不一致。
+  const saved = getWorkflow(newId);
+  const secretsSet = getWorkflowSecrets(newId);
+  const missingSecrets = (saved?.requiresSecrets ?? []).filter((f) => !secretsSet[f.key]?.length);
+  return NextResponse.json({
+    id: newId,
+    missingSecrets: missingSecrets.map((f) => ({ key: f.key, label: f.label, type: f.type })),
+    clearedCodeCount: counters.clearedCodeCount,
+    clearedEmailCount: counters.clearedEmailCount,
+    clearedEmailLabels: counters.clearedEmailLabels,
+    needsManualLogin: counters.needsManualLogin,
+  });
 }

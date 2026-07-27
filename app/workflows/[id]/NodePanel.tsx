@@ -127,11 +127,15 @@ export function NodePanel({
   onInstructionChange: (value: string) => void;
 }) {
   const attachInputRef = useRef<HTMLInputElement>(null);
-  // 區分是哪個動作在忙——只有 repair(自動修復) 是可以中途停止的多輪迴圈，tweak(單次 AI 微調)沒有
-  // 對應的 stop-loop 可停(那是另一個一次性端點)，停止按鈕只在 repair 進行中顯示。
+  // 區分是哪個動作在忙。repair(自動修復)是多輪迴圈，用 /stop-loop 端點中途喊停；
+  // tweak(單次 AI 微調)是單一 fetch——它的後端(nodeEditor.ts→callClaudeCode)已經接了 req.signal，
+  // 直接 abort 這個 fetch 就會一路中斷到還在跑的本機 Claude Code 子行程，不需要另外的 stop 端點。
+  // 附檔案/截圖時會走 high-effort 的本機 Claude Code，實測單次就可能跑到 4-5 分鐘——沒有停止鍵、
+  // 也沒有「這是正常的、不是卡住」的說明，使用者只會看到一顆轉圈圈的圈圈，容易誤以為壞了。
   const [busyAction, setBusyAction] = useState<"tweak" | "repair" | null>(null);
   const busy = busyAction !== null;
   const [stopping, setStopping] = useState(false);
+  const tweakControllerRef = useRef<AbortController | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [nameDraft, setNameDraft] = useState(node.label);
   const [editingName, setEditingName] = useState(false);
@@ -269,11 +273,14 @@ export function NodePanel({
     setBusyAction("tweak");
     setMsg(null);
     setLastDiff(null);
+    const controller = new AbortController();
+    tweakControllerRef.current = controller;
     try {
       const res = await fetch(`/api/workflows/${workflowId}/nodes/${node.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ parts: orderedParts() }),
+        signal: controller.signal,
       });
       const data = await res.json();
       if (res.ok) {
@@ -301,12 +308,22 @@ export function NodePanel({
         onToast(`已更新：${node.label}`); // 畫布也跳一下通知，不是只有這個面板裡的文字看得到
       } else setMsg(`失敗：${data.error}`);
     } catch {
-      // 連線中斷/回應不是 JSON 時，後端可能其實已經改好了——無論如何重載一次，別讓畫面停在舊設定
-      setMsg("連線中斷，AI 可能已完成修改，已重新載入最新設定");
-      onChanged();
+      if (controller.signal.aborted) {
+        // 使用者自己按了停止——後端的 callClaudeCode 收到 abort 會直接殺掉子行程，不會留下半套改動。
+        setMsg("已停止，這個節點沒有被改動。");
+      } else {
+        // 連線中斷/回應不是 JSON 時，後端可能其實已經改好了——無論如何重載一次，別讓畫面停在舊設定
+        setMsg("連線中斷，AI 可能已完成修改，已重新載入最新設定");
+        onChanged();
+      }
     } finally {
+      tweakControllerRef.current = null;
       setBusyAction(null);
     }
+  }
+
+  function stopTweak() {
+    tweakControllerRef.current?.abort();
   }
 
   async function repair() {
@@ -390,6 +407,14 @@ export function NodePanel({
               <p className="text-xs faint">先判斷能不能修；同一個結構性錯誤不會重跑。自訂程式碼會先在 90 秒內重產，再用不寫入資料的方式驗證。</p>
               <button onClick={stopRepair} disabled={stopping} className="btn text-xs mt-1" style={{ background: "var(--red)", color: "#fff" }}>
                 {stopping ? "停止中…" : "⏹ 停止修復"}
+              </button>
+            </>
+          )}
+          {busyAction === "tweak" && (
+            <>
+              <p className="text-xs faint">正在看你附的截圖/檔案並判斷要改哪裡；附件較多或需要仔細比對時，幾分鐘內都算正常，不是卡住。</p>
+              <button onClick={stopTweak} className="btn text-xs mt-1" style={{ background: "var(--red)", color: "#fff" }}>
+                ⏹ 停止
               </button>
             </>
           )}

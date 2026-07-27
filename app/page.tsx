@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { PageHeader, StatCard, StatusDot, EmptyState, statusLabel, formatDate } from "@/components/ui";
+import { seedImportWelcome } from "@/lib/wfChatStore";
 
 interface WorkflowSummary {
   id: string;
@@ -34,6 +35,41 @@ interface SystemHealth {
   modelApiConfigured?: boolean;
   dataPermissionsPrivate?: boolean;
 }
+/** 資料夾路徑 hash 成固定顏色(沿用畫布既有的節點類別色票，不新增 token)，同一個資料夾每次看到顏色都一樣，
+ * 掃視清單時光靠色點就能分辨「這張卡屬於哪一區」，不用逐字讀名稱。 */
+const GROUP_PALETTE = ["--cat-trigger", "--cat-browser", "--cat-data", "--cat-file", "--cat-integration", "--cat-logic", "--cat-ai", "--cat-custom"];
+function groupColor(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  return `var(${GROUP_PALETTE[hash % GROUP_PALETTE.length]})`;
+}
+
+/** 狀態色：一眼掃過去就知道哪些是好的、哪些要注意，不用逐張讀時間戳。 */
+function lastRunColor(status?: string): string {
+  if (status === "success") return "var(--green)";
+  if (status === "failed") return "var(--red)";
+  if (status === "running" || status === "queued") return "var(--amber)";
+  return "var(--border)";
+}
+
+/** 同一層清單的手動排序合併：存過的照存的順序排，沒存過的接在後面、維持原本相對順序——
+ * 跟 lib/scheduler.ts 的 mergeScheduleOrder 同一套邏輯，這裡在前端對資料夾用。 */
+function mergeOrder(items: string[], savedOrder: string[]): string[] {
+  const orderIndex = new Map(savedOrder.map((id, i) => [id, i]));
+  return [...items].sort((a, b) => {
+    const ai = orderIndex.has(a) ? orderIndex.get(a)! : savedOrder.length + items.indexOf(a);
+    const bi = orderIndex.has(b) ? orderIndex.get(b)! : savedOrder.length + items.indexOf(b);
+    return ai - bi;
+  });
+}
+
+/** "A/B/C" -> ["A","A/B","A/B/C"]：確保巢狀路徑的每一層祖先資料夾都算存在，
+ * 即使中間層從沒被明確建立過(只是因為有工作流放在更深層而隱含出現)。 */
+function pathAncestors(path: string): string[] {
+  const parts = path.split("/");
+  return parts.map((_, i) => parts.slice(0, i + 1).join("/"));
+}
+
 interface FixProposal {
   id: string;
   runId: string;
@@ -55,10 +91,16 @@ export default function HomePage() {
   const [loadError, setLoadError] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const [dismissedFailures, setDismissedFailures] = useState<string[]>([]);
   const [proposals, setProposals] = useState<FixProposal[]>([]);
   const [applying, setApplying] = useState<Record<string, boolean>>({});
   const [applyResult, setApplyResult] = useState<Record<string, { ok: boolean; error?: string; skippedExtras?: string[] }>>({});
+  // 資料夾清單/排序/檢視模式先在這裡宣告，因為下面的 load 函式跟掛載 effect 要用到這些 setter
+  const [folderPaths, setFolderPaths] = useState<string[]>([]);
+  const [folderOrder, setFolderOrder] = useState<string[]>([]);
+  const [viewMode, setViewMode] = useState<"list" | "grid">("list");
 
   async function loadProposals() {
     try { setProposals((await (await fetch("/api/fix-proposals")).json()).proposals ?? []); } catch {}
@@ -76,12 +118,26 @@ export default function HomePage() {
       setLoadError(true);
     }
   }
+
+  async function loadFolders() {
+    try {
+      const d = await (await fetch("/api/folders")).json();
+      setFolderPaths(d.paths ?? []);
+      setFolderOrder(d.sortOrder ?? []);
+    } catch {}
+  }
+
   useEffect(() => {
     // Initial client-side synchronization with the local API.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
     loadProposals();
+    loadFolders();
     try { setDismissedFailures(JSON.parse(localStorage.getItem("agenthub_dismissed_failures") ?? "[]")); } catch {}
+    try {
+      const savedView = localStorage.getItem("agenthub_view_mode");
+      if (savedView === "list" || savedView === "grid") setViewMode(savedView);
+    } catch {}
     const t = setInterval(async () => {
       try {
         const [o, h] = await Promise.all([fetch("/api/overview"), fetch("/api/health")]);
@@ -156,6 +212,35 @@ export default function HomePage() {
     }
   }
 
+  async function handleImport(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportError(null);
+    try {
+      const bundle = JSON.parse(await file.text());
+      const res = await fetch("/api/workflows/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bundle) });
+      const data = await res.json();
+      if (res.ok) {
+        // 進流程頁前先把「安全機制清掉了什麼、要自己補什麼」講清楚，使用者一打開就看得到，
+        // 不用等執行失敗才發現少了帳密/收件人/程式碼。
+        seedImportWelcome(data.id, {
+          missingSecrets: data.missingSecrets ?? [],
+          clearedCodeCount: data.clearedCodeCount ?? 0,
+          clearedEmailCount: data.clearedEmailCount ?? 0,
+          clearedEmailLabels: data.clearedEmailLabels ?? [],
+          needsManualLogin: Boolean(data.needsManualLogin),
+        });
+        router.push(`/workflows/${data.id}`);
+      } else {
+        setImportError(data.error ?? "匯入失敗");
+      }
+    } catch {
+      setImportError("檔案格式不正確");
+    } finally {
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
   const [running, setRunning] = useState<Record<string, boolean>>({});
   const [runErrors, setRunErrors] = useState<Record<string, string>>({});
   // 卡片上直接一鍵執行，不用點進去。按了不導頁(擋掉 Link)。
@@ -182,57 +267,71 @@ export default function HomePage() {
 
   const official = workflows?.filter((w) => w.status === "official") ?? [];
 
-  // ── 搜尋+群組(工作/私人…):流程一多就靠這兩個找東西 ──
+  // ── 資料夾導覽(Owen:「要像 mac 桌面的資料夾一樣，可拖拉、可以在資料夾裡面再建立資料夾、
+  // 可以選擇要一列一列還是按圖案排列」)。currentPath 是目前打開到哪一層："" =桌面根目錄，
+  // "A" = A 資料夾，"A/B" = A 底下的 B 資料夾……工作流的 group 欄位本身就是這種路徑字串。 ──
   const [search, setSearch] = useState("");
-  const [groupFilter, setGroupFilter] = useState<string | null>(null);
+  const [currentPath, setCurrentPath] = useState("");
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [folderActionError, setFolderActionError] = useState<string | null>(null);
+  function changeViewMode(mode: "list" | "grid") {
+    setViewMode(mode);
+    localStorage.setItem("agenthub_view_mode", mode);
+  }
+
   const [groupMenuFor, setGroupMenuFor] = useState<string | null>(null);
   const [newGroupName, setNewGroupName] = useState("");
   const [groupError, setGroupError] = useState<string | null>(null);
-  // 群組區塊可收合(Owen:「一多就看著砸」)——收合狀態存 localStorage,重整/下次來還記得
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
-  useEffect(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem("agenthub_collapsed_groups") ?? "[]") as string[];
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setCollapsedGroups(new Set(saved));
-    } catch {}
-  }, []);
-  function toggleGroupCollapsed(title: string) {
-    setCollapsedGroups((prev) => {
-      const next = new Set(prev);
-      if (next.has(title)) next.delete(title);
-      else next.add(title);
-      localStorage.setItem("agenthub_collapsed_groups", JSON.stringify([...next]));
-      return next;
-    });
-  }
   useEffect(() => {
     if (!groupMenuFor) return;
     // 點選單「外面」才關。不能靠選單內 stopPropagation 擋——Next App Router 的 React 根就是
     // document,這個監聽器跟 React 的事件代理掛在同一個節點,stopPropagation 攔不住同節點的
-    // 兄弟監聽器(踩過的真實 bug:點到「新群組名稱」輸入框選單就關掉,名字永遠打不進去)。
+    // 兄弟監聽器(踩過的真實 bug:點到「新資料夾名稱」輸入框選單就關掉,名字永遠打不進去)。
     // 改用檢查點擊落點:落在選單內/🗂 按鈕上一律不關。
     const close = (e: MouseEvent) => {
       const t = e.target as HTMLElement | null;
-      if (t && (t.closest(".menu") || t.closest("button[aria-label='移到群組']"))) return;
+      if (t && (t.closest(".menu") || t.closest("button[aria-label='移到資料夾']"))) return;
       setGroupMenuFor(null);
     };
     document.addEventListener("click", close);
     return () => document.removeEventListener("click", close);
   }, [groupMenuFor]);
 
-  const groups = [...new Set(official.map((w) => w.group).filter((g): g is string => Boolean(g)))].sort((a, b) => a.localeCompare(b, "zh-Hant"));
+  // 所有「已知」的資料夾路徑：明確建立過的(folderPaths) ∪ 工作流 group 欄位隱含的路徑，
+  // 兩邊都展開成「每一層祖先都算數」——巢狀資料夾即使中間層沒人特地建立過也看得到。
+  const allFolderPaths = [
+    ...new Set([
+      ...folderPaths.flatMap(pathAncestors),
+      ...official.flatMap((w) => (w.group ? pathAncestors(w.group) : [])),
+    ]),
+  ];
+  const sortedFolderPaths = mergeOrder(allFolderPaths, folderOrder).sort((a, b) => {
+    // mergeOrder 已經套用手動順序；沒手動排過的彼此之間再照筆劃排序，不要維持不穩定的原始陣列順序
+    const ai = folderOrder.includes(a) ? -1 : 0;
+    const bi = folderOrder.includes(b) ? -1 : 0;
+    if (ai !== bi) return ai - bi;
+    return ai === -1 ? 0 : a.localeCompare(b, "zh-Hant");
+  });
+  const childPrefix = currentPath ? `${currentPath}/` : "";
+  const childFolders = sortedFolderPaths
+    .filter((p) => p.startsWith(childPrefix) && p !== currentPath && !p.slice(childPrefix.length).includes("/"))
+    .map((p) => ({
+      path: p,
+      name: p.slice(childPrefix.length),
+      count: official.filter((w) => w.group === p || w.group?.startsWith(`${p}/`)).length,
+    }));
+  const itemsHere = official.filter((w) => (w.group ?? "") === currentPath);
+
   const q = search.trim().toLowerCase();
-  const visible = official.filter(
-    (w) =>
-      (!q || w.name.toLowerCase().includes(q) || (w.description ?? "").toLowerCase().includes(q)) &&
-      (!groupFilter || w.group === groupFilter),
+  const searching = q.length > 0;
+  const searchMatches = official.filter(
+    (w) => w.name.toLowerCase().includes(q) || (w.description ?? "").toLowerCase().includes(q),
   );
-  // 分區:有名字的群組照字母序,「未分組」永遠最後(沒有任何群組時只有一區、不顯示標題)
-  const sections = [
-    ...groups.filter((g) => !groupFilter || g === groupFilter).map((g) => ({ title: g, items: visible.filter((w) => w.group === g) })),
-    ...(!groupFilter ? [{ title: "未分組", items: visible.filter((w) => !w.group) }] : []),
-  ].filter((s) => s.items.length > 0);
+  // 搜尋橫跨所有資料夾，用工作流當下的完整路徑當小標題分組，才知道每一筆是哪個資料夾的
+  const searchSections = [...new Set(searchMatches.map((w) => w.group || "(桌面)"))]
+    .sort((a, b) => a.localeCompare(b, "zh-Hant"))
+    .map((title) => ({ title, items: searchMatches.filter((w) => (w.group || "(桌面)") === title) }));
 
   async function assignGroup(wfId: string, group: string) {
     setGroupMenuFor(null);
@@ -244,16 +343,46 @@ export default function HomePage() {
         body: JSON.stringify({ group }),
       });
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error((data as { error?: string }).error ?? "移動群組失敗");
+      if (!response.ok) throw new Error((data as { error?: string }).error ?? "移動資料夾失敗");
       setGroupError(null);
       load();
     } catch (error) {
-      setGroupError(error instanceof Error ? error.message : "移動群組失敗");
+      setGroupError(error instanceof Error ? error.message : "移動資料夾失敗");
     }
   }
 
-  // ── 拖曳排序(Owen:「不能自己排順序」)：抓卡片右上的 ⠿ 拖到另一張卡上放開，
-  // 順序存伺服器(settings)，重整/換裝置都一致。樂觀更新:先動畫面再送後端,失敗就重載回真實順序。 ──
+  async function createFolder() {
+    const name = newFolderName.trim();
+    if (!name) return;
+    const path = currentPath ? `${currentPath}/${name}` : name;
+    setFolderActionError(null);
+    try {
+      const res = await fetch("/api/folders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data as { error?: string }).error ?? "建立資料夾失敗");
+      setNewFolderName("");
+      setCreatingFolder(false);
+      loadFolders();
+    } catch (error) {
+      setFolderActionError(error instanceof Error ? error.message : "建立資料夾失敗");
+    }
+  }
+
+  async function deleteFolder(path: string, name: string) {
+    if (!confirm(`刪除空資料夾「${name}」？`)) return;
+    setFolderActionError(null);
+    try {
+      const res = await fetch("/api/folders", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data as { error?: string }).error ?? "刪除資料夾失敗");
+      loadFolders();
+    } catch (error) {
+      setFolderActionError(error instanceof Error ? error.message : "刪除資料夾失敗");
+    }
+  }
+
+  // ── 拖曳排序(Owen:「不能自己排順序」/「可拖拉」)：抓卡片/圖示拖到另一個上放開，
+  // 順序存伺服器，重整/換裝置都一致。樂觀更新:先動畫面再送後端,失敗就重載回真實順序。 ──
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   async function handleDrop(targetId: string) {
@@ -280,17 +409,221 @@ export default function HomePage() {
       load(); // 存失敗就撤回樂觀更新，畫面回到伺服器的真實順序
     }
   }
+  // 把正在拖的工作流放到某個資料夾圖示上——直接歸檔進去，跟 Finder 把檔案拖進資料夾一樣
+  async function handleDropOnFolder(path: string) {
+    const sourceId = dragId;
+    setDragId(null);
+    setDropFolderTarget(null);
+    if (!sourceId) return;
+    await assignGroup(sourceId, path);
+  }
+
+  const [dragFolder, setDragFolder] = useState<string | null>(null);
+  const [dropFolderTarget, setDropFolderTarget] = useState<string | null>(null);
+  async function handleFolderReorder(targetPath: string) {
+    const sourcePath = dragFolder;
+    setDragFolder(null);
+    setDropFolderTarget(null);
+    if (!sourcePath || sourcePath === targetPath) return;
+    const levelPaths = childFolders.map((f) => f.path);
+    const from = levelPaths.indexOf(sourcePath);
+    const to = levelPaths.indexOf(targetPath);
+    if (from < 0 || to < 0) return;
+    const reorderedLevel = [...levelPaths];
+    reorderedLevel.splice(from, 1);
+    reorderedLevel.splice(to, 0, sourcePath);
+    // 只調整這一層在 sortedFolderPaths 裡的那幾個位置，其他層的相對順序完全不動
+    const levelSet = new Set(levelPaths);
+    let cursor = 0;
+    const newFullOrder = sortedFolderPaths.map((p) => (levelSet.has(p) ? reorderedLevel[cursor++] : p));
+    setFolderOrder(newFullOrder);
+    try {
+      const res = await fetch("/api/folders/reorder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths: newFullOrder }) });
+      if (!res.ok) throw new Error();
+    } catch {
+      loadFolders();
+    }
+  }
+
+  function moveMenu(w: WorkflowSummary) {
+    return (
+      <div className="menu absolute right-2 top-11 z-30" onClick={(e) => e.stopPropagation()}>
+        <p className="text-[11px] faint px-2.5 pt-1.5 pb-1">移到資料夾</p>
+        {sortedFolderPaths.map((p) => (
+          <button key={p} className="menu-item" onClick={() => assignGroup(w.id, p)}>
+            <span>🗂</span> <span className="truncate">{p}</span> {w.group === p && <span className="ml-auto shrink-0" style={{ color: "var(--accent)" }}>✓</span>}
+          </button>
+        ))}
+        {w.group && (
+          <button className="menu-item" onClick={() => assignGroup(w.id, "")}>
+            <span>✕</span> 移到桌面(不放資料夾)
+          </button>
+        )}
+        <div className="menu-sep" />
+        <div className="flex items-center gap-1 px-1.5 pb-1">
+          <input
+            value={newGroupName}
+            onChange={(e) => setNewGroupName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && newGroupName.trim()) assignGroup(w.id, newGroupName.trim()); }}
+            placeholder="新資料夾名稱…"
+            className="input text-xs py-1"
+          />
+          <button
+            onClick={() => { if (newGroupName.trim()) assignGroup(w.id, newGroupName.trim()); }}
+            className="btn btn-ghost text-xs shrink-0"
+          >
+            建立
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  function workflowRow(w: WorkflowSummary, i: number) {
+    const statusColor = lastRunColor(w.lastRun?.status);
+    return (
+      <div
+        key={w.id}
+        className="group flex items-center gap-3 pl-3 pr-2.5 py-2 relative rise-in transition-colors"
+        style={{
+          animationDelay: `${Math.min(i, 10) * 30}ms`,
+          borderColor: "var(--border)",
+          background: dropTargetId === w.id && dragId !== w.id ? "var(--surface-2)" : undefined,
+          ...(dragId === w.id ? { opacity: 0.4 } : {}),
+        }}
+        onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTargetId(w.id); } }}
+        onDragLeave={() => { if (dropTargetId === w.id) setDropTargetId(null); }}
+        onDrop={(e) => { e.preventDefault(); handleDrop(w.id); }}
+      >
+        <Link href={`/workflows/${w.id}`} className="absolute inset-0 z-0 hover:bg-[var(--surface-hover)] transition-colors" aria-label={`開啟流程：${w.name}`} />
+        <span
+          className="w-2 h-2 rounded-full shrink-0 relative z-[1] pointer-events-none"
+          title={w.lastRun ? `${statusLabel(w.lastRun.status)} · ${formatDate(w.lastRun.started_at)}` : "還沒執行過"}
+          style={{ background: statusColor, boxShadow: w.lastRun?.status === "success" || w.lastRun?.status === "failed" ? `0 0 6px -1px ${statusColor}` : undefined }}
+        />
+        <div className="min-w-0 flex-1 flex items-baseline gap-2 relative z-[1] pointer-events-none">
+          <span className="text-sm font-medium tracking-tight shrink-0">{w.name}</span>
+          {w.builtin && <span className="badge badge-neutral shrink-0">內建範例</span>}
+          <span className="text-xs faint truncate hidden sm:inline">
+            {w.description || <span className="italic">點進去跟 AI 對話，說明會自動補上 ✨</span>}
+          </span>
+        </div>
+        <span className="hidden md:flex items-center gap-1 text-xs shrink-0 relative z-[1] pointer-events-none" style={{ color: "var(--text-faint)" }}>
+          {w.triggers?.schedule && <span title="有啟用的排程，時間到自動執行">⏰</span>}
+          {w.triggers?.watch && <span title="正在監聽資料夾，新檔案會自動觸發">📁</span>}
+          {w.triggers?.webhook && <span title="Webhook 已啟用，外部工具可觸發">🔗</span>}
+          {w.triggers?.email && <span title="收信觸發已開啟，符合條件的新 email 會自動觸發">📨</span>}
+          {w.triggers?.telegram && <span title="Telegram 訊息觸發已開啟，傳訊息給 bot 就自動執行">✈️</span>}
+          {w.triggers?.line && <span title="LINE 訊息觸發已啟用，傳訊息給官方帳號就自動執行">💬</span>}
+        </span>
+        <span className="hidden lg:inline text-xs shrink-0 relative z-[1] pointer-events-none tabular-nums" style={{ color: w.lastRun ? statusColor : "var(--text-faint)" }}>
+          {w.lastRun ? formatDate(w.lastRun.started_at) : "還沒執行過"}
+        </span>
+        <span className="hidden xl:inline text-[11px] faint shrink-0 relative z-[1] pointer-events-none tabular-nums w-9 text-right">{w.nodeCount} 步</span>
+        <span className="flex items-center shrink-0 relative z-10">
+          <button onClick={(e) => runNow(e, w)} disabled={running[w.id]} title={w.needsRunInput ? "先填這次執行需要的資料" : "用預設參數立即執行"} className="btn btn-ghost text-xs shrink-0 py-1">
+            {running[w.id] ? "啟動中…" : w.needsRunInput ? "填資料執行" : "▶ 執行"}
+          </button>
+          <span className="flex items-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 transition-opacity">
+            <span
+              draggable
+              onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDragId(w.id); }}
+              onDragEnd={() => { setDragId(null); setDropTargetId(null); }}
+              className="faint hover:text-[var(--text)] text-sm w-7 h-7 grid place-items-center rounded-md cursor-grab active:cursor-grabbing select-none"
+              title="拖到另一列上調整順序，或拖到資料夾圖示上歸檔"
+              aria-label="拖曳排序"
+            >
+              ⠿
+            </span>
+            {!w.builtin && (
+              <button
+                onClick={(e) => { e.stopPropagation(); setGroupMenuFor((cur) => (cur === w.id ? null : w.id)); }}
+                className="faint hover:text-[var(--text)] text-sm w-7 h-7 grid place-items-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-2"
+                title="移到資料夾"
+                aria-label="移到資料夾"
+              >
+                🗂
+              </button>
+            )}
+          </span>
+        </span>
+        {groupMenuFor === w.id && moveMenu(w)}
+        {runErrors[w.id] && <p className="absolute left-3 -bottom-4 text-[11px] z-[1]" style={{ color: "var(--red)" }}>{runErrors[w.id]}</p>}
+      </div>
+    );
+  }
+
+  function workflowTile(w: WorkflowSummary) {
+    const statusColor = lastRunColor(w.lastRun?.status);
+    return (
+      <div
+        key={w.id}
+        draggable
+        onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDragId(w.id); }}
+        onDragEnd={() => { setDragId(null); setDropTargetId(null); }}
+        onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTargetId(w.id); } }}
+        onDragLeave={() => { if (dropTargetId === w.id) setDropTargetId(null); }}
+        onDrop={(e) => { e.preventDefault(); handleDrop(w.id); }}
+        className="group relative flex flex-col items-center gap-1 w-[108px] py-3.5 px-2 rounded-xl hover:bg-[var(--surface-2)] transition-colors cursor-grab active:cursor-grabbing"
+        style={{
+          background: dropTargetId === w.id && dragId !== w.id ? "var(--surface-2)" : undefined,
+          outline: dropTargetId === w.id && dragId !== w.id ? "2px dashed var(--accent)" : undefined,
+          outlineOffset: "-2px",
+          ...(dragId === w.id ? { opacity: 0.4 } : {}),
+        }}
+      >
+        <Link href={`/workflows/${w.id}`} className="absolute inset-0 rounded-xl z-0" aria-label={`開啟流程：${w.name}`} />
+        <div className="relative pointer-events-none">
+          <span className="text-[40px] leading-none">📄</span>
+          <span
+            className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2"
+            style={{ background: statusColor, borderColor: "var(--app-bg)" }}
+            title={w.lastRun ? `${statusLabel(w.lastRun.status)} · ${formatDate(w.lastRun.started_at)}` : "還沒執行過"}
+          />
+        </div>
+        <span className="text-xs font-medium text-center leading-snug pointer-events-none">{w.name}</span>
+        {w.builtin && <span className="badge badge-neutral pointer-events-none">內建範例</span>}
+        <span className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 transition-opacity relative z-10">
+          <button onClick={(e) => runNow(e, w)} disabled={running[w.id]} title="執行" className="btn btn-ghost text-[11px] shrink-0 py-0.5 px-2">
+            {running[w.id] ? "…" : "▶ 執行"}
+          </button>
+          {!w.builtin && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setGroupMenuFor((cur) => (cur === w.id ? null : w.id)); }}
+              className="faint hover:text-[var(--text)] text-xs w-6 h-6 grid place-items-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-2"
+              title="移到資料夾"
+              aria-label="移到資料夾"
+            >
+              🗂
+            </button>
+          )}
+        </span>
+        {groupMenuFor === w.id && moveMenu(w)}
+        {runErrors[w.id] && <p className="absolute left-1/2 -translate-x-1/2 -bottom-4 text-[10px] whitespace-nowrap z-[1]" style={{ color: "var(--red)" }}>{runErrors[w.id]}</p>}
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-8 py-6 sm:py-8">
       <PageHeader
         title="我的流程"
         subtitle="用白話跟 AI 建立、測試和執行工作流程"
-        actions={<button onClick={createNew} disabled={creating} className="btn btn-primary">{creating ? "建立中…" : "＋ 建立新流程"}</button>}
+        actions={
+          <>
+            <label className="btn btn-ghost cursor-pointer">
+              ⬇ 匯入
+              <input ref={fileRef} type="file" accept=".json" onChange={handleImport} className="hidden" />
+            </label>
+            <button onClick={createNew} disabled={creating} className="btn btn-primary">{creating ? "建立中…" : "＋ 建立新流程"}</button>
+          </>
+        }
       />
       {loadError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>載入失敗，請確認伺服器是否正常，<button onClick={load} className="underline">重試</button>。</div>}
       {createError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>建立失敗，請確認伺服器是否正常後再試一次。</div>}
+      {importError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>{importError}</div>}
       {groupError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>{groupError}</div>}
+      {folderActionError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>{folderActionError}</div>}
 
       {health && (!health.ok || (health.missingSecretKeys?.length ?? 0) > 0 || !health.modelApiConfigured) && (
         <div className="card px-4 py-3 mb-5 text-sm space-y-1.5" style={{ borderColor: health.ok ? "var(--amber)" : "var(--red)" }}>
@@ -401,9 +734,9 @@ export default function HomePage() {
         />
       )}
 
-      {/* 搜尋+群組篩選:流程一多就靠這排找東西 */}
+      {/* 工具列：搜尋(跨資料夾) + 檢視切換 + 新增資料夾 */}
       {official.length > 0 && (
-        <div className="flex items-center gap-2 mb-5 flex-wrap">
+        <div className="flex items-center gap-2 mb-3 flex-wrap">
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -411,138 +744,158 @@ export default function HomePage() {
             className="input text-sm max-w-[260px]"
             aria-label="搜尋流程"
           />
-          {groups.length > 0 && (
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <button onClick={() => setGroupFilter(null)} className="btn btn-ghost text-xs" style={groupFilter === null ? { borderColor: "var(--accent)", color: "var(--accent)" } : undefined}>全部</button>
-              {groups.map((g) => (
-                <button key={g} onClick={() => setGroupFilter((cur) => (cur === g ? null : g))} className="btn btn-ghost text-xs" style={groupFilter === g ? { borderColor: "var(--accent)", color: "var(--accent)" } : undefined}>
-                  🗂 {g}
-                </button>
-              ))}
+          <div className="ml-auto flex items-center gap-1.5">
+            <div className="flex items-center rounded-lg overflow-hidden" style={{ border: "1px solid var(--border-strong)" }}>
+              <button
+                onClick={() => changeViewMode("list")}
+                aria-pressed={viewMode === "list"}
+                title="清單檢視"
+                className="w-8 h-8 grid place-items-center text-sm"
+                style={viewMode === "list" ? { background: "var(--accent)", color: "#fff" } : { color: "var(--text-faint)" }}
+              >
+                ☰
+              </button>
+              <button
+                onClick={() => changeViewMode("grid")}
+                aria-pressed={viewMode === "grid"}
+                title="圖示檢視"
+                className="w-8 h-8 grid place-items-center text-sm"
+                style={viewMode === "grid" ? { background: "var(--accent)", color: "#fff" } : { color: "var(--text-faint)" }}
+              >
+                ⊞
+              </button>
             </div>
-          )}
+            {!searching && !creatingFolder && (
+              <button onClick={() => setCreatingFolder(true)} className="btn btn-ghost text-xs">📁＋ 新增資料夾</button>
+            )}
+          </div>
         </div>
       )}
 
-      {sections.map(({ title, items }) => {
-        const showHeader = groups.length > 0 || title !== "未分組";
-        const collapsed = showHeader && collapsedGroups.has(title);
-        return (
-        <div key={title} className="mb-6">
-          {showHeader && (
-            <button
-              onClick={() => toggleGroupCollapsed(title)}
-              className="min-h-8 px-1 -ml-1 rounded-md text-sm font-semibold mb-3 flex items-center gap-2 hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2"
-              style={{ color: "var(--text-muted)" }}
-              aria-expanded={!collapsed}
-            >
-              <span className="text-xs faint w-3 inline-block">{collapsed ? "▸" : "▾"}</span>
-              🗂 {title} <span className="faint font-normal">{items.length}</span>
-            </button>
-          )}
-          {!collapsed && (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {items.map((w, i) => (
-          <article
-            key={w.id}
-            className="card card-hover p-3.5 relative rise-in"
-            style={{
-              animationDelay: `${Math.min(i, 8) * 45}ms`,
-              ...(dropTargetId === w.id && dragId !== w.id ? { outline: "2px dashed var(--accent)", outlineOffset: "2px" } : {}),
-              ...(dragId === w.id ? { opacity: 0.4 } : {}),
-            }}
-            onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTargetId(w.id); } }}
-            onDragLeave={() => { if (dropTargetId === w.id) setDropTargetId(null); }}
-            onDrop={(e) => { e.preventDefault(); handleDrop(w.id); }}
-          >
-            <Link href={`/workflows/${w.id}`} className="absolute inset-0 rounded-[var(--radius-md)] z-0" aria-label={`開啟流程：${w.name}`} />
-            <div className="flex items-center gap-2 relative z-[1] pointer-events-none">
-              <span className="text-sm font-medium tracking-tight truncate">{w.name}</span>
-              {w.builtin && <span className="badge badge-neutral shrink-0">內建範例</span>}
-              <span className="ml-auto flex items-center shrink-0 pointer-events-auto relative z-10">
-                <span
-                  draggable
-                  onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDragId(w.id); }}
-                  onDragEnd={() => { setDragId(null); setDropTargetId(null); }}
-                  className="faint hover:text-[var(--text)] text-sm w-7 h-7 grid place-items-center rounded-md cursor-grab active:cursor-grabbing select-none"
-                  title="拖到另一張卡片上調整順序"
-                  aria-label="拖曳排序"
-                >
-                  ⠿
-                </span>
-                {!w.builtin && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setGroupMenuFor((cur) => (cur === w.id ? null : w.id)); }}
-                    className="faint hover:text-[var(--text)] text-sm w-7 h-7 grid place-items-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-2"
-                    title="移到群組(工作/私人…)"
-                    aria-label="移到群組"
-                  >
-                    🗂
-                  </button>
-                )}
+      {/* 麵包屑：跟 Finder 路徑列一樣，點任何一段可以直接跳過去 */}
+      {official.length > 0 && !searching && (
+        <div className="flex items-center gap-1 mb-4 text-sm flex-wrap">
+          <button onClick={() => setCurrentPath("")} className="hover:underline" style={{ color: currentPath === "" ? "var(--text)" : "var(--text-muted)", fontWeight: currentPath === "" ? 600 : 400 }}>
+            🖥️ 我的流程
+          </button>
+          {currentPath && currentPath.split("/").map((seg, i, arr) => {
+            const upTo = arr.slice(0, i + 1).join("/");
+            const isLast = i === arr.length - 1;
+            return (
+              <span key={upTo} className="flex items-center gap-1">
+                <span className="faint">/</span>
+                <button onClick={() => setCurrentPath(upTo)} className="hover:underline" style={{ color: isLast ? "var(--text)" : "var(--text-muted)", fontWeight: isLast ? 600 : 400 }}>
+                  {seg}
+                </button>
               </span>
-            </div>
-            <p className="text-[11px] faint mt-0.5 flex items-center gap-1.5 relative z-[1] pointer-events-none">
-              <span>{w.nodeCount} 步</span>
-              {w.triggers?.schedule && <span title="有啟用的排程，時間到自動執行">⏰</span>}
-              {w.triggers?.watch && <span title="正在監聽資料夾，新檔案會自動觸發">📁</span>}
-              {w.triggers?.webhook && <span title="Webhook 已啟用，外部工具可觸發">🔗</span>}
-              {w.triggers?.email && <span title="收信觸發已開啟，符合條件的新 email 會自動觸發">📨</span>}
-              {w.triggers?.telegram && <span title="Telegram 訊息觸發已開啟，傳訊息給 bot 就自動執行">✈️</span>}
-              {w.triggers?.line && <span title="LINE 訊息觸發已啟用，傳訊息給官方帳號就自動執行">💬</span>}
-              <span className="mx-0.5">·</span>
-              {w.lastRun ? (
-                <span className="flex items-center gap-1" style={{ color: w.lastRun.status === "failed" ? "var(--red)" : w.lastRun.status === "success" ? "var(--green)" : "var(--text-faint)" }}>
-                  <StatusDot status={w.lastRun.status} size={5} />
-                  {statusLabel(w.lastRun.status)} {formatDate(w.lastRun.started_at)}
-                </span>
-              ) : (
-                <span>還沒執行過</span>
-              )}
-            </p>
-            {groupMenuFor === w.id && (
-              <div className="menu absolute right-3 top-10 z-30" onClick={(e) => e.stopPropagation()}>
-                <p className="text-[11px] faint px-2.5 pt-1.5 pb-1">移到群組</p>
-                {groups.map((g) => (
-                  <button key={g} className="menu-item" onClick={() => assignGroup(w.id, g)}>
-                    <span>🗂</span> {g} {w.group === g && <span className="ml-auto" style={{ color: "var(--accent)" }}>✓</span>}
-                  </button>
-                ))}
-                {w.group && (
-                  <button className="menu-item" onClick={() => assignGroup(w.id, "")}>
-                    <span>✕</span> 移出群組
+            );
+          })}
+        </div>
+      )}
+
+      {/* 新增資料夾的行內表單 */}
+      {creatingFolder && (
+        <div className="flex items-center gap-1.5 mb-4">
+          <span className="text-xl leading-none">🗂️</span>
+          <input
+            autoFocus
+            value={newFolderName}
+            onChange={(e) => setNewFolderName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") createFolder();
+              if (e.key === "Escape") { setCreatingFolder(false); setNewFolderName(""); }
+            }}
+            placeholder="資料夾名稱…"
+            className="input text-sm max-w-[220px]"
+          />
+          <button onClick={createFolder} className="btn btn-primary text-xs">建立</button>
+          <button onClick={() => { setCreatingFolder(false); setNewFolderName(""); }} className="btn btn-ghost text-xs">取消</button>
+        </div>
+      )}
+
+      {/* 資料夾圖示：點一下打開，可拖拉排序，也可以把工作流拖進來歸檔 */}
+      {!searching && childFolders.length > 0 && (
+        <div className="flex flex-wrap gap-1 mb-2">
+          {childFolders.map(({ path, name, count }) => {
+            const accent = groupColor(path);
+            const isDropTarget = dropFolderTarget === path && (dragFolder ? dragFolder !== path : Boolean(dragId));
+            return (
+              <div
+                key={path}
+                role="button"
+                tabIndex={0}
+                onClick={() => setCurrentPath(path)}
+                onKeyDown={(e) => { if (e.key === "Enter") setCurrentPath(path); }}
+                draggable
+                onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDragFolder(path); }}
+                onDragEnd={() => { setDragFolder(null); setDropFolderTarget(null); }}
+                onDragOver={(e) => { if (dragFolder || dragId) { e.preventDefault(); setDropFolderTarget(path); } }}
+                onDragLeave={() => { if (dropFolderTarget === path) setDropFolderTarget(null); }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (dragFolder) handleFolderReorder(path);
+                  else if (dragId) handleDropOnFolder(path);
+                }}
+                className="group/folder relative flex flex-col items-center gap-1 w-[108px] py-3.5 px-2 rounded-xl hover:bg-[var(--surface-2)] transition-colors cursor-grab active:cursor-grabbing focus-visible:outline-2 focus-visible:outline-offset-2"
+                style={{
+                  ...(isDropTarget ? { background: "var(--accent-soft)", outline: "2px dashed var(--accent)", outlineOffset: "-2px" } : {}),
+                  ...(dragFolder === path ? { opacity: 0.4 } : {}),
+                }}
+              >
+                <span className="text-[44px] leading-none pointer-events-none" style={{ filter: `drop-shadow(0 6px 12px color-mix(in srgb, ${accent} 50%, transparent))` }}>🗂️</span>
+                <span className="text-xs font-medium text-center leading-snug mt-0.5 pointer-events-none">{name}</span>
+                <span className="text-[11px] faint pointer-events-none">{count} 個流程</span>
+                {count === 0 && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); deleteFolder(path, name); }}
+                    className="absolute top-1 right-1 w-5 h-5 rounded-full grid place-items-center text-[10px] opacity-0 group-hover/folder:opacity-100 transition-opacity"
+                    style={{ background: "var(--surface)", border: "1px solid var(--border-strong)" }}
+                    title="刪除空資料夾"
+                    aria-label={`刪除資料夾 ${name}`}
+                  >
+                    ✕
                   </button>
                 )}
-                <div className="menu-sep" />
-                <div className="flex items-center gap-1 px-1.5 pb-1">
-                  <input
-                    value={newGroupName}
-                    onChange={(e) => setNewGroupName(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter" && newGroupName.trim()) assignGroup(w.id, newGroupName.trim()); }}
-                    placeholder="新群組名稱…"
-                    className="input text-xs py-1"
-                  />
-                  <button
-                    onClick={() => { if (newGroupName.trim()) assignGroup(w.id, newGroupName.trim()); }}
-                    className="btn btn-ghost text-xs shrink-0"
-                  >
-                    建立
-                  </button>
-                </div>
               </div>
-            )}
-            <div className="flex items-end gap-2 mt-1.5 relative z-[1] pointer-events-none">
-              <p className="text-xs muted line-clamp-1 flex-1 min-w-0">{w.description || <span className="faint italic">點進去跟 AI 對話，說明會自動補上 ✨</span>}</p>
-              <button onClick={(e) => runNow(e, w)} disabled={running[w.id]} title={w.needsRunInput ? "先填這次執行需要的資料" : "用預設參數立即執行"} className="btn btn-ghost text-xs shrink-0 pointer-events-auto relative z-10 py-0.5">{running[w.id] ? "啟動中…" : w.needsRunInput ? "填資料執行" : "▶ 執行"}</button>
-            </div>
-            {runErrors[w.id] && <p className="text-xs mt-1.5 relative z-[1]" style={{ color: "var(--red)" }}>{runErrors[w.id]}</p>}
-          </article>
-            ))}
-          </div>
-          )}
+            );
+          })}
         </div>
-        );
-      })}
+      )}
+
+      {!searching && currentPath && childFolders.length === 0 && itemsHere.length === 0 && (
+        <p className="text-sm muted mb-4">這個資料夾是空的，把工作流拖進來，或直接在這裡「＋新增資料夾」。</p>
+      )}
+
+      {/* 這一層資料夾裡的工作流本體：清單或圖示，看上面的檢視切換 */}
+      {!searching && itemsHere.length > 0 && viewMode === "list" && (
+        <div className="card divide-y overflow-hidden mb-2" style={{ borderColor: "var(--border)" }}>
+          {itemsHere.map((w, i) => workflowRow(w, i))}
+        </div>
+      )}
+      {!searching && itemsHere.length > 0 && viewMode === "grid" && (
+        <div className="flex flex-wrap gap-1 mb-2">
+          {itemsHere.map((w) => workflowTile(w))}
+        </div>
+      )}
+
+      {/* 搜尋結果：橫跨所有資料夾，用完整路徑當小標題分組 */}
+      {searching && searchSections.length === 0 && (
+        <p className="text-sm muted">沒有符合的流程，換個關鍵字試試。</p>
+      )}
+      {searching && searchSections.map(({ title, items }) => (
+        <div key={title} className="mb-7">
+          <div className="flex items-center gap-2.5 mb-3.5">
+            <span className="text-sm font-semibold flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
+              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: title === "(桌面)" ? "var(--text-faint)" : groupColor(title) }} />
+              {title} <span className="faint font-normal tabular-nums">{items.length}</span>
+            </span>
+            <div className="h-px flex-1" style={{ background: "var(--border)" }} />
+          </div>
+          <div className="card divide-y overflow-hidden" style={{ borderColor: "var(--border)" }}>
+            {items.map((w, i) => workflowRow(w, i))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

@@ -20,7 +20,7 @@ import { materializeChatAttachment } from "../chatAttachments";
 import { KNOWN_WORKING_MODELS, MODELS, VISION_MODELS, supportsVision } from "../models";
 import { plainLanguage } from "./plainLanguage";
 import { parseCron } from "../cron";
-import { planGraphStructureEdits, type GraphStructureEdits } from "./graphStructure";
+import { hasStructureChanges, planGraphStructureEdits, type GraphStructureEdits } from "./graphStructure";
 
 export type MessagePart =
   | { kind: "text"; text: string }
@@ -533,13 +533,24 @@ function normalizeIfConditionPorts(nodes: WorkflowNode[], edges: WorkflowEdge[])
 
 /** 把單一節點 config 裡「常常上千字」的 code 欄位截成標記——共用給頂層 config.code 和
  * repeat-steps 內嵌 steps 陣列裡每個 step 自己的 config.code(見 compactGraphJson 的說明)。
- * keepIfContains：使用者訊息裡引號引用的字串——code 裡若真的出現這些字，代表使用者就是要
- * 針對這段程式碼的內文做修改(如「把日期格式 XXX 改成 YYY」)，這時不能截斷，模型看不到內文
- * 就只能憑 intent 整段盲寫(慢又容易寫壞已調好的邏輯)。只保留「真的相關」的那幾個節點，
- * 其他節點照常截斷，提示不會因此全面膨脹。 */
-function truncateCode(cfg: Record<string, unknown>, keepIfContains: string[] = []): Record<string, unknown> {
+ * exactKeep：使用者訊息裡加引號點名的字串(quotedStrings)——比對 label／intent／code 任一處，
+ * 引號是使用者刻意的明確指名，就算出現在 intent 這種自由文字裡誤觸發的機率也很低。
+ * fuzzyKeep：使用者訊息裡沒加引號的裸字代碼(bareTechnicalTokens，如「agg1」連同字根「agg」)——
+ * 只比對 label／code，**刻意不比對 intent**：intent 是白話自由文字，常常會為了說明清楚而舉例提到
+ * 別的節點也用得到的字眼(真實踩過的事故：n13 的 intent 寫「D欄=該筆代碼(如agg8)」只是舉例說明
+ * 表格格式，本身完全不需要改，卻因為這句話含「agg」被誤判成相關節點、把它 8555 字的程式碼也保留
+ * 下來，讓提示從原本該有的約 6500 字暴增到 18513 字，反而讓本機 Claude Code 需要處理的內容更大，
+ * 更難在時限內回應)。label／code 是「這個節點實際是什麼」的直接證據，比 intent 這種說明性文字精準。
+ * 兩者任一命中都不截斷，讓模型看得到真正需要參考的內文，不用整段盲寫(慢又容易寫壞已調好的邏輯，
+ * 真實踩過：要求把 agg8~agg17 改成 agg1~agg6、agg19 這種裸字代碼變更，訊息完全沒加引號，程式碼被
+ * 整段截斷成「約N字」的標記，模型被迫從零盲寫一份近 6000 字的 Excel 擷取邏輯，本機 Claude Code
+ * 跑滿 5 分鐘都生不出來，使用者只收到「已停止」)。只保留「真的相關」的那幾個節點，其他節點照常
+ * 截斷，提示不會因此全面膨脹。 */
+function truncateCode(cfg: Record<string, unknown>, exactKeep: string[] = [], fuzzyKeep: string[] = [], label = ""): Record<string, unknown> {
   if (typeof cfg.code === "string" && cfg.code.length > 120) {
-    if (keepIfContains.some((s) => (cfg.code as string).includes(s))) return cfg;
+    const preciseHaystack = `${label}\n${String(cfg.intent ?? "")}\n${cfg.code}`;
+    const fuzzyHaystack = `${label}\n${cfg.code}`;
+    if (exactKeep.some((s) => preciseHaystack.includes(s)) || fuzzyKeep.some((s) => fuzzyHaystack.includes(s))) return cfg;
     return { ...cfg, code: `(已有程式碼約 ${cfg.code.length} 字，要改就整段重寫，不用貼原文)` };
   }
   return cfg;
@@ -554,6 +565,26 @@ function quotedStrings(text: string): string[] {
 }
 
 /**
+ * 抽出訊息裡「看起來像程式碼識別碼/代碼」的裸字(沒加引號)，例如 agg1、agg19——使用者說
+ * 「代碼改成 X」時，X 通常是全新的值，不會逐字出現在舊程式碼裡(真實案例：要求把 agg8~agg17
+ * 改成 agg1~agg6、agg19，新代碼跟舊代碼完全不重疊，靠 quotedStrings 或直接比對 code 內容都抓不到)，
+ * 但「同一類代碼」的字根(如 agg)幾乎一定會出現在相關節點的名稱、intent 或程式碼裡——拿字根去比對
+ * 才抓得到「這就是在講這個節點」，不需要使用者刻意加引號。只在字母+數字混合(或數字+字母混合)這種
+ * 明顯像代碼/識別碼的型態才觸發，一般中文/英文描述性語句不會混出這種型態，不會誤觸發整批不相關
+ * 節點都保留程式碼。
+ */
+export function bareTechnicalTokens(text: string): string[] {
+  const out = new Set<string>();
+  for (const m of text.matchAll(/[A-Za-z]{2,}\d+|\d+[A-Za-z]{2,}/g)) {
+    const token = m[0];
+    out.add(token);
+    const stem = token.replace(/^\d+/, "").replace(/\d+$/, "");
+    if (stem.length >= 2) out.add(stem);
+  }
+  return [...out];
+}
+
+/**
  * 把整張圖濃縮成給模型看的字串，並「大幅截短 custom-code 的 code 欄位」。
  * 為什麼：這種節點的 code 常常上千字(自動產生的擷取程式碼)，但建圖/改圖時模型**不需要逐字讀既有程式碼**——
  * 要改就照 intent 整段重寫。整張圖含 code 可以到近 2 萬字，會把本機 Claude 的提示灌爆、處理超過 120 秒逾時
@@ -564,14 +595,14 @@ function quotedStrings(text: string): string[] {
  * 原封不動塞進每一輪對話的提示，包括自我修正的每一次重試，是「單純問一句『改個名字』也跑好幾分鐘」的
  * 真實根因(踩過)。
  */
-function compactGraphJson(graph: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }, keepIfContains: string[] = []): string {
+function compactGraphJson(graph: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }, exactKeep: string[] = [], fuzzyKeep: string[] = []): string {
   const nodes = graph.nodes.map((n) => {
-    let cfg: Record<string, unknown> = truncateCode({ ...n.config }, keepIfContains);
+    let cfg: Record<string, unknown> = truncateCode({ ...n.config }, exactKeep, fuzzyKeep, n.label);
     if (n.type === "repeat-steps" && typeof cfg.steps === "string") {
       try {
         const steps = JSON.parse(cfg.steps) as { type: string; label?: string; config: Record<string, unknown> }[];
         if (Array.isArray(steps)) {
-          cfg = { ...cfg, steps: JSON.stringify(steps.map((s) => ({ ...s, config: truncateCode(s.config ?? {}, keepIfContains) }))) };
+          cfg = { ...cfg, steps: JSON.stringify(steps.map((s) => ({ ...s, config: truncateCode(s.config ?? {}, exactKeep, fuzzyKeep, s.label ?? "") }))) };
         }
       } catch { /* steps 不是合法 JSON 就原樣送(模型自己會在後續驗證/修正迴圈看到具體錯誤) */ }
     }
@@ -1108,8 +1139,8 @@ export async function buildWorkflow(
   // 使用者最新訊息裡引號點名的字串——出現在哪個節點的程式碼裡，那個節點的 code 就不截斷(讓模型
   // 做針對性修改時看得到內文；其餘節點照常截斷控制提示大小)
   const lastUserMsg = [...history].reverse().find((m) => m.role === "user");
-  const keepPatterns = quotedStrings((lastUserMsg?.parts ?? []).map((p) => (p.kind === "text" ? p.text : "")).join("\n"));
-  const graphStr = compactGraphJson(currentGraph, keepPatterns);
+  const lastUserPlainText = (lastUserMsg?.parts ?? []).map((p) => (p.kind === "text" ? p.text : "")).join("\n");
+  const graphStr = compactGraphJson(currentGraph, quotedStrings(lastUserPlainText), bareTechnicalTokens(lastUserPlainText));
   const fullHistory = history;
   const latestUserText = lastUserMsg ? userRequirementText([lastUserMsg]) : "";
   // 對話歷史是「理解脈絡」用，不是把所有舊命令永久疊加成不能推翻的契約。
@@ -1398,11 +1429,15 @@ export async function buildWorkflow(
       if (editObj.structure !== undefined) {
         if (!editObj.structure || typeof editObj.structure !== "object" || Array.isArray(editObj.structure)) {
           problems.push("structure 必須是物件");
-        } else {
+        } else if (hasStructureChanges(editObj.structure as GraphStructureEdits)) {
           const plan = planGraphStructureEdits({ nodes: currentGraph.nodes, edges: currentGraph.edges }, editObj.structure as GraphStructureEdits);
           if (!plan.ok) problems.push(...plan.problems.map((problem) => `結構修改：${problem}`));
           else structure = editObj.structure as GraphStructureEdits;
         }
+        // 空殼 structure(模型照抄範例 JSON 形狀的殘留，例如 {})：視同沒帶，不驗證、不產生 problem——
+        // 真實踩過的事故：只看「有沒有這個 key」而不看「裡面有沒有實際內容」，會把這種空殼送進
+        // planGraphStructureEdits 判定「沒有任何實際修改」而擋下整包原本合法的 edits，逼模型不斷
+        // 重試直到整個建圖請求燒光 5 分鐘逾時（wf-0d10f38d-copy-8eed43-copy-060a04 真實踩過）。
       }
       if (rawEdits.length === 0 && editedTriggerParams === undefined && !structure && !editedSchedule) {
         problems.push(`edits、structure 與 schedule 都是空的或格式不對——設定修改要有 {"nodeId":"節點id","config":{...}}；結構修改要有 structure；改自動時間要有 schedule`);

@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 
-const DEFAULT_MAX_BUILD_MS = 5 * 60_000;
+// 真實踩過的事故：修好「空殼 structure 被誤判」與「裸字代碼沒加引號導致程式碼被盲寫」這兩個問題後，
+// 一個涉及重寫 repeat-steps 內嵌大段既有 custom-code(近 6000 字)的合法對話修改請求，用本機 Claude Code
+// (高推理力度)連續 4 次都在整整 5 分鐘後被這個上限強制中止——單次呼叫從頭到尾只送出一次模型請求，
+// 不是卡在重試迴圈，是這個規模的提示在高推理力度下本來就需要更久才能想完整段程式碼怎麼改。
+// 使用者已經明確要求過「不能為了速度讓 AI 建不了工作流」(2026-07 拍板 builderEffort 預設 high 就是
+// 同一個決定)，這裡把預設上限拉高到 10 分鐘，讓困難的既有流程修改有足夠時間完成，而不是被錯誤地
+// 提前判定成「卡住了」。`callClaudeCode` 自己仍有獨立的 45 秒無回應偵測與 20 分鐘絕對上限
+// (lib/claudeCodeClient.ts)，真的卡死的呼叫不會因為這裡拉長而失去保護。
+const DEFAULT_MAX_BUILD_MS = 10 * 60_000;
 
 interface ActiveBuild {
   token: string;

@@ -14,17 +14,18 @@ export const GOOGLE_SHEET_SCRIPT_TEMPLATE = `function doPost(e) {
       // 真的執行才發現寫錯地方，重新部署好幾次都因為同一個誤綁而沒有解決。回傳目前綁定的試算表
       // 名稱，讓使用者在按下「檢查並套用」的當下就能肉眼核對「這是不是我要的那份」，不用等到
       // 真的寫入失敗才發現。
-      return out({ ok: true, agentHubVersion: 4, actions: ["append", "updateTable", "readCells", "writeCells"], spreadsheetName: ss.getName() });
+      return out({ ok: true, agentHubVersion: 5, actions: ["append", "updateTable", "readCells", "writeCells", "copyFormat"], spreadsheetName: ss.getName() });
     }
     var sheet = body.sheet ? ss.getSheetByName(body.sheet) : ss.getSheets()[0];
     if (!sheet) {
       var actualSheetNames = ss.getSheets().map(function (s) { return s.getName(); }).join("、");
-      return out({ ok: false, error: "找不到分頁: " + body.sheet + "；這支腳本目前綁定的試算表叫「" + ss.getName() + "」，裡面實際的分頁有：" + actualSheetNames });
+      return out({ ok: false, error: "找不到分頁: " + body.sheet + "；這支腳本目前綁定的試算表叫「" + ss.getName() + "」，裡面實際有的分頁：" + actualSheetNames });
     }
 
     if (body.action === "updateTable") return updateTable(sheet, body);
     if (body.action === "readCells") return readCells(sheet, body);
     if (body.action === "writeCells") return writeCells(sheet, body);
+    if (body.action === "copyFormat") return copyFormat(sheet, body);
     if (!Array.isArray(body.cells)) return out({ ok: false, error: "沒有收到要新增的欄位" });
     sheet.appendRow(body.cells);
     return out({ ok: true, row: sheet.getLastRow() });
@@ -49,6 +50,19 @@ function writeCells(sheet, body) {
   });
   SpreadsheetApp.flush();
   return out({ ok: true, updated: body.cells.length });
+}
+
+// writeCells 只設定儲存格的值，不會帶邊框/字型這些格式——寫進一塊原本空白、從沒被人手動
+// 設過格式的範圍(例如歸檔區第一次真正用到的新欄位)，看起來就會跟旁邊已經手動格式化過的欄位
+// 不一致(沒有框線、字體不同)。這個動作把「來源範圍」的格式(不動值)複製到「目標範圍」，
+// 用在「這欄的格式應該要跟旁邊那欄一樣」的情境。
+function copyFormat(sheet, body) {
+  if (!body.from || !body.to) return out({ ok: false, error: "缺少來源或目標範圍(from/to)" });
+  var source = sheet.getRange(String(body.from));
+  var dest = sheet.getRange(String(body.to));
+  source.copyTo(dest, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+  SpreadsheetApp.flush();
+  return out({ ok: true });
 }
 
 function updateTable(sheet, body) {

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { PageHeader, EmptyState } from "@/components/ui";
+import { seedImportWelcome } from "@/lib/wfChatStore";
 
 interface WorkflowSummary {
   id: string;
@@ -63,8 +64,20 @@ export default function DraftsPage() {
       const bundle = JSON.parse(await file.text());
       const res = await fetch("/api/workflows/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bundle) });
       const data = await res.json();
-      if (res.ok) router.push(`/workflows/${data.id}`);
-      else setImportError(data.error ?? "匯入失敗");
+      if (res.ok) {
+        // 進流程頁前先把「安全機制清掉了什麼、要自己補什麼」講清楚，使用者一打開就看得到，
+        // 不用等執行失敗才發現少了帳密/收件人/程式碼。
+        seedImportWelcome(data.id, {
+          missingSecrets: data.missingSecrets ?? [],
+          clearedCodeCount: data.clearedCodeCount ?? 0,
+          clearedEmailCount: data.clearedEmailCount ?? 0,
+          clearedEmailLabels: data.clearedEmailLabels ?? [],
+          needsManualLogin: Boolean(data.needsManualLogin),
+        });
+        router.push(`/workflows/${data.id}`);
+      } else {
+        setImportError(data.error ?? "匯入失敗");
+      }
     } catch {
       setImportError("檔案格式不正確");
     } finally {

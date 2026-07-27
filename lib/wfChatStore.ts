@@ -1134,6 +1134,63 @@ async function monitorChatRun(id: string, runId: string) {
   }
 }
 
+export interface ImportWelcomeSummary {
+  missingSecrets: { key: string; label?: string; type?: "text" | "password" }[];
+  /** 自訂程式碼節點的內容因為安全考量被清空(避免執行匯入來源夾帶的任意程式碼) */
+  clearedCodeCount: number;
+  /** 寄信節點的收件人被清空(避免匯入的流程偷偷把資料寄給別人) */
+  clearedEmailCount: number;
+  /** 被清空收件人的步驟名稱——要點名是哪幾步，使用者才不用把整張畫布掃一遍找 */
+  clearedEmailLabels: string[];
+  /** 圖裡有 browser-login 節點，需要使用者親自「手動登入一次」才能正常執行 */
+  needsManualLogin: boolean;
+}
+
+/**
+ * 匯入完成、使用者第一次打開這條流程之前就先把「安全機制清掉了什麼、要自己補什麼」講清楚——
+ * 不能只在畫面上放提示卡等使用者自己發現，也不能讓他等到第一次執行失敗才知道少了什麼。
+ * 缺帳密的話直接掛安全輸入卡，跟其他缺帳密情境共用同一套「值只存本機設定，不進對話」的機制。
+ */
+export function seedImportWelcome(id: string, summary: ImportWelcomeSummary) {
+  const points: string[] = [];
+  if (summary.clearedCodeCount > 0) {
+    points.push(`有 ${summary.clearedCodeCount} 個自訂程式碼步驟的內容被清空了——這是安全機制，避免匯入別人夾帶的程式碼在你的電腦上執行。第一次執行時，系統會依照步驟的白話說明自動重新寫好，不用你自己寫程式。`);
+  }
+  if (summary.clearedEmailCount > 0) {
+    const names = summary.clearedEmailLabels.map((label) => `「${label}」`).join("、");
+    const stepWord = summary.clearedEmailCount > 1 ? "這些步驟" : "這個步驟";
+    points.push(`寄信步驟${names || `(共 ${summary.clearedEmailCount} 個)`}的收件人被清空了(同樣是為了避免匯入的流程偷偷把資料寄給別人)，請點畫布上${stepWord}的卡片，把收件人補回真正要寄給誰。`);
+  }
+  if (summary.needsManualLogin) {
+    points.push(`這條流程有需要登入 Google／Microsoft 帳號的步驟，請到右上角「⋯ → 🔐 手動登入一次」親手登入後才能正常執行(帳密不會經過任何自動化流程)。`);
+  }
+  const trustNote = "另外，因為是外部匯入的流程，第一次測試或執行前我會先跟你確認信任這個來源，這是正常的安全機制，不是流程有問題。";
+  const message = points.length > 0
+    ? `這是匯入的流程，為了安全，有幾個地方需要你自己補一下：\n\n${points.map((p) => `・${p}`).join("\n\n")}\n\n${trustNote}`
+    : `這是匯入的流程，內容看起來不需要額外補程式碼或收件人。${trustNote}`;
+  const s = get(id);
+  const nextChat: ChatMsg[] = [...s.chat, { role: "assistant", parts: [{ kind: "text", text: message }], isControl: true }];
+  if (summary.missingSecrets.length > 0) {
+    set(id, {
+      chat: nextChat,
+      pendingInput: {
+        token: Date.now(),
+        kind: "settings",
+        title: "填入這條流程需要的帳密",
+        description: "值只會存進本機設定，不會放進聊天紀錄，也不會傳給 AI。",
+        fields: summary.missingSecrets.map((f) => ({
+          key: f.key,
+          label: f.label || f.key,
+          type: f.type ?? (/pass|pwd|token|secret|otp/i.test(f.key) ? "password" : "text"),
+          required: true,
+        })),
+      },
+    });
+  } else {
+    set(id, { chat: nextChat });
+  }
+}
+
 /** 執行/測試被「缺帳密」擋下時，直接在對話掛出安全輸入卡(值只進本機設定,不進 chat、不給模型)。
  * 這取代了以前只彈一個 alert 的體驗——使用者要的是「偵測到缺帳密就給我框格填」，不是一句錯誤訊息。 */
 export function promptForMissingSecrets(id: string, missing: { key: string; label?: string; type?: "text" | "password" }[], note?: string) {

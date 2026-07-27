@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyGraphStructureEdits, planGraphStructureEdits } from "./graphStructure";
+import { applyGraphStructureEdits, hasStructureChanges, planGraphStructureEdits } from "./graphStructure";
 import { createWorkflow, deleteWorkflow, getWorkflow, saveWorkflow } from "./store";
 import type { WorkflowNode } from "./types";
 
@@ -55,4 +55,24 @@ test("結構修改：真正套用時只以磁碟最新版合併，不覆蓋其�
   } finally {
     deleteWorkflow(workflow.id);
   }
+});
+
+// 真實踩過的事故：模型照抄範例 JSON 形狀，即使只是改設定也常常順手附一個空的 structure({})——
+// 呼叫端不能只看「structure 這個 key 存不存在」，否則會把空殼送進 planGraphStructureEdits 判定
+// 「沒有任何實際修改」，擋下整包原本合法的 edits(wf-0d10f38d-copy-8eed43-copy-060a04 真實踩過，
+// 燒光 5 分鐘建圖逾時)。
+test("hasStructureChanges：空殼 structure(模型照抄範本殘留)一律視為沒有實際修改", () => {
+  assert.equal(hasStructureChanges(undefined), false);
+  assert.equal(hasStructureChanges(null), false);
+  assert.equal(hasStructureChanges({}), false);
+  assert.equal(hasStructureChanges({ removeNodeIds: [], addNodes: [], addEdges: [], removeEdges: [] }), false);
+  assert.equal(hasStructureChanges([] as never), false);
+  assert.equal(hasStructureChanges("not-an-object" as never), false);
+});
+
+test("hasStructureChanges：任一陣列有實際內容就算真的要修改", () => {
+  assert.equal(hasStructureChanges({ removeNodeIds: ["n1"] }), true);
+  assert.equal(hasStructureChanges({ addNodes: [{ id: "n2", type: "template-text", label: "x", config: {} }] }), true);
+  assert.equal(hasStructureChanges({ addEdges: [{ from: "n1", to: "n2" }] }), true);
+  assert.equal(hasStructureChanges({ removeEdges: [{ from: "n1", to: "n2" }] }), true);
 });

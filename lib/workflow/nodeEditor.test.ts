@@ -57,3 +57,30 @@ test("editNode：AI 回傳跟目前設定完全相同、又沒附 note(等於隨
     deleteWorkflow(workflow.id);
   }
 });
+
+// 真實踩過的事故：節點面板「白話微調」一個 repeat-steps 節點時，AI 整包重寫了 steps(沒有帶
+// stepIndex 走定點修改)，但內嵌 custom-code 的引號轉義多打了一層反斜線，讓整個 steps 變成
+// 不合法的 JSON。這裡以前完全沒驗證，壞掉的字串直接存檔，流程要等下次打開才被 graphLint
+// 攔下來(而且錯誤訊息完全看不出是哪個節點、哪裡壞的)。editNode 現在跟 applyNodeConfigEdits
+// 共用同一個 validateCustomCodeEdit 閘門，這種壞 JSON 必須在存檔前被擋下、原設定保持不動。
+test("editNode：repeat-steps 整包改 steps 時，若新的 steps 不是合法 JSON，要拒絕套用並保留原設定", async () => {
+  const workflow = createWorkflow(`test-node-editor-badsteps-${Date.now()}`);
+  const originalSteps = JSON.stringify([{ type: "custom-code", label: "算數字", config: { code: "return { ok: true };" } }]);
+  try {
+    saveWorkflow({
+      ...workflow,
+      nodes: [{ id: "loop1", type: "repeat-steps", label: "重複步驟", config: { items: "{{items}}", itemVar: "item", steps: originalSteps }, position: { x: 0, y: 0 } }],
+      edges: [],
+    });
+    // 模擬多打一層反斜線的轉義錯誤：\\" 在 JSON 裡會被解成「一個反斜線 + 提前結束字串的引號」
+    const brokenSteps = `[{"type": "custom-code", "label": "算數字", "config": {"code": "const x = (await import(\\\\"exceljs\\\\")).default;"}}]`;
+    const client = fakeClient(JSON.stringify({ config: { items: "{{items}}", itemVar: "item", steps: brokenSteps } }));
+    await assert.rejects(
+      () => editNode(client, "test-model", workflow.id, "loop1", [{ kind: "text", text: "把裡面的判斷邏輯改一下" }]),
+      /steps 不是合法 JSON/,
+    );
+    assert.equal(getWorkflow(workflow.id)?.nodes[0]?.config.steps, originalSteps, "驗證沒過就不該碰存檔，原本可執行的 steps 必須保留");
+  } finally {
+    deleteWorkflow(workflow.id);
+  }
+});

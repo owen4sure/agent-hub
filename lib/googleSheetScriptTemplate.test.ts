@@ -24,6 +24,8 @@ interface Harness {
   call(body: Record<string, unknown>): Record<string, unknown>;
   data: unknown[][];
   writes: string[];
+  /** 儲存格格式標記(用來測 copyFormat)：key 是 "col,row"(1-based)，value 是任意字串標籤 */
+  formats: Map<string, string>;
 }
 
 function columnLetters(column: number): string {
@@ -37,20 +39,77 @@ function columnLetters(column: number): string {
   return result;
 }
 
+function columnNumberFromLetters(letters: string): number {
+  return letters.toUpperCase().split("").reduce((total, ch) => total * 26 + ch.charCodeAt(0) - 64, 0);
+}
+
+/** 解析 "B13" 或 "K46:K51" 這類 A1 記法(單一儲存格或矩形範圍)成 1-based 的列/欄邊界 */
+function parseA1Range(a1: string): { c1: number; r1: number; c2: number; r2: number } {
+  const [startPart, endPart] = a1.split(":");
+  const m1 = startPart.match(/^([A-Za-z]+)(\d+)$/);
+  if (!m1) throw new Error(`測試假物件不認得這個 A1 記法: ${a1}`);
+  const start = { c: columnNumberFromLetters(m1[1]), r: Number(m1[2]) };
+  if (!endPart) return { c1: start.c, r1: start.r, c2: start.c, r2: start.r };
+  const m2 = endPart.match(/^([A-Za-z]+)(\d+)$/);
+  if (!m2) throw new Error(`測試假物件不認得這個 A1 記法: ${a1}`);
+  const end = { c: columnNumberFromLetters(m2[1]), r: Number(m2[2]) };
+  return { c1: start.c, r1: start.r, c2: end.c, r2: end.r };
+}
+
 function harness(initial: unknown[][]): Harness {
   const data = initial.map((row) => [...row]);
   const writes: string[] = [];
+  const formats = new Map<string, string>();
+
+  function ensureCell(row: number, column: number) {
+    while (data.length < row) data.push([]);
+    while (data[row - 1].length < column) data[row - 1].push("");
+  }
+
+  // Range 物件同時支援單一儲存格(setValue/getDisplayValue)與矩形範圍(copyTo)——
+  // readCells/writeCells 只用單一儲存格，copyFormat(archive 格式複製)兩種都可能用到。
+  function makeStringRange(a1: string) {
+    const { c1, r1, c2, r2 } = parseA1Range(a1);
+    return {
+      setValue(value: unknown) {
+        ensureCell(r1, c1);
+        data[r1 - 1][c1 - 1] = value;
+        writes.push(`${columnLetters(c1)}${r1}`);
+      },
+      getDisplayValue() {
+        ensureCell(r1, c1);
+        return String(data[r1 - 1][c1 - 1] ?? "");
+      },
+      getA1Notation: () => a1,
+      copyTo(dest: { __bounds: { c1: number; r1: number; c2: number; r2: number } }) {
+        const { c1: dc1, r1: dr1 } = dest.__bounds;
+        const width = c2 - c1;
+        const height = r2 - r1;
+        for (let dr = 0; dr <= height; dr++) {
+          for (let dc = 0; dc <= width; dc++) {
+            const tag = formats.get(`${c1 + dc},${r1 + dr}`) ?? "";
+            formats.set(`${dc1 + dc},${dr1 + dr}`, tag);
+          }
+        }
+      },
+      __bounds: { c1, r1, c2, r2 },
+    };
+  }
+
   const sheet = {
     getDataRange: () => ({ getDisplayValues: () => data.map((row) => row.map((value) => String(value ?? ""))) }),
-    getRange: (row: number, column: number) => ({
-      setValue(value: unknown) {
-        while (data.length < row) data.push([]);
-        while (data[row - 1].length < column) data[row - 1].push("");
-        data[row - 1][column - 1] = value;
-        writes.push(`${columnLetters(column)}${row}`);
-      },
-      getA1Notation: () => `${columnLetters(column)}${row}`,
-    }),
+    getRange: (rowOrA1: number | string, column?: number) => {
+      if (typeof rowOrA1 === "string") return makeStringRange(rowOrA1);
+      const row = rowOrA1;
+      return {
+        setValue(value: unknown) {
+          ensureCell(row, column!);
+          data[row - 1][column! - 1] = value;
+          writes.push(`${columnLetters(column!)}${row}`);
+        },
+        getA1Notation: () => `${columnLetters(column!)}${row}`,
+      };
+    },
     appendRow(cells: unknown[]) { data.push([...cells]); },
     getLastRow: () => data.length,
   };
@@ -60,6 +119,8 @@ function harness(initial: unknown[][]): Harness {
       getSheetByName: (name: string) => name === "彙整表" ? sheet : null,
       getSheets: () => [sheet],
     }),
+    // copyTo 的假物件用範圍的 __bounds 本身當「目標」參數即可，真正的 CopyPasteType 值在假物件裡不需要區分
+    CopyPasteType: { PASTE_FORMAT: "PASTE_FORMAT" },
     flush() {},
   };
   const ContentService = {
@@ -71,6 +132,7 @@ function harness(initial: unknown[][]): Harness {
   return {
     data,
     writes,
+    formats,
     call(body) {
       return JSON.parse(api.doPost({ postData: { contents: JSON.stringify(body) } }).text) as Record<string, unknown>;
     },
@@ -186,5 +248,51 @@ describe("Google 試算表 Apps Script 官方範本", () => {
     assert.match(String(result.error), /業務週報彙整\(2026\)/, "要點名目前綁定的試算表叫什麼，讓使用者判斷是不是綁錯試算表");
     assert.match(String(result.error), /工作表1/);
     assert.match(String(result.error), /彙整表/);
+  });
+
+  it("writeCells：依 A1 位址寫入多個儲存格，值正確落地", () => {
+    const h = harness([["資料日期", "6/12-6/18"]]);
+    const result = h.call({ action: "writeCells", sheet: "彙整表", cells: [{ a1: "B1", value: "6/19-6/25" }, { a1: "B2", value: "MGM" }] });
+    assert.deepEqual(result, { ok: true, updated: 2 });
+    assert.equal(h.data[0][1], "6/19-6/25");
+    assert.equal(h.data[1][1], "MGM");
+  });
+
+  it("readCells：依 A1 位址讀回顯示值", () => {
+    const h = harness([["資料日期", "6/12-6/18"], ["MGM", 93]]);
+    const result = h.call({ action: "readCells", sheet: "彙整表", cells: ["B1", "B2"] });
+    assert.deepEqual(result, { ok: true, cells: [{ a1: "B1", value: "6/12-6/18" }, { a1: "B2", value: "93" }] });
+  });
+
+  // 真實踩過的事故：writeCells 只設定儲存格的值，寫進一塊原本空白、從沒被人手動格式化過的
+  // 歸檔欄位(例如第一次真正用到的新欄位)，看起來就會跟旁邊已經手動加了框線/字體的舊欄位不一致。
+  // copyFormat 用來把「這欄的格式應該要跟旁邊那欄一樣」的情境補上：只搬格式，不動值。
+  it("copyFormat：把來源範圍的格式複製到目標範圍，不影響任一邊的值", () => {
+    const h = harness([
+      ["資料日期", "5/22-5/28", "6/5-6/11"],
+      ["MGM", 61, 80],
+    ]);
+    // 模擬「J 欄(5/22-5/28)先前已經被人手動加過框線」，K 欄(6/5-6/11)是全新、從未格式化過的欄位
+    h.formats.set("2,1", "bordered");
+    h.formats.set("2,2", "bordered");
+    const result = h.call({ action: "copyFormat", sheet: "彙整表", from: "B1:B2", to: "C1:C2" });
+    assert.deepEqual(result, { ok: true });
+    assert.equal(h.formats.get("3,1"), "bordered");
+    assert.equal(h.formats.get("3,2"), "bordered");
+    // 值完全不受影響——copyFormat 純粹搬格式
+    assert.equal(h.data[0][2], "6/5-6/11");
+    assert.equal(h.data[1][2], 80);
+  });
+
+  it("copyFormat：缺 from 或 to 時明確報錯，不猜測範圍", () => {
+    const h = harness([["A"]]);
+    assert.equal(h.call({ action: "copyFormat", sheet: "彙整表", to: "B1" }).ok, false);
+    assert.equal(h.call({ action: "copyFormat", sheet: "彙整表", from: "A1" }).ok, false);
+  });
+
+  it("capabilities 回應要包含 copyFormat，讓呼叫端能偵測到舊部署還沒更新到這個版本", () => {
+    const h = harness([["A"]]);
+    const result = h.call({ action: "capabilities" });
+    assert.ok(Array.isArray(result.actions) && (result.actions as string[]).includes("copyFormat"));
   });
 });

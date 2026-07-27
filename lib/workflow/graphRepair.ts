@@ -15,7 +15,7 @@ import { DEFAULT_MODEL, VISION_MODELS, supportsVision } from "../models";
 import { findLatestScreenshotPath, findLatestHtml, extractFormElements, getNodeInput, getRunLogsSummary, getFileDumpForNode } from "./repairContext";
 import { buildSelectorProbeReport, extractSelectorsFromCode, splitSelectorList, probeSelectorsInHtml, tokenNeighborhood } from "./selectorProbe";
 import { syncLabelForDestinationChange, type ReplacePair } from "./textReplace";
-import { applyGraphStructureEdits, planGraphStructureEdits, type GraphStructureEdits, type StructureChange } from "./graphStructure";
+import { applyGraphStructureEdits, hasStructureChanges, planGraphStructureEdits, type GraphStructureEdits, type StructureChange } from "./graphStructure";
 import { probeSlidesPresentationPages } from "../googleSlidesApi";
 import { resolvePresentationId } from "./nodes/googleSlidesRefresh";
 import { parseSheetUrl } from "./nodes/googleSheet";
@@ -77,7 +77,11 @@ function restoreEchoedCodeMarkers(node: WorkflowNode, newConfig: Record<string, 
   return out;
 }
 
-function validateCustomCodeEdit(
+/** 匯出給 nodeEditor.ts(節點面板「白話微調」)共用——那條路跟這裡(對話/自動修復)必須是同一套
+ * 守門標準，不能各自維護一份漸漸漂移(真實踩過:nodeEditor.ts 曾經只檢查 custom-code 節點本身的
+ * 語法，沒檢查 repeat-steps 整包改 steps 時內嵌步驟的 JSON/語法，一段轉義錯誤的 steps 直接存檔，
+ * 流程從此打不開，只能等下次打開才被 graphLint 攔下來)。 */
+export function validateCustomCodeEdit(
   node: WorkflowNode,
   newConfig: Record<string, unknown>,
   nodes: WorkflowNode[],
@@ -435,11 +439,15 @@ function describeGraph(
   return `【整條流程的節點】\n${lines.join("\n")}\n\n【節點的連接順序(資料由左往右流)】\n${edgeLines.join("\n") || "  (沒有連線)"}`;
 }
 
-const editSchema = (obj: Record<string, unknown>): boolean => {
+// 匯出給測試直接驗證 predicate；也讓其他呼叫端未來需要同一套「是不是有效修復回覆」判斷時不用重寫一份。
+export const editSchema = (obj: Record<string, unknown>): boolean => {
   const edits = obj.edits;
   const hasValidEdits = Array.isArray(edits) && edits.length > 0 && edits.every((e) => e && typeof e === "object" && typeof (e as Record<string, unknown>).nodeId === "string" && typeof (e as Record<string, unknown>).config === "object");
-  const structure = obj.structure;
-  const hasStructure = Boolean(structure) && typeof structure === "object" && !Array.isArray(structure);
+  // 用 hasStructureChanges 而非「存不存在」判斷——模型常照抄範例 JSON 形狀附一個空的 structure:{}，
+  // 若只看存不存在，會讓「edits+空殼structure」這個完全合法的回覆整包判定失敗(hasValidEdits && !hasStructure
+  // 兩邊都不成立)，導致 extractJsonObject 完全找不到候選、整包被當成「無法解析的 JSON」燒光重試
+  // (真實踩過：wf-0d10f38d-copy-8eed43-copy-060a04 的「幫我修」/建圖迴圈因此卡到 5 分鐘逾時)。
+  const hasStructure = hasStructureChanges(obj.structure as GraphStructureEdits | undefined);
   // 先不接受同時改 config 又拆接線：兩種修改要以同一張最新圖為底才能保證原子性，混在一包
   // 會讓弱模型把「新加的節點」又寫進 edits，難以證明回滾完整。需要兩步時，第一輪結構通過後
   // 下一輪自然會以新版圖為基礎再調設定。
@@ -721,7 +729,12 @@ edits 可以有一個或多個節點。config 要是那個節點「改好後的�
         : [];
       const explanation = String(parsed.explanation ?? "已調整流程設定");
 
-      if (parsed.structure !== undefined) {
+      // 用 hasStructureChanges 而非「存不存在」判斷——模型常照抄範例 JSON 形狀附一個空的 structure:{}，
+      // 若只看存不存在，這裡會把已經解析出來、真正有效的 rawEdits 整包丟棄(return { edits: [], ... })，
+      // 對「edits+空殼structure」這種完全合法的回覆等於默默不套用任何東西(違反「套用要嘛全記帳要嘛
+      // 不套，絕不靜默吞掉」的原則)。空殼 structure 現在會自然落到下面 rawEdits/applyNodeConfigEdits
+      // 的既有處理，不再搶先早退。
+      if (hasStructureChanges(parsed.structure as GraphStructureEdits | undefined)) {
         const structure = parsed.structure as GraphStructureEdits;
         const plan = planGraphStructureEdits(getWorkflow(workflowId) ?? wf, structure);
         if (!plan.ok) {

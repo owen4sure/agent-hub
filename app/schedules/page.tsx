@@ -18,6 +18,10 @@ export default function SchedulesPage() {
   const [running, setRunning] = useState<Record<string, boolean>>({});
   const [runningAll, setRunningAll] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // 拖曳排序：預設依「下次執行時間」排(伺服器端算好送來)，使用者也可以拖曳「⠿」手動調整，
+  // 手動排過的順序會存伺服器、優先於時間排序(見 /api/schedules 的合併邏輯)。
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
 
   async function load() {
     const [s, w, settings] = await Promise.all([
@@ -104,6 +108,32 @@ export default function SchedulesPage() {
     }
   }
 
+  async function handleScheduleDrop(targetId: string) {
+    const sourceId = dragId;
+    setDragId(null);
+    setDropTargetId(null);
+    if (!sourceId || sourceId === targetId || !schedules) return;
+    const ids = schedules.map((s) => s.id);
+    const from = ids.indexOf(sourceId);
+    const to = ids.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    ids.splice(from, 1);
+    ids.splice(to, 0, sourceId);
+    const rank = new Map(ids.map((sid, i) => [sid, i]));
+    setSchedules((rows) => rows && [...rows].sort((a, b) => (rank.get(a.id) ?? 9999) - (rank.get(b.id) ?? 9999)));
+    try {
+      const res = await fetch("/api/schedules/reorder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      if (!res.ok) throw new Error();
+    } catch {
+      setActionError("排序沒有存成功，畫面已還原成伺服器的順序");
+      load(); // 存失敗就撤回樂觀更新，畫面回到伺服器的真實順序
+    }
+  }
+
   const officialWorkflows = workflows.filter((w) => w.status === "official");
   const sequential = maxConcurrent <= 1;
 
@@ -128,13 +158,34 @@ export default function SchedulesPage() {
       {/* 所有排程 */}
       <section className="space-y-3">
         <h2 className="font-medium">所有排程</h2>
+        <p className="text-xs faint">預設依「下次執行時間」由近到遠排序；拖曳左側「⠿」可以手動調整順序。</p>
         {schedules === null && <p className="text-sm muted">載入中…</p>}
         {schedules !== null && schedules.length === 0 && (
           <EmptyState icon="⏰" title="還沒有任何排程" hint="到任一個流程按「⏰ 排程」設定時間，就會出現在這裡集中管理。" />
         )}
         {schedules?.map((s) => (
-          <div key={s.id} className="card p-4 space-y-3">
+          <div
+            key={s.id}
+            className="card p-4 space-y-3"
+            style={{
+              ...(dropTargetId === s.id && dragId !== s.id ? { outline: "2px dashed var(--accent)", outlineOffset: "2px" } : {}),
+              ...(dragId === s.id ? { opacity: 0.4 } : {}),
+            }}
+            onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTargetId(s.id); } }}
+            onDragLeave={() => { if (dropTargetId === s.id) setDropTargetId(null); }}
+            onDrop={(e) => { e.preventDefault(); handleScheduleDrop(s.id); }}
+          >
             <div className="flex items-center gap-3 flex-wrap">
+              <span
+                draggable
+                onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDragId(s.id); }}
+                onDragEnd={() => { setDragId(null); setDropTargetId(null); }}
+                className="faint hover:text-[var(--text)] text-sm w-6 h-6 grid place-items-center rounded-md cursor-grab active:cursor-grabbing select-none shrink-0"
+                title="拖到另一筆排程上調整順序"
+                aria-label="拖曳排序"
+              >
+                ⠿
+              </span>
               <button onClick={() => toggle(s)} aria-label={s.enabled ? "暫停" : "啟用"} title={s.enabled ? "執行中，點一下暫停" : "已暫停，點一下啟用"} className="text-lg shrink-0">{s.enabled ? "🟢" : "⏸"}</button>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { aiRepairGraph, applyNodeConfigEdits, migrateNativeGoogleSlidesRefresh, verifyProposedSelectors } from "./graphRepair";
+import { aiRepairGraph, applyNodeConfigEdits, editSchema, migrateNativeGoogleSlidesRefresh, verifyProposedSelectors } from "./graphRepair";
 import { createWorkflow, deleteWorkflow, getWorkflow } from "./store";
 import { saveWorkflow } from "./store";
 import type { WorkflowNode } from "./types";
@@ -443,4 +443,21 @@ test("verifyProposedSelectors：選擇器真的命中就放行", async () => {
     REPAIR_HTML,
   );
   assert.equal(gate.ok, true);
+});
+
+// 真實踩過的事故(wf-0d10f38d-copy-8eed43-copy-060a04)：模型照抄範例 JSON 形狀，即使只是回報
+// 節點設定修改(edits)，也常常順手附一個空的 structure:{}。以前的 predicate 只看 structure 這個
+// key 存不存在，會讓「edits+空殼structure」這種完全合法的回覆整包判定失敗(hasValidEdits && !hasStructure
+// 兩邊都不成立)，extractJsonObject 因此完全找不到候選、把整包回覆當成「無法解析的 JSON」燒光重試。
+test("editSchema：附上空殼 structure(模型照抄範本殘留)的合法 edits 仍要被視為有效的修復回覆", () => {
+  assert.equal(editSchema({ edits: [{ nodeId: "n1", config: { a: 1 } }], structure: {} }), true);
+  assert.equal(editSchema({ edits: [{ nodeId: "n1", config: { a: 1 } }], structure: { removeNodeIds: [], addNodes: [], addEdges: [], removeEdges: [] } }), true);
+});
+
+test("editSchema：真正的 edits 與真正的 structure 同時出現仍要維持互斥(不能一次回應混改兩種)", () => {
+  assert.equal(editSchema({ edits: [{ nodeId: "n1", config: { a: 1 } }], structure: { addNodes: [{ id: "n2", type: "template-text", label: "x", config: {} }] } }), false);
+});
+
+test("editSchema：只有空殼 structure、沒有任何 edits 時仍視為無效(沒有可執行的修改)", () => {
+  assert.equal(editSchema({ structure: {} }), false);
 });

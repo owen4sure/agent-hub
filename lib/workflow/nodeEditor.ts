@@ -10,7 +10,8 @@ import { getWorkflow, saveWorkflow } from "./store";
 import { findRelevantFixes } from "./learnedFixes";
 import { callAIWithRetry } from "../aiRetry";
 import { extractJsonObject } from "../jsonExtract";
-import { customCodeSyntaxError, CODE_CONTRACT } from "./codegen";
+import { CODE_CONTRACT } from "./codegen";
+import { validateCustomCodeEdit } from "./graphRepair";
 import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../claudeCodeClient";
 import { getBuilderEffort } from "../settingsStore";
 import { findLatestScreenshotPath, findLatestHtml, extractFormElements } from "./repairContext";
@@ -232,10 +233,17 @@ async function finishEditNode(
   if (typeErrors.length > 0) {
     throw new Error(`AI 回的設定型別不正確，沒有套用：${typeErrors.join("；")}`);
   }
-  if (node.type === "custom-code") {
-    const syntaxError = customCodeSyntaxError(newConfig.code);
-    if (syntaxError) throw new Error(`AI 回的自訂程式碼有語法錯誤(${syntaxError})，沒有套用`);
-  }
+  // AI 呼叫可能耗時數分鐘，函式開頭讀的 wf 快照早就過期了——這裡先讀一次「當下最新版」給下面的
+  // custom-code/repeat-steps 語法驗證用整條圖的上下文；存檔前(若通過驗證)會直接沿用，不用再讀一次。
+  const freshForSave = getWorkflow(workflowId);
+  if (!freshForSave) throw new Error("workflow 不存在(可能剛被刪除)");
+  // ①b custom-code 語法 + repeat-steps 整包改 steps 時內嵌步驟的 JSON/語法閘門——跟
+  // applyNodeConfigEdits 共用同一個函式，不能各自維護一份漸漸漂移(真實踩過:這裡以前只查
+  // custom-code 節點本身的語法，沒查 repeat-steps 整包改 steps 的情況，一段轉義錯誤的 steps
+  // JSON 就這樣直接存檔，流程要等下次打開才被 graphLint 攔下來，執行時只會看到一句「不是合法
+  // JSON 陣列」而已完全不知道是哪裡壞的)。
+  const customCodeError = validateCustomCodeEdit(node, newConfig, freshForSave.nodes, freshForSave.edges);
+  if (customCodeError) throw new Error(`${customCodeError}，沒有套用`);
   // ②「等於沒改」偵測:比對執行期實際生效值(過 withSchemaDefaults 後)——零效果的修改不能回報「已更新」
   // 騙使用者(實測踩過:(空)→(空)還說已套用)。
   // 真實踩過的案例：使用者的話根本不是要改設定，是在說明「讀回值多了千分位逗號是正常的」——
@@ -252,14 +260,11 @@ async function finishEditNode(
   // apply:false 用在「正式區失敗後，先讓 AI 想好怎麼修，但不要動正在跑的正式流程」——
   // 提案先存起來給使用者一鍵套用+重跑，而不是自動改掉正式在用的設定。
   if (opts.apply !== false) {
-    // AI 呼叫可能耗時數分鐘，函式開頭讀的 wf 快照早就過期了——期間使用者可能拖過節點位置、
-    // 或另一個修復改了別的節點。存檔前重新讀「當下最新版」，只把目標節點的 config 換掉，
-    // 不然整包舊快照寫回去會把那些改動全部滅掉。(備份已由 saveWorkflow 內建，不用另外呼叫)
-    const fresh = getWorkflow(workflowId);
-    if (!fresh) throw new Error("workflow 不存在(可能剛被刪除)");
-    if (!fresh.nodes.some((n) => n.id === nodeId)) throw new Error("節點已不存在(可能剛被刪除)");
-    const newNodes: WorkflowNode[] = fresh.nodes.map((n) => (n.id === nodeId ? { ...n, config: newConfig } : n));
-    saveWorkflow({ ...fresh, nodes: newNodes });
+    // 存檔用的是上面驗證階段剛讀到的「當下最新版」(freshForSave)，只把目標節點的 config 換掉，
+    // 不然整包舊快照寫回去會把使用者這段等待期間的其他改動全部滅掉。(備份已由 saveWorkflow 內建)
+    if (!freshForSave.nodes.some((n) => n.id === nodeId)) throw new Error("節點已不存在(可能剛被刪除)");
+    const newNodes: WorkflowNode[] = freshForSave.nodes.map((n) => (n.id === nodeId ? { ...n, config: newConfig } : n));
+    saveWorkflow({ ...freshForSave, nodes: newNodes });
   }
   return { config: newConfig, before, nodeType: node.type };
 }

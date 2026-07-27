@@ -28,6 +28,23 @@ export interface StructureEditResult {
   problems: string[];
 }
 
+/**
+ * 模型的 JSON 範例裡 structure 一律會附一個完整的形狀(見 builder.ts 的 prompt 範例)，即使這次
+ * 只是改設定、根本沒有節點要刪/加/重接，模型還是常常照樣附一個 {}(或所有陣列都空)的 structure。
+ * 呼叫端要用這個判斷「structure 是不是真的帶了東西」，而不是只看它存不存在(`!== undefined`)——
+ * 真實踩過的事故：只看存在與否，會把這種空殼 structure 送進 planGraphStructureEdits，判定成
+ * 「structure 沒有任何實際修改」而擋下整次原本合法的 edits，逼模型不斷重試直到整個建圖請求逾時
+ * (使用者看到的現象是「改一個小東西卻卡 5 分鐘然後失敗」)。凡是「先看 structure 存不存在，
+ * 再決定要不要驗證/套用」的地方都要改用這個函式，把空殼視同沒帶。
+ */
+export function hasStructureChanges(structure: GraphStructureEdits | null | undefined): structure is GraphStructureEdits {
+  if (!structure || typeof structure !== "object" || Array.isArray(structure)) return false;
+  return (structure.removeNodeIds?.length ?? 0) > 0 ||
+    (structure.addNodes?.length ?? 0) > 0 ||
+    (structure.addEdges?.length ?? 0) > 0 ||
+    (structure.removeEdges?.length ?? 0) > 0;
+}
+
 function edgeKey(edge: WorkflowEdge): string {
   return `${edge.from}\u0000${edge.to}\u0000${edge.fromPort ?? ""}`;
 }

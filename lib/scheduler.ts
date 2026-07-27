@@ -150,6 +150,29 @@ export function listSchedules(workflowId?: string): ScheduleRow[] {
   return db.prepare(`SELECT * FROM schedules ORDER BY created_at DESC`).all() as ScheduleRow[];
 }
 
+/**
+ * 排程操控台的顯示順序：預設依「下次執行時間」由近到遠(使用者最想知道哪個快到了)，
+ * 已暫停或算不出下次時間的排最後；使用者拖曳過的手動順序(見 setScheduleSortOrder)優先於
+ * 這個預設值，沒拖過的排程維持在時間排序裡原本的相對位置，不會被硬塞到清單最後，
+ * 兩種排序邏輯才不會互相打架。抽成純函式(不碰 DB)方便直接測試合併規則對不對。
+ */
+export function mergeScheduleOrder(schedules: ScheduleRow[], manualOrder: string[]): ScheduleRow[] {
+  const byNextRun = [...schedules].sort((a, b) => {
+    // next_run_at 是 "YYYY-MM-DD HH:mm" 格式，字典序等同時間序，直接比字串就好
+    const aKey = a.enabled && a.next_run_at ? a.next_run_at : null;
+    const bKey = b.enabled && b.next_run_at ? b.next_run_at : null;
+    if (aKey === null && bKey === null) return 0;
+    if (aKey === null) return 1;
+    if (bKey === null) return -1;
+    return aKey < bKey ? -1 : aKey > bKey ? 1 : 0;
+  });
+  const orderIndex = new Map(manualOrder.map((sid, i) => [sid, i]));
+  return byNextRun
+    .map((s, i) => ({ s, key: orderIndex.has(s.id) ? orderIndex.get(s.id)! : manualOrder.length + i }))
+    .sort((a, b) => a.key - b.key)
+    .map((x) => x.s);
+}
+
 export function createSchedule(workflowId: string, cron: string, params: Record<string, unknown>): string {
   const db = getDb();
   const id = randomUUID();
