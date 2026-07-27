@@ -229,6 +229,8 @@ export default function HomePage() {
           clearedEmailCount: data.clearedEmailCount ?? 0,
           clearedEmailLabels: data.clearedEmailLabels ?? [],
           needsManualLogin: Boolean(data.needsManualLogin),
+          importedScheduleCount: data.importedScheduleCount ?? 0,
+          skippedScheduleCount: data.skippedScheduleCount ?? 0,
         });
         router.push(`/workflows/${data.id}`);
       } else {

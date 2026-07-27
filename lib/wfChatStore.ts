@@ -1144,6 +1144,10 @@ export interface ImportWelcomeSummary {
   clearedEmailLabels: string[];
   /** 圖裡有 browser-login 節點，需要使用者親自「手動登入一次」才能正常執行 */
   needsManualLogin: boolean;
+  /** 排程不在 workflow JSON 裡，成功帶回幾筆(執行時間/啟用狀態原樣保留) */
+  importedScheduleCount: number;
+  /** cron 格式不正確而沒帶入的排程筆數，需要使用者自己補設定 */
+  skippedScheduleCount: number;
 }
 
 /**
@@ -1164,9 +1168,18 @@ export function seedImportWelcome(id: string, summary: ImportWelcomeSummary) {
   if (summary.needsManualLogin) {
     points.push(`這條流程有需要登入 Google／Microsoft 帳號的步驟，請到右上角「⋯ → 🔐 手動登入一次」親手登入後才能正常執行(帳密不會經過任何自動化流程)。`);
   }
+  if (summary.skippedScheduleCount > 0) {
+    points.push(`有 ${summary.skippedScheduleCount} 筆排程的時間格式看起來不正確，沒有一併帶入，需要到「排程」頁重新設定。`);
+  }
+  // 排程能不能帶回是「有沒有東西要補」以外的另一件事——不是需要你動手的安全機制，
+  // 純粹告知帶了幾筆、且解釋為什麼不會馬上開始跑(草稿狀態)，所以獨立於上面的 points 之外處理。
+  const scheduleNote = summary.importedScheduleCount > 0
+    ? `已經帶回 ${summary.importedScheduleCount} 筆排程，執行時間跟啟用狀態都跟原本一樣；這條流程目前還是草稿，排程不會自動開始跑，等你確認內容沒問題、設為正式後才會生效。`
+    : "";
   const trustNote = "另外，因為是外部匯入的流程，第一次測試或執行前我會先跟你確認信任這個來源，這是正常的安全機制，不是流程有問題。";
-  const message = points.length > 0
-    ? `這是匯入的流程，為了安全，有幾個地方需要你自己補一下：\n\n${points.map((p) => `・${p}`).join("\n\n")}\n\n${trustNote}`
+  const bodyParts = [points.length > 0 ? points.map((p) => `・${p}`).join("\n\n") : "", scheduleNote].filter(Boolean);
+  const message = bodyParts.length > 0
+    ? `這是匯入的流程${points.length > 0 ? "，為了安全，有幾個地方需要你自己補一下" : ""}：\n\n${bodyParts.join("\n\n")}\n\n${trustNote}`
     : `這是匯入的流程，內容看起來不需要額外補程式碼或收件人。${trustNote}`;
   const s = get(id);
   const nextChat: ChatMsg[] = [...s.chat, { role: "assistant", parts: [{ kind: "text", text: message }], isControl: true }];

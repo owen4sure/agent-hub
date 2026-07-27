@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { getWorkflow, listWorkflows, saveWorkflow } from "@/lib/workflow/store";
 import { getWorkflowSecrets } from "@/lib/settingsStore";
+import { createSchedule, updateSchedule, isValidCron } from "@/lib/scheduler";
 import { DEFAULT_MODEL } from "@/lib/models";
 import { lintGraph } from "@/lib/workflow/graphLint";
 import type { Workflow, WorkflowNode, WorkflowEdge, ParamField } from "@/lib/workflow/types";
@@ -148,6 +149,24 @@ export async function POST(req: Request) {
     edges: edges as WorkflowEdge[],
   };
   saveWorkflow(wf);
+
+  // 排程不在 workflow JSON 裡(獨立的 schedules 表，見 export/route.ts 的說明)，這裡把匯出檔帶的
+  // schedules 欄位還原成新流程底下的排程。單筆 cron 格式不合法就跳過那一筆、不擋掉整個匯入
+  // (workflow 本身已經存好了，缺一筆排程使用者自己補得回來，但因為一筆壞資料整包失敗會更難排查)。
+  // 匯入的流程一律是草稿(見上面 status: "draft")，scheduler 對非正式流程一律跳過，
+  // 所以就算排程原本是「啟用」，也不會在使用者檢查過內容、設為正式之前偷跑。
+  let importedScheduleCount = 0;
+  let skippedScheduleCount = 0;
+  if (Array.isArray(body.schedules)) {
+    for (const raw of (body.schedules as unknown[]).slice(0, 50)) {
+      if (!isObj(raw) || typeof raw.cron !== "string" || !isValidCron(raw.cron)) { skippedScheduleCount++; continue; }
+      const scheduleParams = isObj(raw.params) ? raw.params : {};
+      const sid = createSchedule(newId, raw.cron, scheduleParams);
+      if (raw.enabled === false) updateSchedule(sid, { enabled: false });
+      importedScheduleCount++;
+    }
+  }
+
   // saveWorkflow 內部會用 deriveRequiresSecrets 依實際節點圖重算 requiresSecrets(比外來檔案
   // 宣告的更準確)，回應前重讀一次存好的版本才能算出真正還缺哪些帳密——不能直接用上面組的
   // wf.requiresSecrets，那是匯入檔案宣告的舊值，可能跟實際節點需要的不一致。
@@ -161,5 +180,7 @@ export async function POST(req: Request) {
     clearedEmailCount: counters.clearedEmailCount,
     clearedEmailLabels: counters.clearedEmailLabels,
     needsManualLogin: counters.needsManualLogin,
+    importedScheduleCount,
+    skippedScheduleCount,
   });
 }
