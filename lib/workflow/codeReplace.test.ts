@@ -41,12 +41,18 @@ test("定點取代：錨點找不到就整包不套用，錯誤訊息要帶出�
 // 真實踩過：節點 intent 把模板字串描述成字串串接(「格式為 'X(' + 期間 + ')'」)，模型照著推出
 // 錨點 "'X('"，但程式碼其實是反引號模板字串 `X(，只差一個引號就對不上。只回「找不到」等於要它
 // 再猜一次；把「程式碼裡真的存在而且唯一」的最接近片段講出來，下一輪就能直接改對。
-test("定點取代：錨點差一點點時要指出程式碼裡真正存在的唯一片段，不能只說找不到", () => {
-  const code = "const outputFileName = `PRODX(${quarterLabel}結算)`;\nreturn { outputFileName };";
-  const result = applyCodeReplacements(code, [{ from: "'PRODX('", to: "'NEWA('" }]);
-  assert.equal(result.ok, false);
-  assert.ok(!result.ok && result.reason.includes("PRODX("), `要指出真正存在的片段：${!result.ok ? result.reason : ""}`);
-  assert.ok(!result.ok && result.reason.includes("最接近"));
+test("定點取代：錨點對不上時要把『真正的那一行原文』貼回去，不能只說找不到", () => {
+  // 實測踩過的猜測迴圈：模型看不到原文(程式碼被截短)，收到「最接近的片段是X」之後仍然照 intent
+  // 的文字描述拼錨點——intent 寫成字串串接、程式碼卻是模板字串，連猜三輪都對不上，每輪兩分鐘
+  // 直接把建圖預算燒光。下面三個 from 就是真實跑出來的那三次嘗試，都必須拿到同一行原文。
+  const code = "const a = 1;\nconst outputFileName = `PRODX(${quarterLabel}結算)`;\nreturn { outputFileName };";
+  for (const from of ["'PRODX('", "'PRODX('+quarterLabel+'結算)'", "結算)'"]) {
+    const result = applyCodeReplacements(code, [{ from, to: "X" }]);
+    assert.equal(result.ok, false);
+    const reason = !result.ok ? result.reason : "";
+    assert.ok(reason.includes("const outputFileName = `PRODX(${quarterLabel}結算)`;"), `from=${from} 要拿到原文那一行：${reason}`);
+    assert.ok(!reason.includes("const a = 1"), "只貼相關的那一行，不要把整段程式碼倒回提示裡");
+  }
 });
 
 test("定點取代：整段都對不上時不硬湊近似錨點，老實說找不到", () => {

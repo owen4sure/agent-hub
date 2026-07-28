@@ -89,10 +89,19 @@ export function applyCodeReplacements(currentCode: unknown, pairs: CodeReplaceme
       // 真的存在、而且唯一」的最接近片段一起講出來，它下一輪就能直接改對——這跟選擇器探針
       // 回報「實測命中數+相近元素」是同一個做法。
       const near = nearestUniqueAnchor(code, pair.from);
+      // 只回「最接近的片段是X」還不夠。實測踩過：模型看不到原文(程式碼在提示裡被截短)，收到片段
+      // 提示後仍然照 intent 的**文字描述**去拼錨點——intent 寫「格式為 'A('+變數+')'」是字串串接的
+      // 寫法，真實程式碼卻是反引號模板字串，連猜三輪都對不上，每輪兩分鐘直接把建圖預算燒光。
+      // 所以直接把「那一行原文」貼回去：模型不必再猜語法，照抄就對。這是唯一能終結猜測迴圈的資訊。
+      const line = near ? lineContaining(code, near) : null;
       return {
         ok: false,
         reason: `${position}取代找不到這段文字：「${preview(pair.from)}」。`
-          + (near ? `程式碼裡最接近而且唯一的片段是「${preview(near)}」，請改用它當錨點。` : "請改用目前程式碼裡真實存在的片段當定位錨點（可從節點的 intent 描述找），不要憑印象拼寫。"),
+          + (line
+            ? `程式碼裡真正的那一行是：\n${line}\n請直接從這一行原封不動挑一段當錨點（注意引號、反引號、括號都要跟原文一致），不要照 intent 的描述拼。`
+            : near
+              ? `程式碼裡最接近而且唯一的片段是「${preview(near)}」，請改用它當錨點。`
+              : "請改用目前程式碼裡真實存在的片段當定位錨點（可從節點的 intent 描述找），不要憑印象拼寫。"),
       };
     }
     if (hits > 1) {
@@ -107,11 +116,13 @@ export function applyCodeReplacements(currentCode: unknown, pairs: CodeReplaceme
 /**
  * 從模型給的錨點裡找出「程式碼裡真的存在、而且只出現一次」的最長連續片段。
  * 做法刻意單純：從原字串的所有連續子字串裡，由長到短找第一個在程式碼中剛好出現一次的。
- * 錨點長度上限已由 MAX_ANCHOR_CHARS 擋在 2000 字，掃描量可控；太短的片段(<4 字)不回報，
- * 因為那種提示對模型沒有定位價值，反而可能誤導它用一個很容易撞名的錨點。
+ * 錨點長度上限已由 MAX_ANCHOR_CHARS 擋在 2000 字，掃描量可控。找到的片段本身不是給模型當答案用的，
+ * 而是用來定位「原文是哪一行」——真正回給模型的是那一行的完整原文。
  */
 function nearestUniqueAnchor(code: string, attempted: string): string | null {
-  const MIN_USEFUL = 4;
+  // 3 字元就收：中文片段(「結算)」)三個字就有定位意義，而且既然錯誤訊息會把**整行原文**貼回去，
+  // 片段本身短一點也不影響模型改對——真正有價值的資訊是那一行，片段只是用來定位是哪一行。
+  const MIN_USEFUL = 3;
   for (let length = attempted.length - 1; length >= MIN_USEFUL; length--) {
     for (let start = 0; start + length <= attempted.length; start++) {
       const candidate = attempted.slice(start, start + length);
@@ -120,6 +131,20 @@ function nearestUniqueAnchor(code: string, attempted: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * 含有這個片段的那一行原文（過長就以片段為中心裁切）。給模型「照抄就對」的依據，
+ * 而不是又一次要它憑印象拼。單行上限刻意小：錯誤訊息會進下一輪提示，不能反過來把提示灌爆。
+ */
+function lineContaining(code: string, fragment: string): string | null {
+  const line = code.split("\n").find((candidate) => candidate.includes(fragment));
+  if (!line) return null;
+  const trimmed = line.trim();
+  if (trimmed.length <= 200) return trimmed;
+  const at = trimmed.indexOf(fragment);
+  const start = Math.max(0, at - 60);
+  return `…${trimmed.slice(start, start + 200)}…`;
 }
 
 function preview(text: string): string {
