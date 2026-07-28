@@ -21,7 +21,7 @@ import { KNOWN_WORKING_MODELS, MODELS, VISION_MODELS, supportsVision } from "../
 import { plainLanguage } from "./plainLanguage";
 import { parseCron } from "../cron";
 import { hasStructureChanges, planGraphStructureEdits, type GraphStructureEdits } from "./graphStructure";
-import { isCodeReplacementList, type CodeReplacement } from "./codeReplace";
+import { applyCodeReplacements, isCodeReplacementList, isTruncationMarkerEcho, type CodeReplacement } from "./codeReplace";
 import { storeSubflowResolver } from "./subflowResolver";
 
 export type MessagePart =
@@ -1545,6 +1545,38 @@ export async function buildWorkflow(
               problems.push(`"${e.nodeId}" 的 "${key}" 目前有值，這次要改成空字串——除非使用者明確要求清空/重設這個連結，否則不能把已經在運作的設定砍掉。若懷疑目前的值有問題，要先講清楚具體理由(例如指出哪個檢查失敗)，不能只憑猜測就清空。`);
             }
           }
+        }
+        // 「這筆修改跟現況一模一樣」也要在迴圈內就攔下來餵回去。套用階段本來就有這道守門，但那時
+        // 建圖迴圈已經結束，只能回 clarify 叫使用者換個方向——而使用者根本看不到節點裡的程式碼，
+        // 平台等於把自己解得了的問題丟回給他。真實踩過：使用者要改產出檔名，模型盯上名稱裡有產品名
+        // 的那個彙整節點(其實檔名是上游算好傳進來的)，把整包 config 照抄回來、程式碼欄位還是截斷標記，
+        // 結果是一筆什麼都沒改的修改。餵回去講明「這筆等於沒改」，它才有機會去找真正決定那個值的節點。
+        const changesSomething = (e.label !== undefined && e.label !== node.label)
+          || e.codeReplace !== undefined
+          || Object.entries(e.config).some(([key, value]) => {
+            if (isTruncationMarkerEcho(value)) return false;  // 標記回聲＝「這欄我沒要改」
+            const current = typeof e.stepIndex === "number" ? undefined : node!.config[key];
+            return typeof e.stepIndex === "number" || JSON.stringify(value) !== JSON.stringify(current);
+          });
+        if (!changesSomething) {
+          problems.push(`"${e.nodeId}"(${node.label}) 這筆修改跟目前的設定完全一樣，等於沒改。請找出真正決定這個值的節點——值常常是上游算好、用 {{欄位}} 傳進來的，改在接收端沒有用；可以從各節點的 intent 描述判斷誰產生了那個欄位。`);
+          continue;
+        }
+        // 定點取代的錨點在這裡就先驗一次(不套用，只檢查)，讓錨點寫錯變成「餵回模型再想一次」而不是
+        // 「停下來問使用者」。真實踩過：模型從 intent 推錨點時把模板字串誤寫成單引號字串，錨點差一個
+        // 字元就對不上；套用階段雖然有擋、訊息也具體，但那時修正迴圈已經結束，只能回 clarify 要使用者
+        // 自己想辦法——使用者根本不知道節點裡的程式碼長什麼樣，等於把平台解不了的問題丟回給他。
+        if (e.codeReplace) {
+          const targetCode = typeof e.stepIndex === "number"
+            ? (() => {
+                try {
+                  const steps = JSON.parse(String(node.config.steps ?? "[]")) as { config?: Record<string, unknown> }[];
+                  return Array.isArray(steps) ? steps[e.stepIndex!]?.config?.code : undefined;
+                } catch { return undefined; }
+              })()
+            : node.config.code;
+          const dryRun = applyCodeReplacements(targetCode, e.codeReplace);
+          if (!dryRun.ok) problems.push(`"${e.nodeId}"${typeof e.stepIndex === "number" ? `第 ${e.stepIndex} 步` : ""} 的程式碼定點取代：${dryRun.reason}`);
         }
         // repeat-steps 的定點修改(帶 stepIndex)——驗證要對照「那一步自己的節點型別 schema」，
         // 不是 repeat-steps 本身的 schema(它的 schema 是 items/itemVar/steps/outputKey，跟內嵌步驟的

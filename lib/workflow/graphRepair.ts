@@ -15,7 +15,7 @@ import { DEFAULT_MODEL, VISION_MODELS, supportsVision } from "../models";
 import { findLatestScreenshotPath, findLatestHtml, extractFormElements, getNodeInput, getRunLogsSummary, getFileDumpForNode } from "./repairContext";
 import { buildSelectorProbeReport, extractSelectorsFromCode, splitSelectorList, probeSelectorsInHtml, tokenNeighborhood } from "./selectorProbe";
 import { syncLabelForDestinationChange, type ReplacePair } from "./textReplace";
-import { applyCodeReplacements, type CodeReplacement } from "./codeReplace";
+import { applyCodeReplacements, CODE_TRUNCATION_MARKER, type CodeReplacement } from "./codeReplace";
 import { applyGraphStructureEdits, hasStructureChanges, planGraphStructureEdits, type GraphStructureEdits, type StructureChange } from "./graphStructure";
 import { probeSlidesPresentationPages } from "../googleSlidesApi";
 import { resolvePresentationId } from "./nodes/googleSlidesRefresh";
@@ -50,7 +50,8 @@ export interface ApplyEditsResult {
  * 「這段程式碼我沒要改」，所以套用前一律把「標記回聲」還原成節點目前真正的程式碼，而不是
  * 讓它先撞語法閘門、整筆修改被拒絕(модель改對的部分也一起賠掉，使用者只看到一句他無能為力的
  * 「語法錯誤」)。真實踩過：改 find-email 關鍵字時 steps 整包重寫，擷取步驟的 code 被抄成標記。 */
-const CODE_TRUNCATION_MARKER = /^\(已有程式碼約\s*\d+\s*字[^)]*\)$/;
+// 這條規則的唯一定義在 codeReplace.ts——產生標記的 builder 與這裡的還原邏輯共用同一份。
+
 
 function restoreEchoedCodeMarkers(node: WorkflowNode, newConfig: Record<string, unknown>): Record<string, unknown> {
   const out = { ...newConfig };

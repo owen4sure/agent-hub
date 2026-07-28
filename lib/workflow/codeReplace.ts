@@ -27,6 +27,18 @@ export interface CodeReplacement {
   to: string;
 }
 
+/**
+ * 給模型看圖時，長程式碼會被截成這種標記文字(見 builder 的 truncateCode)。模型改別的欄位時常把
+ * 整包 config 照抄回來、包含這句標記——語意是「這段程式碼我沒要改」。
+ * 放在這個葉模組是因為產生標記的 builder 與還原標記的 graphRepair 都要用同一份；各留一份副本
+ * 正是這個 repo 反覆踩到的漂移來源。
+ */
+export const CODE_TRUNCATION_MARKER = /^\(已有程式碼約\s*\d+\s*字[^)]*\)$/;
+
+export function isTruncationMarkerEcho(value: unknown): boolean {
+  return typeof value === "string" && CODE_TRUNCATION_MARKER.test(value.trim());
+}
+
 export type CodeReplaceOutcome = { ok: true; code: string } | { ok: false; reason: string };
 
 /** 錨點上限：定點取代的用途是「改一小段」，超長錨點代表模型其實在複述整段程式碼，
@@ -72,7 +84,16 @@ export function applyCodeReplacements(currentCode: unknown, pairs: CodeReplaceme
     if (pair.from === pair.to) return { ok: false, reason: `${position}取代的 from 與 to 完全相同，等於沒有修改` };
     const hits = occurrences(code, pair.from);
     if (hits === 0) {
-      return { ok: false, reason: `${position}取代找不到這段文字：「${preview(pair.from)}」。請改用目前程式碼裡真實存在的片段當定位錨點（可從節點的 intent 描述找），不要憑印象拼寫` };
+      // 差一點點就對上是最常見的失敗(真實踩過：intent 把模板字串描述成字串串接，模型照抄成
+      // 'X(' 但程式碼其實是 `X(，只差一個字元)。只講「找不到」等於要模型再猜一次；把「程式碼裡
+      // 真的存在、而且唯一」的最接近片段一起講出來，它下一輪就能直接改對——這跟選擇器探針
+      // 回報「實測命中數+相近元素」是同一個做法。
+      const near = nearestUniqueAnchor(code, pair.from);
+      return {
+        ok: false,
+        reason: `${position}取代找不到這段文字：「${preview(pair.from)}」。`
+          + (near ? `程式碼裡最接近而且唯一的片段是「${preview(near)}」，請改用它當錨點。` : "請改用目前程式碼裡真實存在的片段當定位錨點（可從節點的 intent 描述找），不要憑印象拼寫。"),
+      };
     }
     if (hits > 1) {
       return { ok: false, reason: `${position}取代的「${preview(pair.from)}」在程式碼裡出現 ${hits} 次，位置有歧義。請多帶前後文讓它只對應到一個地方` };
@@ -81,6 +102,24 @@ export function applyCodeReplacements(currentCode: unknown, pairs: CodeReplaceme
   }
   if (code === currentCode) return { ok: false, reason: "所有取代套用後程式碼跟原本完全一樣，等於沒有修改" };
   return { ok: true, code };
+}
+
+/**
+ * 從模型給的錨點裡找出「程式碼裡真的存在、而且只出現一次」的最長連續片段。
+ * 做法刻意單純：從原字串的所有連續子字串裡，由長到短找第一個在程式碼中剛好出現一次的。
+ * 錨點長度上限已由 MAX_ANCHOR_CHARS 擋在 2000 字，掃描量可控；太短的片段(<4 字)不回報，
+ * 因為那種提示對模型沒有定位價值，反而可能誤導它用一個很容易撞名的錨點。
+ */
+function nearestUniqueAnchor(code: string, attempted: string): string | null {
+  const MIN_USEFUL = 4;
+  for (let length = attempted.length - 1; length >= MIN_USEFUL; length--) {
+    for (let start = 0; start + length <= attempted.length; start++) {
+      const candidate = attempted.slice(start, start + length);
+      if (!candidate.trim()) continue;
+      if (occurrences(code, candidate) === 1) return candidate;
+    }
+  }
+  return null;
 }
 
 function preview(text: string): string {

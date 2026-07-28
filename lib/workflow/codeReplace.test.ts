@@ -38,6 +38,23 @@ test("定點取代：錨點找不到就整包不套用，錯誤訊息要帶出�
   assert.ok(!result.ok && result.reason.includes("const y"), "要指出是哪一段找不到，不能只說失敗");
 });
 
+// 真實踩過：節點 intent 把模板字串描述成字串串接(「格式為 'X(' + 期間 + ')'」)，模型照著推出
+// 錨點 "'X('"，但程式碼其實是反引號模板字串 `X(，只差一個引號就對不上。只回「找不到」等於要它
+// 再猜一次；把「程式碼裡真的存在而且唯一」的最接近片段講出來，下一輪就能直接改對。
+test("定點取代：錨點差一點點時要指出程式碼裡真正存在的唯一片段，不能只說找不到", () => {
+  const code = "const outputFileName = `PRODX(${quarterLabel}結算)`;\nreturn { outputFileName };";
+  const result = applyCodeReplacements(code, [{ from: "'PRODX('", to: "'NEWA('" }]);
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && result.reason.includes("PRODX("), `要指出真正存在的片段：${!result.ok ? result.reason : ""}`);
+  assert.ok(!result.ok && result.reason.includes("最接近"));
+});
+
+test("定點取代：整段都對不上時不硬湊近似錨點，老實說找不到", () => {
+  const result = applyCodeReplacements("const a = 1;", [{ from: "totallyUnrelatedIdentifier", to: "x" }]);
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && !result.reason.includes("最接近"), "沒有夠長的唯一片段就不要給誤導性的建議");
+});
+
 test("定點取代：錨點出現多次代表位置有歧義，必須拒絕並報出實際次數", () => {
   const result = applyCodeReplacements("a();\nb();\na();", [{ from: "a()", to: "c()" }]);
   assert.equal(result.ok, false);
