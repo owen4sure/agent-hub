@@ -22,6 +22,7 @@ import { userWordsToPreserve, plainLanguage } from "./plainLanguage";
 import { parseCron } from "../cron";
 import { hasStructureChanges, planGraphStructureEdits, type GraphStructureEdits } from "./graphStructure";
 import { applyCodeReplacements, isCodeReplacementList, isTruncationMarkerEcho, type CodeReplacement } from "./codeReplace";
+import { autoTrimUnrequested, trimSummary } from "./autoTrim";
 import { buildWorkflowDataFlow } from "./dataFlow";
 import { storeSubflowResolver } from "./subflowResolver";
 
@@ -1141,6 +1142,7 @@ ${runtimeSection(rc)}
 - 使用者說「我傳 Telegram 訊息給機器人就跑」：在 trigger 節點的 config 設 telegramWatch:"on"，只想讓特定訊息觸發就填 telegramKeyword(訊息包含)。下游用 {{message}} 拿訊息文字、{{fromName}}/{{chatId}}/{{messageId}} 拿來源。安全設計：只接受設定頁綁定的 Chat ID。記得在 message 提醒「設為正式後才會開始接收；Telegram Bot Token/Chat ID 在設定頁通知串接填」。「跑完發 Telegram 通知我」是 telegram-notify 節點，不是這個觸發。
 - 使用者說「傳 LINE 給官方帳號就跑」：在 trigger 節點的 config 設 lineWatch:"on"。系統會在套用時**自動啟用並把 webhook 網址顯示給使用者**;下游用 {{message}}/{{userId}}/{{replyToken}}。記得在 message 老實提醒「LINE 平台只能打公網 HTTPS——要先用 cloudflared/ngrok 等隧道把網址開出去(面板有教學)，並在設定頁填 LINE Channel Secret」。「跑完發 LINE 通知我」是 line-notify 節點，不是這個觸發。
 【通知與記錄管道的選擇——使用者沒指名時，一律選「零設定」的】
+- **「我每週會上傳」「每個月我會丟一份」這種話是使用頻率，不是要你建排程**：使用者在講他多久做一次這件事，不是要系統自己定時跑。只有明確講「自動」「排程」「每天幾點自己跑」才填 schedule。判斷錯會做出一個沒有人選檔、永遠拿不到資料的排程。
 - 「跳出來提醒/彈出/在電腦上通知我/提醒我一聲」＝desktop-notify(零設定、不用任何 Token)。只有使用者明確講 Telegram/LINE/Email/Slack 才用對應節點——那些都要先設定金鑰，每多一個要設定的外部服務，新手就多一個放棄點。
 - 「記下來/存起來/默默記著」沒指名 Google 試算表時＝存**本機檔案**(桌面的 Excel/CSV，零設定)。只有明確講 Google 試算表/雲端才用 google-sheet-*(那要多一次 Apps Script 部署教學)。
 - 通則：同樣能滿足需求時，永遠選設定成本最低的做法；要用到需設定的服務，message 裡要講清楚「為什麼值得多這一步」。
@@ -1555,6 +1557,9 @@ export async function buildWorkflow(
   let requirementFeedbackRounds = 0;
   const MAX_REQUIREMENT_FEEDBACK_ROUNDS = 2;
   let varFeedbackGiven = false;
+  // 自動拿掉的東西(模型多做的通知/排程)。一定要帶到最後的回覆裡告訴使用者——
+  // 這個 repo 踩過「安全機制攔了什麼埋在紀錄裡等於沒講」的虧，靜默修改比不修改更難查。
+  const autoRemovedNotes: string[] = [];
 
   // 弱模型偶爾只回「我需要更多資訊」這種沒有指出缺什麼的空泛反問。對新手而言，這等於
   // 明明已經說了「上傳 Excel、算合計、不要改檔」，平台卻把工作丟回給他重新描述；而我們的
@@ -1845,15 +1850,15 @@ export async function buildWorkflow(
           // 由左到右分層對齊排列
           const pos = autoLayout(rawNodes, validated.data.edges);
           const positionedNodes = rawNodes.map((n) => ({ ...n, position: pos[n.id] ?? n.position }));
-          const edges = normalizeIfConditionPorts(positionedNodes, validated.data.edges);
+          let edges = normalizeIfConditionPorts(positionedNodes, validated.data.edges);
           const manualFileWiring = wireManualFileUpload(
             positionedNodes,
             validated.data.triggerParams as ParamField[] | undefined,
             requirementText,
           );
-          const nodes = manualFileWiring.nodes;
+          let nodes = manualFileWiring.nodes;
           const triggerParams = manualFileWiring.triggerParams;
-          const schedule = validated.data.schedule as SuggestedSchedule | undefined;
+          let schedule = validated.data.schedule as SuggestedSchedule | undefined;
           const onFailureWorkflow = typeof validated.data.onFailureWorkflow === "string" && validated.data.onFailureWorkflow.trim()
             ? validated.data.onFailureWorkflow.trim()
             : undefined;
@@ -1863,13 +1868,36 @@ export async function buildWorkflow(
           //    補完(或補不動)都把 ✓/✗ 清單附在回覆——沒做到的事要明講,不能默默當建好。 ──
           // 注入子流程 resolver：requirementCheck 自己不能碰檔案系統(見 subflowEffects.ts)，但建圖時
           // 一定要看得到「被呼叫的那條流程裡有沒有寫入」，否則把寫入藏進子流程就繞過只讀限制(P0)。
-          const reqItems = checkRequirements(
+          let reqItems = checkRequirements(
             requirementText,
             { nodes, edges, triggerParams, schedule, onFailureWorkflow },
             { resolveSubflow: storeSubflowResolver },
           );
           // needsUser 的項目(AI 建議唯讀的 POST 還等使用者確認)不算「模型沒做到」——它不是模型能
           // 修的事，餵回去只會讓模型把使用者真正需要的查詢步驟刪掉來消除警告。仍會顯示在核對清單裡。
+          // 模型「多做的事」直接拿掉，不要再花一輪模型去請它改(見 autoTrim.ts)。判斷依據只用
+          // 驗收剛算出來的結論，不在這裡重新解讀使用者原話——重新解讀必然跟驗收漂移。
+          // 只處理「拿掉多做的」，缺步驟/缺分流一律仍餵回模型，那種只有它補得出來。
+          const trimmable = new Set(reqItems.filter((item) => !item.met && !item.needsUser).map((item) => item.key));
+          const trimmed = autoTrimUnrequested(
+            { nodes, edges, schedule },
+            {
+              dropUnrequestedOutbound: trimmable.has("noUnrequestedOutbound"),
+              dropUnrequestedSchedule: trimmable.has("noUnexpectedSchedule"),
+            },
+          );
+          if (trimmed.removed.length > 0) {
+            nodes = trimmed.nodes;
+            edges = trimmed.edges;
+            schedule = trimmed.schedule;
+            autoRemovedNotes.push(...trimmed.removed);
+            // 拿掉之後要用新的圖重驗一次：可能還有別的缺口(那些才需要模型)，也可能已經全部過關。
+            reqItems = checkRequirements(
+              requirementText,
+              { nodes, edges, triggerParams, schedule, onFailureWorkflow },
+              { resolveSubflow: storeSubflowResolver },
+            );
+          }
           const unmet = reqItems.filter((i) => !i.met && !i.needsUser);
           if (unmet.length > 0) {
             // 「還缺需求」絕不是可交付的 ready。以前修正輪數用完後會掉進下面的
@@ -1901,7 +1929,7 @@ export async function buildWorkflow(
               const webhookNote = autoWebhook ? "\n\n🔗 套用時會自動啟用 Webhook/表單網址(套用後顯示在對話裡,⚡ 面板也看得到)。" : "";
               return {
                 phase: "ready",
-                message: plainLanguage(String(obj.message ?? "流程已建好") + checklistText(reqItems) + readinessNotes(nodes) + warnNote + periodNote + scheduleNote + webhookNote),
+                message: plainLanguage(String(obj.message ?? "流程已建好") + trimSummary(autoRemovedNotes) + checklistText(reqItems) + readinessNotes(nodes) + warnNote + periodNote + scheduleNote + webhookNote, {}, userWordsToPreserve(requirementText)) + hiddenCodeWarning(compacted.hiddenCode),
                 nodes, edges, triggerParams, schedule, autoWebhook, onFailureWorkflow,
               };
             }
