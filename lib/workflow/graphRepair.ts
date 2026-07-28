@@ -231,10 +231,18 @@ export function applyNodeConfigEdits(
           }
         }
       }
-      const newSteps = steps.map((s, i) => (i === e.stepIndex ? { ...s, config: newStepConfig } : s));
+      // 內嵌步驟也要能改名。以前這裡只換 config、永遠不換 label，所以迴圈裡的步驟名稱一旦寫定就
+      // 再也改不掉——真實踩過：使用者把擷取範圍從一組代碼換成另一組，程式碼、intent、log 全都
+      // 正確更新了，畫面上那一步卻還叫「擷取(舊代碼)資料」，連確認訊息裡都是舊名字。使用者看得到的
+      // 名稱跟實際行為對不上，比沒改還糟(他會以為這一步沒被改到)。
+      const renamedStepLabel = typeof e.label === "string" && e.label.trim() && e.label.trim() !== step.label
+        ? e.label.trim()
+        : undefined;
+      const newSteps = steps.map((s, i) => (i === e.stepIndex ? { ...s, config: newStepConfig, ...(renamedStepLabel ? { label: renamedStepLabel } : {}) } : s));
       const newConfig = { ...node.config, steps: JSON.stringify(newSteps) };
-      const stepEditLabel = `${node.label}(第${e.stepIndex + 1}步:${step.label ?? step.type})`;
-      edits.push({ nodeId: node.id, nodeType: node.type, nodeLabel: stepEditLabel, previousLabel: stepEditLabel, before: { ...node.config }, after: newConfig });
+      const describeStep = (label: string | undefined) => `${node!.label}(第${e.stepIndex! + 1}步:${label ?? step.type})`;
+      const stepEditLabel = describeStep(renamedStepLabel ?? step.label);
+      edits.push({ nodeId: node.id, nodeType: node.type, nodeLabel: stepEditLabel, previousLabel: describeStep(step.label), before: { ...node.config }, after: newConfig });
       workingNodes = workingNodes.map((n) => (n.id === node!.id ? { ...n, config: newConfig } : n));
       continue;
     }

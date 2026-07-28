@@ -206,3 +206,45 @@ test("套用 edits：定點取代改出語法錯誤時，仍然要被既有的�
     deleteWorkflow(workflow.id);
   }
 });
+
+test("套用 edits：repeat-steps 內嵌步驟要能改名——用途變了名稱卻停在舊的，比沒改還誤導", () => {
+  // 真實踩過：使用者把擷取範圍換成另一組代碼，程式碼/intent/log 全都正確更新了，畫面上那一步
+  // 卻還叫「擷取(舊代碼)資料」，連確認訊息裡也是舊名字——因為套用邏輯只換 config、從不換 label。
+  const workflow = createWorkflow(`test-step-rename-${Date.now()}`);
+  try {
+    const steps = [{ type: "custom-code", label: "擷取 A 組資料", config: { intent: "抓 A 組", code: "const g = 'A';\nreturn { ...ctx.input };" } }];
+    saveWorkflow({
+      ...workflow,
+      nodes: [{ id: "loop1", type: "repeat-steps", label: "每月重複", config: { items: "[]", itemVar: "item", outputKey: "results", steps: JSON.stringify(steps) }, position: { x: 0, y: 0 } }],
+      edges: [],
+    });
+    const result = applyNodeConfigEdits(workflow.id, [
+      { nodeId: "loop1", stepIndex: 0, label: "擷取 B 組資料", config: { intent: "抓 B 組" }, codeReplace: [{ from: "'A'", to: "'B'" }] },
+    ]);
+    assert.equal(result.skipped.length, 0, `不該被跳過：${JSON.stringify(result.skipped)}`);
+    const saved = JSON.parse(String(getWorkflow(workflow.id)?.nodes[0]?.config.steps));
+    assert.equal(saved[0].label, "擷取 B 組資料", "步驟名稱必須跟著用途一起改");
+    assert.ok(String(saved[0].config.code).includes("'B'"));
+    assert.match(result.edits[0].previousLabel, /擷取 A 組資料/, "改名前後都要記錄，使用者才看得出名稱變了");
+    assert.match(result.edits[0].nodeLabel, /擷取 B 組資料/);
+  } finally {
+    deleteWorkflow(workflow.id);
+  }
+});
+
+test("套用 edits：沒帶 label 就不要動內嵌步驟的名稱(小改動不該無意義改名)", () => {
+  const workflow = createWorkflow(`test-step-norename-${Date.now()}`);
+  try {
+    const steps = [{ type: "custom-code", label: "原本的名稱", config: { intent: "x", code: "const g = 'A';\nreturn {};" } }];
+    saveWorkflow({
+      ...workflow,
+      nodes: [{ id: "loop1", type: "repeat-steps", label: "每月重複", config: { items: "[]", itemVar: "item", outputKey: "results", steps: JSON.stringify(steps) }, position: { x: 0, y: 0 } }],
+      edges: [],
+    });
+    applyNodeConfigEdits(workflow.id, [{ nodeId: "loop1", stepIndex: 0, config: {}, codeReplace: [{ from: "'A'", to: "'B'" }] }]);
+    const saved = JSON.parse(String(getWorkflow(workflow.id)?.nodes[0]?.config.steps));
+    assert.equal(saved[0].label, "原本的名稱");
+  } finally {
+    deleteWorkflow(workflow.id);
+  }
+});

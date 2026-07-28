@@ -1090,7 +1090,7 @@ ${runtimeSection(rc)}
   - structure 是增量修改，不准輸出整包 nodes/edges；只列這次真的要變動的部分。單純結構修改時 edits 放 []。若同一需求又要改某個既有節點設定又要改接線，可以同時帶 edits 和 structure，系統會先完整驗證再存。
   - custom-code 節點可直接改 config.code(一段 async 函式主體，用 ...ctx.input 把上游資料往下傳；要用套件就 await import("exceljs"))。但**已有程式碼的節點不能用空字串/空殼覆蓋**：不需改程式就省略 code；需要改才輸出完整且可執行的新 code。
   - **只改一小部分(換個代碼、換個檔名、改個範圍)時改用定點取代，不要整段重吐**：那個 edits 元素帶 "codeReplace":[{"from":"目前程式碼裡剛好出現一次的一小段","to":"換成什麼"}]，不要同時帶 config.code。程式碼顯示成「(已有程式碼約 N 字…)」時也照樣用這條路——錨點可以從該節點的 intent 描述推出來。
-  - **要改的是 repeat-steps(重複執行)節點「裡面的某一步」時，一定用定點修改**：edits 元素帶 "stepIndex"(第幾步，從 0 起，對照上面「步驟編號對照」裡的 stepIndex)，config 只放「那一步」改好後的設定——**絕對不要整包重寫外層的 steps JSON**(幾千字的 JSON 重新輸出幾乎必錯，複述時很容易弄壞其他步驟)。例如：{"nodeId":"repeat-steps節點id","stepIndex":1,"config":{ 那一步改好後的 config }}
+  - **要改的是 repeat-steps(重複執行)節點「裡面的某一步」時，一定用定點修改**：edits 元素帶 "stepIndex"(第幾步，從 0 起，對照上面「步驟編號對照」裡的 stepIndex)，config 只放「那一步」改好後的設定——**絕對不要整包重寫外層的 steps JSON**(幾千字的 JSON 重新輸出幾乎必錯，複述時很容易弄壞其他步驟)。同一筆 edits 也可以帶 "label" 改那一步的名稱——**這一步的用途或處理範圍改了、原本的名稱會誤導人時一定要改名**(例如名稱寫著抓某一組代碼、實際已經換成另一組)；使用者看得到的名稱跟實際行為對不上，他會以為這一步根本沒被改到。例如：{"nodeId":"repeat-steps節點id","stepIndex":1,"config":{ 那一步改好後的 config }}
 - 建全新流程/大改結構：{"phase":"ready","message":"一句話說明這個流程","nodes":[{"id","type","label","config"}],"edges":[{"from","to","fromPort"}],"triggerParams":[可省略，見上面週期性資料的規則],"schedule":{"cron":"需求有指定自動時間時才填","params":{}},"onFailureWorkflow":"使用者說失敗要跑哪條流程時才填(流程名稱)"}
   - node.id 用簡短英數(如 n1,n2)；第一個節點通常是 type:"trigger"。
   - 節點的 config 依該型別的參數填；日期類參數可用相對日期變數，**只有這些名稱會被解析**(可加 -N 位移天數，如 {{today-7}})：
