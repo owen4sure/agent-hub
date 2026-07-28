@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { clipped } from "./contextBudget";
 import os from "node:os";
 import path from "node:path";
 import OpenAI from "openai";
@@ -550,7 +551,7 @@ export async function aiRepairGraph(
   // 失敗節點實際收到的輸入——修資料流問題的關鍵證據
   const actualInput = repairRunId ? getNodeInput(repairRunId, failedNodeId) : null;
   const inputHint = actualInput
-    ? `\n\n【失敗節點實際收到的資料(input)】\n${JSON.stringify(actualInput, null, 2).slice(0, 1500)}\n(如果某個 {{變數}} 在這裡是字面字串、或根本沒有這個欄位，代表「上游節點沒有把它算/取出來」，要去修的是上游那個負責產出它的節點，不是這個失敗節點)`
+    ? `\n\n【失敗節點實際收到的資料(input)】\n${clipped(JSON.stringify(actualInput, null, 2), 1500, "那一步實際收到的資料")}\n(如果某個 {{變數}} 在這裡是字面字串、或根本沒有這個欄位，代表「上游節點沒有把它算/取出來」，要去修的是上游那個負責產出它的節點，不是這個失敗節點)`
     : "";
 
   // 失敗當下的頁面 HTML(給瀏覽器類節點找正確選擇器)
@@ -679,7 +680,7 @@ edits 可以有一個或多個節點。config 要是那個節點「改好後的�
   // 文字與檔案保持順序，圖片則由 gateway/Claude Code 各自用可讀的方式帶入。
   const evidenceText = (opts.parts ?? []).map((part) => {
     if (part.kind === "text") return part.text;
-    if (part.kind === "file") return `【使用者補充檔案：${part.name}】\n${part.content.slice(0, 16_000)}`;
+    if (part.kind === "file") return `【使用者補充檔案：${part.name}】\n${clipped(part.content, 16_000, `檔案「${part.name}」的內容`)}`;
     return "【使用者補充了一張截圖，請結合截圖與前後文字判斷】";
   }).filter(Boolean).join("\n\n");
   const promptWithEvidence = evidenceText

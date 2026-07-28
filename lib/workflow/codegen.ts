@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { clipped } from "./contextBudget";
 import { callAIWithRetry } from "../aiRetry";
 import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../claudeCodeClient";
 import { getBuilderEffort } from "../settingsStore";
@@ -263,10 +264,10 @@ export async function generateCustomCode(
 ${intent}
 
 【上游傳進來的資料欄位】${inputKeys.length ? inputKeys.join(", ") : "(無)"}
-${opts.referenceCode ? "" : `【上游資料範例(截斷)】${JSON.stringify(ctx.input).slice(0, 1500)}`}
+${opts.referenceCode ? "" : `【上游資料範例】${clipped(JSON.stringify(ctx.input), 1500, "上游傳進來的資料")}`}
 ${fileFacts}
-${opts.replaceExistingCode ? `【這段既有程式碼剛剛執行失敗，請直接輸出「完整可替換的新程式碼」，不要只解釋或只給片段】\n${String(opts.failedCode ?? "").slice(0, 7000)}\n【實際錯誤】${String(opts.failure ?? "(未留下錯誤文字)").slice(0, 2000)}\n` : ""}
-${opts.referenceCode ? `【本機歷史版本裡最近一份可用的程式碼底稿】\n${String(opts.referenceNote ?? "這是舊版邏輯，可作為底稿，但必須以目前需求為準補齊差異。")}\n${opts.referenceCode.slice(0, 7000)}\n請保留其中已驗證的資料讀取／計算結構，依「這一步要做什麼」與真實檔案欄位更新；最後仍須輸出完整可執行程式碼。\n` : ""}
+${opts.replaceExistingCode ? `【這段既有程式碼剛剛執行失敗，請直接輸出「完整可替換的新程式碼」，不要只解釋或只給片段】\n${clipped(String(opts.failedCode ?? ""), 7000, "剛剛失敗的那段既有程式碼")}\n【實際錯誤】${clipped(String(opts.failure ?? "(未留下錯誤文字)"), 2000, "實際的錯誤訊息")}\n` : ""}
+${opts.referenceCode ? `【本機歷史版本裡最近一份可用的程式碼底稿】\n${String(opts.referenceNote ?? "這是舊版邏輯，可作為底稿，但必須以目前需求為準補齊差異。")}\n${clipped(opts.referenceCode, 7000, "歷史版本的程式碼底稿")}\n請保留其中已驗證的資料讀取／計算結構，依「這一步要做什麼」與真實檔案欄位更新；最後仍須輸出完整可執行程式碼。\n` : ""}
 【程式碼契約】
 ${opts.referenceCode ? REPAIR_CODE_CONTRACT : CODE_CONTRACT}
 ${opts.referenceCode ? "【資料解析底線】不得抓第一個數字；須以欄名／標籤／欄位對照取值，取不到就 throw 並 ctx.log 說明。" : PARSE_RULES}
@@ -351,7 +352,7 @@ ${opts.referenceCode ? "【資料解析底線】不得抓第一個數字；須�
     ctx.log(`AI 第 ${attempt + 1} 次產碼未通過：${lastSyntaxError.slice(0, 240)}`);
     if (attempt < 2) {
       convo.push(
-        { role: "assistant", content: (code || "").slice(0, 3000) || "(空)" },
+        { role: "assistant", content: clipped(code || "", 3000, "你上一次產出的程式碼") || "(空)" },
         { role: "user", content: `你剛剛的程式碼有語法錯誤：${lastSyntaxError}\n請修正後重新輸出「完整的」程式碼(函式主體，包在 \`\`\`js 框裡，不要任何說明文字)。` },
       );
     }

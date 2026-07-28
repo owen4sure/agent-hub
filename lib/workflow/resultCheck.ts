@@ -1,4 +1,5 @@
 import type OpenAI from "openai";
+import { clipped } from "./contextBudget";
 import { getDb } from "../db";
 import { getWorkflow } from "./store";
 import { getFileDumpForNode, dumpFileExcerpt } from "./repairContext";
@@ -85,9 +86,9 @@ function compactOutput(outputJson: string | null): string {
       const s = typeof v === "string" ? v : JSON.stringify(v);
       parts.push(s && s.length > 200 ? `${k}=(${s.length} 字，開頭:${s.slice(0, 120).replace(/\s+/g, " ")}…)` : `${k}=${s}`);
     }
-    return parts.join(", ").slice(0, 800) || "(空物件)";
+    return clipped(parts.join(", "), 800, "這一步輸出的欄位清單") || "(空物件)";
   } catch {
-    return outputJson.slice(0, 200);
+    return clipped(outputJson, 200, "這一步的輸出");
   }
 }
 
@@ -112,10 +113,10 @@ export async function checkRunSemantics(
   const nodeLines = wf.nodes.map((n) => {
     const run = lastByNode.get(n.id);
     const cfgBits: string[] = [];
-    if (typeof n.config.intent === "string" && n.config.intent) cfgBits.push(`意圖:${String(n.config.intent).slice(0, 150)}`);
+    if (typeof n.config.intent === "string" && n.config.intent) cfgBits.push(`意圖:${clipped(String(n.config.intent), 150, "這一步的意圖說明")}`);
     if (n.type === "if-condition") cfgBits.push(`條件:${n.config.left} ${n.config.op} ${n.config.right}`);
-    if (typeof n.config.template === "string" && n.config.template) cfgBits.push(`範本:${String(n.config.template).slice(0, 100)}`);
-    if (typeof n.config.message === "string" && n.config.message) cfgBits.push(`訊息:${String(n.config.message).slice(0, 100)}`);
+    if (typeof n.config.template === "string" && n.config.template) cfgBits.push(`範本:${clipped(String(n.config.template), 100, "這一步的範本")}`);
+    if (typeof n.config.message === "string" && n.config.message) cfgBits.push(`訊息:${clipped(String(n.config.message), 100, "這一步的訊息內容")}`);
     return `- [${n.id}] ${n.label}(${n.type})${cfgBits.length ? ` ${cfgBits.join("；")}` : ""}\n  執行:${run?.status ?? "沒跑到"}；輸出:${compactOutput(run?.output_json ?? null)}`;
   });
 
@@ -300,7 +301,7 @@ export async function verifyAgainstExpected(
   const prompt = `你是自動化流程的「對答案」驗收員。使用者提供了這次執行「已知正確的答案」,請判斷實際輸出是否對得上。
 
 【流程要做的事】${wf.name}
-【使用者說正確答案應該是】${expected.slice(0, 400)}
+【使用者說正確答案應該是】${clipped(expected, 400, "你提供的正確答案")}
 【實際各步驟的輸出】
 ${nodeLines.join("\n")}
 

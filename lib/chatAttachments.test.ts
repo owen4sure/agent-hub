@@ -284,3 +284,28 @@ test("hydrateChatAttachments：訊息沒提到任何儲存格位址時，不做�
     deleteChatAttachment(asset.id);
   }
 });
+
+test("壓縮檔：沒被展開的項目要留下說明檔，不能讓模型以為自己看過整包", () => {
+  const zip = new AdmZip();
+  for (let i = 0; i < 6; i++) zip.addFile(`src/large-${i}.txt`, Buffer.alloc(4 * 1024 * 1024, 65 + i));
+  const zipped = zip.toBuffer();
+  const asset = saveChatAttachment({
+    filename: "large-project.zip", mime: "application/zip", text: "大型壓縮專案",
+    originalBase64: zipped.toString("base64"), images: [],
+  });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agenthub-zip-note-test-"));
+  try {
+    materializeChatAttachment(asset.id, dir);
+    const notePath = path.join(dir, "未展開的壓縮檔項目.txt");
+    assert.ok(fs.existsSync(notePath), "有項目沒展開就必須留下說明檔");
+    const note = fs.readFileSync(notePath, "utf8");
+    assert.match(note, /沒有被展開/);
+    assert.match(note, /不要對這些項目的內容下結論/);
+    assert.match(note, /large-/, "要指名是哪些項目沒展開");
+    assert.ok(!fs.readdirSync(dir).some((n) => n.startsWith("zip-") && n.includes("未展開")),
+      "說明檔不能用 zip- 開頭，否則會被解壓預算的檢查算進去");
+  } finally {
+    deleteChatAttachment(asset.id);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

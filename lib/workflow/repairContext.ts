@@ -268,7 +268,7 @@ export function buildRunTrace(
       continue;
     }
     if (nr.status === "failed") {
-      lines.push(`- ${label}: ❌ 失敗——${(nr.error ?? "").slice(0, 200)}`);
+      lines.push(`- ${label}: ❌ 失敗——${clipped(nr.error ?? "", 200, "這一步的錯誤訊息")}`);
       continue;
     }
     if (nr.status !== "success") {
@@ -295,7 +295,7 @@ export function buildRunTrace(
     }
     lines.push(`- ${label}: ✅ 執行成功${branch}`);
   }
-  if (run.reason?.includes("⚠")) lines.push(`執行結果備註: ${run.reason.slice(0, 300)}`);
+  if (run.reason?.includes("⚠")) lines.push(`執行結果備註: ${clipped(run.reason, 300, "這次執行的備註")}`);
   return lines.join("\n").slice(0, maxChars);
 }
 

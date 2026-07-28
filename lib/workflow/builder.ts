@@ -1983,9 +1983,9 @@ export async function buildWorkflow(
     if (attempt < MAX_CORRECTIONS) {
       const fbText = `你剛剛輸出的內容有以下具體問題，請全部修正後重新輸出「完整的」JSON(同樣格式；不要解釋、不要只回有改的部分)：\n${lastProblems.map((p) => `- ${p}`).join("\n")}`;
       console.warn("[workflow-builder] validation-failed", { attempt, problems: lastProblems.slice(0, 8) });
-      feedback.push({ role: "assistant", content: raw.slice(0, 30_000) }, { role: "user", content: fbText });
+      feedback.push({ role: "assistant", content: clipped(raw, 30_000, "你上一次的完整回覆") }, { role: "user", content: fbText });
       feedbackCC.push(
-        { role: "assistant", parts: [{ kind: "text", text: raw.slice(0, 30_000) }] },
+        { role: "assistant", parts: [{ kind: "text", text: clipped(raw, 30_000, "你上一次的完整回覆") }] },
         { role: "user", parts: [{ kind: "text", text: fbText }] },
       );
     }

@@ -1,4 +1,7 @@
 import fs from "node:fs";
+
+/** 壓縮檔最多讀幾個項目。超過的部分不能無聲丟掉——模型會以為自己看過整包(見 contextBudget.ts)。 */
+const ZIP_ENTRY_LIMIT = 100;
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import AdmZip from "adm-zip";
@@ -260,15 +263,35 @@ export function materializeChatAttachment(id: string, targetDir: string): string
     try {
       const zip = new AdmZip(original);
       let expandedBytes = 0;
-      for (const [index, entry] of zip.getEntries().filter((e) => !e.isDirectory).slice(0, 100).entries()) {
+      const all = zip.getEntries().filter((e) => !e.isDirectory);
+      // 沒被展開的項目要留下紀錄。無聲丟掉的話，模型會以為自己看過整包壓縮檔，對沒看到的內容
+      // 照樣下結論——這正是這一輪所有問題的共同形狀(見 contextBudget.ts)。
+      const skipped: string[] = all.slice(ZIP_ENTRY_LIMIT).map((entry) => `${entry.entryName}（超過一次可讀的項目數上限）`);
+      for (const [index, entry] of all.slice(0, ZIP_ENTRY_LIMIT).entries()) {
         const declaredSize = Number(entry.header.size) || 0;
-        if (declaredSize > MAX_ZIP_ENTRY_BYTES || expandedBytes + declaredSize > MAX_ZIP_TOTAL_BYTES) continue;
+        if (declaredSize > MAX_ZIP_ENTRY_BYTES || expandedBytes + declaredSize > MAX_ZIP_TOTAL_BYTES) {
+          skipped.push(`${entry.entryName}（單檔或總量超過大小上限）`);
+          continue;
+        }
         const data = entry.getData();
         // header size 是攻擊者控制的欄位，解壓後再驗實際長度；不把超額資料寫到磁碟。
-        if (data.length > MAX_ZIP_ENTRY_BYTES || expandedBytes + data.length > MAX_ZIP_TOTAL_BYTES) continue;
+        if (data.length > MAX_ZIP_ENTRY_BYTES || expandedBytes + data.length > MAX_ZIP_TOTAL_BYTES) {
+          skipped.push(`${entry.entryName}（解壓後超過大小上限）`);
+          continue;
+        }
         const entryPath = path.join(/* turbopackIgnore: true */ targetDir, `zip-${index}-${safeBaseName(entry.entryName)}`);
         fs.writeFileSync(entryPath, data);
         expandedBytes += data.length;
+      }
+      // 檔名刻意不用 zip- 開頭：那個字首代表「從壓縮檔真的解出來的項目」，說明檔不是解壓內容，
+      // 混用會讓解壓總量的預算檢查把平台自己寫的說明也算進去。
+      if (skipped.length > 0) {
+        const notePath = path.join(/* turbopackIgnore: true */ targetDir, "未展開的壓縮檔項目.txt");
+        fs.writeFileSync(notePath,
+          `這個壓縮檔有 ${all.length} 個項目，其中 ${skipped.length} 個沒有被展開，你看不到它們的內容：\n`
+          + `${skipped.slice(0, 50).map((line) => `- ${line}`).join("\n")}\n`
+          + `不要對這些項目的內容下結論；需要其中某一個的話，請直接說檔名。`);
+        paths.push(notePath);
       }
     } catch { /* 損壞的 ZIP 仍可讀上面的抽取文字，不讓整次建圖失敗 */ }
   } else if (looksLikeText(original)) {

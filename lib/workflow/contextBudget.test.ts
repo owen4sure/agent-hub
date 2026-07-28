@@ -41,6 +41,10 @@ test("防回歸：模型上下文的組裝不再用裸 slice 無聲截斷", () =
   const targets = [
     ["lib/workflow/builder.ts", [/file\.content\.slice\(/, /chunks\.join\("\\n\\n"\)\.slice\(/, /rc\.evidence\.slice\(/]],
     ["lib/workflow/repairContext.ts", [/output\.sheetText\.slice\(/, /pieces\.join\("\\n\\n"\)\.slice\(/]],
+    ["lib/workflow/codegen.ts", [/opts\.referenceCode\.slice\(/, /opts\.failedCode \?\? ""\)\.slice\(/, /\(code \|\| ""\)\.slice\(/]],
+    ["lib/workflow/graphRepair.ts", [/part\.content\.slice\(/, /JSON\.stringify\(actualInput, null, 2\)\.slice\(/]],
+    ["lib/workflow/nodeEditor.ts", [/p\.content\.slice\(/]],
+    ["lib/workflow/resultCheck.ts", [/expected\.slice\(/, /outputJson\.slice\(/, /parts\.join\(", "\)\.slice\(/]],
   ] as const;
   for (const [file, patterns] of targets) {
     const source = fs.readFileSync(path.join(process.cwd(), file), "utf8");

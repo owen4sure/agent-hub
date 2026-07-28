@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { clipped } from "./contextBudget";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -138,7 +139,7 @@ ${extractFormElements(html)}
           imagePaths.push(imgPath);
           pieces.push(`(附上一張圖片：${imgPath})`);
         } else if (p.kind === "file") {
-          pieces.push(`(附上檔案「${p.name}」的內容)\n${p.content.slice(0, 12_000)}`);
+          pieces.push(`(附上檔案「${p.name}」的內容)\n${clipped(p.content, 12_000, `檔案「${p.name}」的內容`)}`);
         }
       }
       pieces.push(closingText);
@@ -163,7 +164,7 @@ ${extractFormElements(html)}
       for (const p of parts) {
         if (p.kind === "text") content.push({ type: "text", text: p.text });
         else if (p.kind === "image") content.push({ type: "image_url", image_url: { url: `data:${p.mime || "image/png"};base64,${p.b64}` } });
-        else if (p.kind === "file") content.push({ type: "text", text: `(附上檔案「${p.name}」的內容)\n${p.content.slice(0, 12_000)}` });
+        else if (p.kind === "file") content.push({ type: "text", text: `(附上檔案「${p.name}」的內容)\n${clipped(p.content, 12_000, `檔案「${p.name}」的內容`)}` });
       }
       content.push({ type: "text", text: closingText });
       const fallback = (await isClaudeCodeAvailable()) ? claudeCodeFallback : undefined;
