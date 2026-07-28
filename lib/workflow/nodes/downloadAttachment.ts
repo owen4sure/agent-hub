@@ -3,6 +3,7 @@ import fs from "node:fs";
 import type { NodeDefinition, NodeContext } from "../types";
 import { PermanentError } from "../types";
 import { cfgStr } from "../nodeHelpers";
+import { fileSourceEvidence } from "../runtimeEvidence";
 
 async function saveDebug(ctx: NodeContext, step: string) {
   const dir = path.join(/* turbopackIgnore: true */ ctx.debugDir, ctx.nodeId);
@@ -65,7 +66,7 @@ export const downloadAttachmentNode: NodeDefinition = {
           : ext === ".csv" ? "text/csv"
             : ext === ".pdf" ? "application/pdf" : "application/octet-stream";
       ctx.registerFile(filename, filePath, mime, "intermediate");
-      return { output: { attachmentPath: filePath, filename } };
+      return { output: { attachmentPath: filePath, filename, sourceEvidence: fileSourceEvidence(filePath, { downloaded: true }) } };
     };
 
     await saveDebug(ctx, "01-mail-opened");

@@ -4,6 +4,7 @@ import { getDb } from "./db";
 import { listWorkflows } from "./workflow/store";
 import { startWorkflowRun } from "./workflow/engine";
 import { resolveParams } from "./relativeDate";
+import { getAutomationReadiness } from "./workflow/automationReadiness";
 
 /**
  * 資料夾監聽觸發：trigger 節點的 config.watchPath 填了資料夾路徑的「正式」流程，
@@ -55,6 +56,11 @@ function scanOnce() {
   for (const wf of workflows) {
     try {
       if (wf.status !== "official") continue;
+      const readiness = getAutomationReadiness(wf, "folder-watcher");
+      if (!readiness.ready) {
+        console.warn(`[watchers] ${wf.name}: 自動觸發檢查未通過，暫停資料夾監聽 (${readiness.items[0]?.title ?? "未知原因"})`);
+        continue;
+      }
       const trigger = wf.nodes.find((n) => n.type === "trigger");
       const watchPath = typeof trigger?.config.watchPath === "string" ? trigger.config.watchPath.trim() : "";
       if (!watchPath) continue;

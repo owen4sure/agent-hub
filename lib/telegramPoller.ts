@@ -5,6 +5,7 @@ import { listWorkflows } from "./workflow/store";
 import { startWorkflowRun } from "./workflow/engine";
 import { resolveParams } from "./relativeDate";
 import type { Workflow } from "./workflow/types";
+import { getAutomationReadiness } from "./workflow/automationReadiness";
 
 /**
  * Telegram 的唯一接收端(getUpdates 長輪詢)，一條連線同時服務兩件事：
@@ -40,6 +41,7 @@ function telegramTriggerWorkflows(): { wf: Workflow; keyword: string }[] {
   try {
     return listWorkflows()
       .filter((wf) => wf.status === "official")
+      .filter((wf) => getAutomationReadiness(wf, "telegram-poller").ready)
       .map((wf) => ({ wf, trigger: wf.nodes.find((n) => n.type === "trigger") }))
       .filter(({ trigger }) => trigger?.config.telegramWatch === "on")
       .map(({ wf, trigger }) => ({

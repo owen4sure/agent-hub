@@ -4,6 +4,9 @@ import { MissingWorkflowSettingsError, QueueCapacityError, startWorkflowRun } fr
 import { resolveParams } from "@/lib/relativeDate";
 import { workflowExecutionFingerprint } from "@/lib/workflow/fingerprint";
 import { claimPreviewReplay, releasePreviewReplay } from "@/lib/workflow/previewReplay";
+import { EvidenceDriftError } from "@/lib/workflow/evidencePassport";
+import { n8nMigrationReviewState } from "@/lib/workflow/n8nMigration";
+import { AcceptanceSpecOutdatedError } from "@/lib/workflow/acceptanceSpec";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -25,6 +28,13 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // 部分執行(框選/從某步開始)預設是真的執行——使用者拍板「圈起來執行的就執行到底,除非我有說只測試」。
   if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
     return NextResponse.json({ error: "dryRun 必須是 true 或 false" }, { status: 400 });
+  }
+  if (body.approvalDecisions !== undefined && (!body.approvalDecisions || typeof body.approvalDecisions !== "object" || Array.isArray(body.approvalDecisions) ||
+    !Object.entries(body.approvalDecisions as Record<string, unknown>).every(([nodeId, decision]) => /^[A-Za-z0-9_-]{1,80}$/.test(nodeId) && (decision === "approved" || decision === "rejected")))) {
+    return NextResponse.json({ error: "簽核分支選擇格式不正確" }, { status: 400 });
+  }
+  if (body.approvalDecisions !== undefined && body.dryRun !== true) {
+    return NextResponse.json({ error: "簽核分支選擇只能用在安全試跑，不能注入正式執行" }, { status: 400 });
   }
   // 「從這一步開始測」：只跑指定節點+它的下游，前面的步驟沿用最近一次結果或跳過(engine 的 startAtNodeId)
   if (body.startAtNodeId !== undefined && (typeof body.startAtNodeId !== "string" || !wf.nodes.some((n) => n.id === body.startAtNodeId))) {
@@ -53,6 +63,13 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({
       error: "這是從外部檔案匯入的流程。它可能讀取本機檔案、開啟網站或把資料送到外部；第一次執行前需要你明確確認。",
       code: "IMPORTED_WORKFLOW_CONFIRMATION_REQUIRED",
+    }, { status: 409 });
+  }
+  const n8nReviewState = n8nMigrationReviewState(wf);
+  if (wf.n8nMigration && !n8nReviewState.ready) {
+    return NextResponse.json({
+      error: n8nReviewState.graphReviewRequired ? "這份 n8n 草稿目前沒有任何連線。請先在畫布接好步驟，再回到「n8n 遷移核對」重新確認。" : n8nReviewState.missingNodeIds.length > 0 ? `這份 n8n 遷移還有 ${n8nReviewState.missingNodeIds.length} 個步驟尚未逐一確認。請先打開「n8n 遷移核對」處理黃色步驟。` : "這份 n8n 遷移已逐步確認，但尚未完成整體解鎖。請回到遷移核對面板按確認。",
+      code: "N8N_MIGRATION_REVIEW_REQUIRED",
     }, { status: 409 });
   }
   if (wf.importedUntrusted) {
@@ -85,6 +102,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       startAtNodeId: body.startAtNodeId,
       onlyNodeIds: body.onlyNodeIds,
       dryRun: body.dryRun === true,
+      scenarioApprovalDecisions: body.dryRun === true ? body.approvalDecisions : undefined,
     });
     return NextResponse.json({ runId });
   } catch (err) {
@@ -94,6 +112,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         { error: err.message, code: "MISSING_REQUIRED_SETTINGS", missing: err.missing },
         { status: 400 },
       );
+    }
+    if (err instanceof EvidenceDriftError) {
+      return NextResponse.json({ error: err.message, code: err.code }, { status: 409 });
+    }
+    if (err instanceof AcceptanceSpecOutdatedError) {
+      return NextResponse.json({ error: err.message, code: err.code }, { status: 409 });
     }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "無法啟動流程" },

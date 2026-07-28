@@ -1,6 +1,7 @@
 import { getNodeDef, NODE_DEFS } from "./registry";
 import { parseSwitchCases, SWITCH_FALLBACK_PORT } from "./nodes/switchCase";
 import { DATE_TOKENS } from "../relativeDate";
+import { MAX_REPEAT_STEPS_NESTING, nestingLimitMessage, parseRepeatSteps } from "./repeatNesting";
 import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
 
 /**
@@ -142,40 +143,48 @@ export function lintGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): string[
   }
 
   // ── repeat-steps 內嵌圖也要完整驗證：它不是引擎眼中的獨立節點，漏驗會等到執行才爆 ──
-  for (const n of nodes) {
-    if (n.type !== "repeat-steps") continue;
-    const stepsRaw = (n.config ?? {}).steps;
-    let steps: { type?: unknown; config?: unknown }[] | null = null;
-    try {
-      const parsed = Array.isArray(stepsRaw) ? stepsRaw : JSON.parse(String(stepsRaw ?? "[]"));
-      if (Array.isArray(parsed)) steps = parsed as { type?: unknown; config?: unknown }[];
-    } catch { /* 下面統一回具體錯誤 */ }
+  // 以前這段只驗「第一層」內嵌步驟，而 repeatSteps.execute() 其實會遞迴執行任意深度的巢狀迴圈——
+  // 把 send-email 埋在第二層以下，lint 完全看不到、需求驗收也掃不到，執行期卻真的會寄出去(P0)。
+  // 現在改成遞迴驗到 MAX_REPEAT_STEPS_NESTING 為止，超過的直接報錯要求改結構(深度政策的單一來源
+  // 在 repeatNesting.ts，requirementCheck 與執行期閘門用的是同一份)。
+  const lintSteps = (parentPath: string, config: Record<string, unknown>, depth: number): void => {
+    const steps = parseRepeatSteps(config);
     if (!steps || steps.length === 0) {
-      errors.push(`節點 "${n.id}"(重複執行)的 steps 必須是非空的合法 JSON 陣列。`);
-      continue;
+      errors.push(`節點 "${parentPath}"(重複執行)的 steps 必須是非空的合法 JSON 陣列。`);
+      return;
+    }
+    if (depth > MAX_REPEAT_STEPS_NESTING) {
+      errors.push(nestingLimitMessage(parentPath));
+      return;
     }
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
+      const path = `${parentPath}[步驟${i}]`;
       const type = typeof step?.type === "string" ? step.type : "";
       if (type === "wait-approval") {
-        errors.push(`節點 "${n.id}"(重複執行)的內嵌步驟裡有 wait-approval——迴圈裡不能等人簽核。請把簽核節點放在迴圈外面(先簽核再進迴圈，或迴圈整理完資料後再簽核)。`);
+        errors.push(`節點 "${parentPath}"(重複執行)的內嵌步驟 ${path} 裡有 wait-approval——迴圈裡不能等人簽核。請把簽核節點放在迴圈外面(先簽核再進迴圈，或迴圈整理完資料後再簽核)。`);
         continue;
       }
       const def = type ? getNodeDef(type) : undefined;
       if (!def) {
-        errors.push(`節點 "${n.id}" 的第 ${i + 1} 個內嵌步驟 type "${type || "(空)"}" 不存在。`);
+        errors.push(`節點 "${parentPath}" 的第 ${i + 1} 個內嵌步驟(${path}) type "${type || "(空)"}" 不存在。`);
         continue;
       }
       if (!step.config || typeof step.config !== "object" || Array.isArray(step.config)) {
-        errors.push(`節點 "${n.id}" 的第 ${i + 1} 個內嵌步驟 config 必須是物件。`);
+        errors.push(`節點 "${parentPath}" 的第 ${i + 1} 個內嵌步驟(${path}) config 必須是物件。`);
         continue;
       }
       const stepConfig = step.config as Record<string, unknown>;
-      errors.push(...validateConfigTypes(`${n.id}[步驟${i}]`, stepConfig, def.configSchema));
+      errors.push(...validateConfigTypes(path, stepConfig, def.configSchema));
       if (type === "custom-code" && !String(stepConfig.code ?? "").trim() && !String(stepConfig.intent ?? "").trim()) {
-        errors.push(`節點 "${n.id}" 的第 ${i + 1} 個自訂步驟沒有白話 intent，清除外來程式碼後無法安全重新產生。`);
+        errors.push(`節點 "${parentPath}" 的第 ${i + 1} 個自訂步驟(${path})沒有白話 intent，清除外來程式碼後無法安全重新產生。`);
       }
+      if (type === "repeat-steps") lintSteps(path, stepConfig, depth + 1);
     }
+  };
+  for (const n of nodes) {
+    if (n.type !== "repeat-steps") continue;
+    lintSteps(n.id, n.config ?? {}, 1);
   }
 
   // ── 結構 ──

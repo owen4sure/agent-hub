@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { analyzeCustomCodeOutput, assertRunnableGraph, hasExecutableSteps, lintGraph, lintVarRefWarnings, validateConfigTypes, withSchemaDefaults } from "./graphLint";
+import { MAX_REPEAT_STEPS_NESTING } from "./repeatNesting";
 import { plainChatMessage } from "./plainLanguage";
 import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
 
@@ -403,4 +404,42 @@ test("執行前安全閘門：合法圖放行，有環或孤兒節點就拒絕�
     () => assertRunnableGraph(invalid, [{ from: "t", to: "n" }, { from: "n", to: "t" }]),
     /不能安全執行[\s\S]*(有環|沒有從觸發節點)/,
   );
+});
+
+// repeatSteps.execute() 會遞迴執行任意深度的巢狀迴圈，但 lint 以前只驗第一層內嵌步驟——
+// 埋在第二層以下的未知型別、非法 config、甚至整個超深結構全部看不到，等到執行才爆(或更糟：
+// 安靜地寄出信)。深度政策的單一來源在 repeatNesting.ts，lint／需求驗收／執行器共用同一份。
+test("lintGraph：repeat-steps 的巢狀驗證要遞迴到政策上限，深層的非法內嵌步驟也要被抓到", () => {
+  const inner = JSON.stringify([{ type: "not-real", config: {} }, { type: "wait", config: { seconds: "很多" } }]);
+  const outer = {
+    ...node("r", "repeat-steps"),
+    config: { items: "[1]", outputKey: "results", steps: JSON.stringify([{ type: "repeat-steps", config: { items: "[1]", outputKey: "results", steps: inner } }]) },
+  };
+  const errors = lintGraph([node("t", "trigger"), outer], [{ from: "t", to: "r" }]);
+  assert.ok(errors.some((e) => e.includes("not-real")), `深層的未知型別要被抓到：${JSON.stringify(errors)}`);
+  assert.ok(errors.some((e) => e.includes("型別是 number")), `深層的非法 config 要被抓到：${JSON.stringify(errors)}`);
+  // 錯誤要帶完整 path，使用者/模型才知道是「第 0 步裡面的第 0 步」
+  assert.ok(errors.some((e) => e.includes("r[步驟0][步驟0]")), JSON.stringify(errors));
+});
+
+test("lintGraph：巢狀超過政策上限要直接報錯並帶完整 path，不是靜靜地少驗幾層", () => {
+  let steps = JSON.stringify([{ type: "send-email", config: { to: "x@example.com", subject: "s", body: "b" } }]);
+  for (let level = 0; level < MAX_REPEAT_STEPS_NESTING + 1; level++) {
+    steps = JSON.stringify([{ type: "repeat-steps", config: { items: "[1]", outputKey: "results", steps } }]);
+  }
+  const overLimit = { ...node("r", "repeat-steps"), config: { items: "[1]", outputKey: "results", steps } };
+  const errors = lintGraph([node("t", "trigger"), overLimit], [{ from: "t", to: "r" }]);
+  assert.ok(errors.some((e) => e.includes("巢狀層數超過上限")), JSON.stringify(errors));
+  assert.ok(errors.some((e) => /r(\[步驟0\])+/.test(e)), `錯誤要帶完整 path：${JSON.stringify(errors)}`);
+  // 執行入口共用同一份 lint，所以舊資料/匯入/繞過建圖流程而來的超深圖在任何副作用前就會被拒絕
+  assert.throws(() => assertRunnableGraph([node("t", "trigger"), overLimit], [{ from: "t", to: "r" }]), /巢狀層數超過上限/);
+});
+
+test("lintGraph：合法最大深度的巢狀迴圈仍然通過，既有一、二層流程不受影響", () => {
+  let steps = JSON.stringify([{ type: "custom-code", config: { intent: "整理這一筆" } }]);
+  for (let level = 1; level < MAX_REPEAT_STEPS_NESTING; level++) {
+    steps = JSON.stringify([{ type: "repeat-steps", config: { items: "[1]", outputKey: "results", steps } }]);
+  }
+  const legal = { ...node("r", "repeat-steps"), config: { items: "[1]", outputKey: "results", steps } };
+  assert.deepEqual(lintGraph([node("t", "trigger"), legal], [{ from: "t", to: "r" }]), []);
 });

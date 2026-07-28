@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { checkRequirements, unmetFeedback, checklistText, isManualFileUploadRequested, isScheduledExecutionRequested } from "./requirementCheck";
+import { MAX_REPEAT_STEPS_NESTING } from "./repeatNesting";
+import type { SubflowLookup } from "./subflowEffects";
 import type { WorkflowNode, WorkflowEdge } from "./types";
 
 const N = (id: string, type: string): WorkflowNode => ({ id, type, label: id, config: {}, position: { x: 0, y: 0 } });
@@ -472,4 +474,374 @@ test("需求驗收:『自動抓信/收信/找信/下載』等資料擷取動詞�
   assert.equal(isScheduledExecutionRequested("每天自動下載報表"), true);
   // 既有行為不能被破壞：純粹描述頻率、沒有「自動」字樣的手動情境仍要維持 false。
   assert.equal(isScheduledExecutionRequested("我每週會手動上傳一份 Excel，幫我整理"), false);
+});
+
+// ── repeat-steps 巢狀副作用安全漏洞(P0，使用者回報) ────────────────────────────────
+// 需求驗收的多數規則已經改走 flattenGraphNodes(遞迴攤平含迴圈內嵌步驟)，但兩條**安全否決**規則
+// (noUnrequestedOutbound / noUnrequestedWrite)當時漏了跟上、仍只掃 graph.nodes。後果是：把寄信或
+// 寫檔步驟收進 repeat-steps 的 config.steps，就能整個繞過使用者明說的「不要寄信/不要通知/只讀」——
+// checkRequirements 回傳空的 unmet 清單，自我修正迴圈不會要求移除，圖直接以 ready 交付。
+// 「畫在外層」跟「收在迴圈裡」對真實副作用完全沒有差別，安全規則不能因為容器就放寬。
+
+const loopSteps = (id: string, steps: unknown[]): WorkflowNode =>
+  ({ id, type: "repeat-steps", label: id, config: { items: "{{items}}", steps: JSON.stringify(steps) }, position: { x: 0, y: 0 } });
+
+test("需求驗收(安全):迴圈內嵌的 send-email 在使用者說「不要寄信」時必須被攔下", () => {
+  const items = checkRequirements(
+    "把清單整理成檔案，不要寄信也不要通知",
+    g([N("t", "trigger"), loopSteps("loop", [{ type: "send-email", config: { to: "x@example.com", subject: "x", body: "x" } }])]),
+  );
+  const outbound = items.find((i) => i.key === "noUnrequestedOutbound");
+  assert.ok(outbound, `巢狀 send-email 必須被辨識為未授權外送：${JSON.stringify(items)}`);
+  assert.equal(outbound!.met, false);
+  // 內嵌步驟沒有 graph id，錯誤訊息要用「迴圈節點 id + 步驟索引」定位，不能捏造 id 也不能只講型別
+  assert.match(outbound!.hint, /loop\[步驟0\]\(send-email\)/);
+  assert.match(unmetFeedback(items), /loop\[步驟0\]/);
+});
+
+test("需求驗收(安全):使用者說「不要通知」時，迴圈內嵌的 telegram/line/desktop 通知全部要被攔下", () => {
+  for (const type of ["telegram-notify", "line-notify", "desktop-notify", "slack-notify"]) {
+    const items = checkRequirements(
+      "整理完資料存起來就好，不要通知我",
+      g([N("t", "trigger"), loopSteps("loop", [{ type, config: {} }])]),
+    );
+    const outbound = items.find((i) => i.key === "noUnrequestedOutbound");
+    assert.equal(outbound?.met, false, `${type} 藏在迴圈裡仍必須被攔下：${JSON.stringify(items)}`);
+    assert.match(outbound!.hint, new RegExp(`loop\\[步驟0\\]\\(${type}\\)`));
+  }
+});
+
+test("需求驗收(安全):desktop-notify 的「失敗備案」豁免只適用於接得到 error 分支的頂層節點", () => {
+  // 頂層 + 真的接了 error 分支 = 既有的合法備案，維持放行(不能因為這次收緊而破壞既有行為)
+  const topLevel = checkRequirements(
+    "讀完資料算一下總數",
+    g([N("t", "trigger"), N("calc", "custom-code"), N("warn", "desktop-notify")], [{ from: "calc", to: "warn", fromPort: "error" }]),
+  );
+  assert.equal(topLevel.find((i) => i.key === "noUnrequestedOutbound"), undefined, JSON.stringify(topLevel));
+  // 內嵌步驟不在 edges 裡、接不到 error 分支，這個豁免對它一律不成立
+  const nested = checkRequirements(
+    "讀完資料算一下總數",
+    g([N("t", "trigger"), loopSteps("loop", [{ type: "desktop-notify", config: {} }])], [{ from: "loop", to: "loop", fromPort: "error" }]),
+  );
+  assert.equal(nested.find((i) => i.key === "noUnrequestedOutbound")?.met, false, JSON.stringify(nested));
+});
+
+test("需求驗收(安全):只讀／不要修改／不要產出檔案時，迴圈內嵌的 write-file、excel-process 都要被攔下", () => {
+  const cases: [string, string][] = [
+    ["只讀取資料做分析", "write-file"],
+    ["幫我分析這些資料，不要修改任何東西", "excel-process"],
+    ["整理一下就好，不要產出檔案", "write-file"],
+  ];
+  for (const [text, type] of cases) {
+    const items = checkRequirements(text, g([N("t", "trigger"), loopSteps("loop", [{ type, config: {} }])]));
+    const write = items.find((i) => i.key === "noUnrequestedWrite");
+    assert.equal(write?.met, false, `「${text}」+ 迴圈內 ${type} 必須被攔下：${JSON.stringify(items)}`);
+    assert.match(write!.hint, new RegExp(`loop\\[步驟0\\]\\(${type}\\)`));
+    // 使用者明說不要產出檔案時，不能反過來把「產出檔案」列成需求逼模型補一個 write-file
+    if (text.includes("不要產出檔案")) assert.equal(items.find((i) => i.key === "output"), undefined, JSON.stringify(items));
+  }
+});
+
+test("需求驗收(安全):使用者明確要求寄信／通知／寫檔時，收在迴圈裡的對應節點不得被誤擋", () => {
+  const email = checkRequirements("每一筆整理完都寄信給我", g([N("t", "trigger"), loopSteps("loop", [{ type: "send-email", config: { to: "", subject: "s", body: "b" } }])]));
+  assert.equal(email.find((i) => i.key === "noUnrequestedOutbound"), undefined, JSON.stringify(email));
+  assert.equal(email.find((i) => i.key === "email")?.met, true, JSON.stringify(email));
+
+  const notify = checkRequirements("每一筆處理完用 telegram 通知我", g([N("t", "trigger"), loopSteps("loop", [{ type: "telegram-notify", config: {} }])]));
+  assert.equal(notify.find((i) => i.key === "noUnrequestedOutbound"), undefined, JSON.stringify(notify));
+  assert.equal(notify.find((i) => i.key === "notify")?.met, true, JSON.stringify(notify));
+
+  const write = checkRequirements("每一筆都存成一個報告檔", g([N("t", "trigger"), loopSteps("loop", [{ type: "write-file", config: {} }])]));
+  assert.equal(write.find((i) => i.key === "noUnrequestedWrite"), undefined, JSON.stringify(write));
+  assert.equal(write.find((i) => i.key === "output")?.met, true, JSON.stringify(write));
+
+  // 「不要修改原始資料，存成新檔」同時有禁止與明確要求：禁止的是改既有資料，不是產出新檔，
+  // 不能因為看到「不要修改」就把使用者明確要的存檔步驟判成未授權寫入。
+  const both = checkRequirements("不要修改原始資料，把結果存成新檔", g([N("t", "trigger"), loopSteps("loop", [{ type: "write-file", config: {} }])]));
+  assert.equal(both.find((i) => i.key === "noUnrequestedWrite"), undefined, JSON.stringify(both));
+});
+
+test("需求驗收(安全):二層巢狀 repeat-steps 裡的副作用也要被攔下，遞迴不能只做一層", () => {
+  const inner = { type: "repeat-steps", config: { items: "{{sub}}", steps: JSON.stringify([{ type: "send-email", config: { to: "x@example.com", subject: "x", body: "x" } }]) } };
+  const items = checkRequirements("整理資料就好，不要寄信", g([N("t", "trigger"), loopSteps("outer", [inner])]));
+  const outbound = items.find((i) => i.key === "noUnrequestedOutbound");
+  assert.equal(outbound?.met, false, `二層巢狀的 send-email 仍必須被攔下：${JSON.stringify(items)}`);
+  // 路徑要一路疊出來，使用者才知道是「outer 這個迴圈的第 0 步(它本身也是迴圈)的第 0 步」
+  assert.match(outbound!.hint, /outer\[步驟0\]\[步驟0\]\(send-email\)/);
+});
+
+// ── 四層巢狀繞過(P0 第二輪，使用者獨立重現) ─────────────────────────────────────────
+// 上一輪把安全規則改成掃「攤平後的節點」，但攤平自己在 depth >= 3 停止，註解卻寫「任意深度」。
+// repeatSteps.execute() 其實會遞迴執行任意深度的巢狀迴圈，所以把 send-email 埋在第四層，
+// checkRequirements 與 lintGraph 都回空、執行期照樣寄信。深度政策現在只有 repeatNesting.ts 一份，
+// 而且走訪器會回報「哪裡沒走到」，讓安全規則對看不到的區域 fail closed。
+
+const nestLoops = (levels: number, innermost: unknown[]): Record<string, unknown> => {
+  let steps = innermost;
+  for (let i = 0; i < levels - 1; i++) steps = [{ type: "repeat-steps", config: { items: "{{x}}", outputKey: "r", steps: JSON.stringify(steps) } }];
+  return { items: "{{list}}", outputKey: "r", steps: JSON.stringify(steps) };
+};
+const loopNode = (id: string, levels: number, innermost: unknown[]): WorkflowNode =>
+  ({ id, type: "repeat-steps", label: id, config: nestLoops(levels, innermost), position: { x: 0, y: 0 } });
+
+test("需求驗收(安全):四層巢狀的 send-email +「不要寄信」不能再回空清單，必須 fail closed", () => {
+  const nodes = [N("t", "trigger"), loopNode("loop", 4, [{ type: "send-email", config: { to: "x@example.com", subject: "x", body: "x" } }])];
+  const items = checkRequirements("整理清單，不要寄信也不要通知", g(nodes));
+  // 使用者原本的重現方式：只 filter 這個 key 也必須看得到「不通過」，不能是空陣列
+  const outbound = items.filter((i) => i.key === "noUnrequestedOutbound");
+  assert.equal(outbound.length, 1, `四層巢狀不能讓安全項整個消失：${JSON.stringify(items)}`);
+  assert.equal(outbound[0].met, false);
+  // 而且要講得出「為什麼不通過」——是有掃不到的區域，不是假裝找到了那個 send-email
+  assert.match(outbound[0].hint, /看不到的區域/);
+  assert.match(outbound[0].hint, /loop(\[步驟0\])+/, "要帶完整 path 才知道是哪個迴圈超限");
+  // 另外要有一項專門說明「這張圖檢查不完整」，使用者才知道真正該改的是結構
+  assert.equal(items.find((i) => i.key === "inspectableGraph")?.met, false, JSON.stringify(items));
+});
+
+test("需求驗收(安全):四層巢狀的 write-file +「不要產出檔案」同樣不能繞過", () => {
+  const nodes = [N("t", "trigger"), loopNode("loop", 4, [{ type: "write-file", config: { fileName: "x.txt", content: "x" } }])];
+  const items = checkRequirements("整理一下就好，不要產出檔案", g(nodes));
+  const write = items.filter((i) => i.key === "noUnrequestedWrite");
+  assert.equal(write.length, 1, `四層巢狀不能讓寫入防護整個消失：${JSON.stringify(items)}`);
+  assert.equal(write[0].met, false);
+  assert.match(write[0].hint, /loop(\[步驟0\])+/);
+});
+
+test("需求驗收(安全):合法最大深度的巢狀仍要被完整掃到，最深處的副作用照樣攔下", () => {
+  const nodes = [N("t", "trigger"), loopNode("loop", MAX_REPEAT_STEPS_NESTING, [{ type: "send-email", config: { to: "x@example.com", subject: "x", body: "x" } }])];
+  const items = checkRequirements("整理清單，不要寄信", g(nodes));
+  const outbound = items.find((i) => i.key === "noUnrequestedOutbound");
+  assert.equal(outbound?.met, false);
+  // 合法深度是「真的看到了那一步」，訊息要指名節點型別與位置，不是講盲區
+  assert.match(outbound!.hint, /\(send-email\)/);
+  assert.equal(items.find((i) => i.key === "inspectableGraph"), undefined, "合法深度不該被當成檢查不完整");
+});
+
+test("需求驗收(安全):合法深度且沒有未授權副作用的巢狀流程，不得被這道防線誤擋", () => {
+  const nodes = [N("t", "trigger"), loopNode("loop", MAX_REPEAT_STEPS_NESTING, [{ type: "custom-code", config: { intent: "整理這一筆資料" } }])];
+  const items = checkRequirements("整理清單，不要寄信也不要通知", g(nodes));
+  assert.deepEqual(items.filter((i) => !i.met).map((i) => i.key), [], JSON.stringify(items));
+});
+
+test("需求驗收(安全):steps 讀不出來(壞 JSON)也是盲區，安全規則同樣 fail closed", () => {
+  const broken: WorkflowNode = { id: "loop", type: "repeat-steps", label: "loop", config: { items: "{{list}}", steps: "not-json" }, position: { x: 0, y: 0 } };
+  const items = checkRequirements("整理清單，不要寄信", g([N("t", "trigger"), broken]));
+  assert.equal(items.find((i) => i.key === "noUnrequestedOutbound")?.met, false, JSON.stringify(items));
+  assert.match(items.find((i) => i.key === "inspectableGraph")!.hint, /合法的 JSON 陣列/);
+});
+
+// ── 只讀需求放行遠端寫入(P0 第三輪，使用者獨立重現) ──────────────────────────────────
+// 上一輪把副作用分類集中到 sideEffects.ts，但 noUnrequestedWrite 只查 file-write/file-modify，
+// 而且測試還把「需求驗收型別必須維持重構前清單」寫死——等於把「遠端寫入不算資料變更」這個缺口
+// 永久釘成預期行為。使用者說「只讀取資料，不要修改」，圖上放 google-sheet-append 卻完全放行。
+const writeItem = (text: string, nodes: WorkflowNode[]) =>
+  checkRequirements(text, g(nodes)).find((i) => i.key === "noUnrequestedWrite");
+const READ_ONLY = "只讀取資料，不要修改、不要產出檔案";
+
+test("需求驗收(安全):只讀需求下，已知的遠端寫入節點逐一都要被攔下", () => {
+  for (const type of ["google-sheet-append", "google-sheet-update", "google-slides-create", "google-slides-refresh"]) {
+    const item = writeItem(READ_ONLY, [N("t", "trigger"), N("w", type)]);
+    assert.equal(item?.met, false, `${type} 會改動使用者 Google 帳號裡的資料，只讀需求下必須被攔`);
+    assert.match(item!.hint, new RegExp(`w\\(${type}\\)`), "要指名是哪個節點");
+  }
+});
+
+test("需求驗收(安全):只讀需求下，http-request 的 POST/PUT/PATCH/DELETE 預設就要被攔", () => {
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    const item = writeItem(READ_ONLY, [N("t", "trigger"), NC("w", "http-request", { method, url: "https://api.example.com/x" })]);
+    assert.equal(item?.met, false, `${method} 預設要當成會寫`);
+  }
+  // GET 是明確的讀取，不該被擋
+  assert.equal(writeItem(READ_ONLY, [N("t", "trigger"), NC("w", "http-request", { method: "GET", url: "https://api.example.com/x" })]), undefined);
+  // 「POST 但只查詢」的合法整合：放行條件是**使用者**確認過這一份請求。AI 在節點上寫 readOnly:true
+  // 只是建議，自己不構成放行(不然 AI 一句話就能繞過整個只讀保證)。
+  const nodes = [N("t", "trigger"), NC("w", "http-request", { method: "POST", url: "https://api.notion.com/v1/databases/x/query", readOnly: true })];
+  assert.equal(writeItem(READ_ONLY, nodes)?.met, false, "只有 AI 建議、沒有使用者確認時仍要被攔");
+  assert.equal(
+    checkRequirements(READ_ONLY, g(nodes), { readOnlyApprovedNodeIds: new Set(["w"]) }).find((i) => i.key === "noUnrequestedWrite"),
+    undefined,
+    "使用者確認過之後才放行",
+  );
+  const claimedByUrl = writeItem(READ_ONLY, [N("t", "trigger"), NC("w", "http-request", { method: "POST", url: "https://api.notion.com/v1/databases/x/query" })]);
+  assert.equal(claimedByUrl?.met, false, "網址長得像查詢不算數，仍要被攔");
+});
+
+test("需求驗收(安全):只讀需求下，custom-code 的明確寫入訊號要被攔，明確純讀計算不誤擋", () => {
+  assert.equal(writeItem(READ_ONLY, [N("t", "trigger"), NC("w", "custom-code", { intent: "把結果寫入 Google 試算表" })])?.met, false);
+  assert.equal(writeItem(READ_ONLY, [N("t", "trigger"), NC("w", "custom-code", { code: "await fs.promises.writeFile(p, x);" })])?.met, false);
+  assert.equal(writeItem(READ_ONLY, [N("t", "trigger"), NC("w", "custom-code", { intent: "計算每個部門的加總與平均" })]), undefined);
+  assert.equal(writeItem(READ_ONLY, [N("t", "trigger"), NC("w", "custom-code", { code: "return { total: rows.length };" })]), undefined);
+});
+
+test("需求驗收(安全):只讀需求下，靜態判斷不出會不會寫的 custom-code 要 fail closed", () => {
+  const item = writeItem(READ_ONLY, [N("t", "trigger"), N("w", "custom-code")]);
+  assert.equal(item?.met, false, "還沒產碼又沒有 intent = 看不出來，只讀需求下不能假設它安全");
+  assert.match(item!.hint, /看不出來會不會寫入/);
+  assert.match(item!.hint, /w\(custom-code\)/);
+});
+
+test("需求驗收(安全):「不要產出檔案」只禁止新增本機檔，不得誤擋使用者明確要求的遠端更新", () => {
+  // 明確要求更新 Google 試算表 → 遠端寫入是使用者要的，不能被本機檔的禁止牽連
+  assert.equal(writeItem("整理資料，不要產出檔案，把結果更新到 Google 試算表", [N("t", "trigger"), N("w", "google-sheet-update")]), undefined);
+  // 但同一句需求下，新增本機檔仍然要被攔
+  assert.equal(writeItem("整理資料，不要產出檔案，把結果更新到 Google 試算表", [N("t", "trigger"), N("w", "write-file")])?.met, false);
+});
+
+test("需求驗收(安全):「不要修改原始資料，存成新檔」允許新檔輸出，但仍禁止遠端寫入", () => {
+  const text = "不要修改原始資料，把結果存成新檔";
+  assert.equal(writeItem(text, [N("t", "trigger"), N("w", "write-file")]), undefined, "使用者明確要的新檔不得被誤擋");
+  assert.equal(writeItem(text, [N("t", "trigger"), N("w", "google-sheet-append")])?.met, false, "遠端資料仍然不准動");
+  assert.equal(writeItem(text, [N("t", "trigger"), N("w", "google-slides-refresh")])?.met, false);
+});
+
+test("需求驗收(安全):迴圈內的遠端寫入同樣要被攔，且帶得出巢狀 path", () => {
+  const nested: WorkflowNode = {
+    id: "loop", type: "repeat-steps", label: "loop",
+    config: { items: "{{list}}", steps: JSON.stringify([{ type: "google-sheet-append", config: {} }]) },
+    position: { x: 0, y: 0 },
+  };
+  const item = writeItem(READ_ONLY, [N("t", "trigger"), nested]);
+  assert.equal(item?.met, false);
+  assert.match(item!.hint, /loop\[步驟0\]\(google-sheet-append\)/);
+});
+
+// ── 只讀限制被子流程／AI 自宣告 readOnly 繞過(P0 第四輪，使用者獨立重現) ─────────────
+// ①run-workflow 會去跑另一條流程，只看本流程節點型別它靜態上「沒有副作用」——把寫入藏進子流程
+//   就整個繞過只讀限制。②節點 config 的 readOnly 是 AI 建圖/修復/匯入都能寫進去的欄位，拿它當
+//   放行條件等於 AI 自己批准自己。
+const sub = (id: string, target: string): WorkflowNode => NC(id, "run-workflow", { target });
+const subflowResolverFor = (graphs: Record<string, WorkflowNode[]>, ambiguous: string[] = []) =>
+  (ref: string): SubflowLookup => {
+    if (ambiguous.includes(ref)) return { kind: "ambiguous", count: 2 };
+    return graphs[ref] ? { kind: "found", id: ref, name: ref, nodes: graphs[ref] } : { kind: "not-found" };
+  };
+const writeCheck = (text: string, nodes: WorkflowNode[], opts: Parameters<typeof checkRequirements>[2] = {}) =>
+  checkRequirements(text, g(nodes), opts).find((i) => i.key === "noUnrequestedWrite");
+
+test("需求驗收(安全):只讀需求下，會寫入的子流程要被攔下，且錯誤帶完整呼叫路徑", () => {
+  const item = writeCheck("只讀取資料，不要修改", [N("t", "trigger"), sub("runChild", "writes-to-sheet")], {
+    resolveSubflow: subflowResolverFor({ "writes-to-sheet": [N("t", "trigger"), N("writeSheet", "google-sheet-append")] }),
+  });
+  assert.equal(item?.met, false, "把寫入藏進子流程不能繞過只讀限制");
+  assert.match(item!.hint, /runChild → writes-to-sheet\.writeSheet/, "要帶完整呼叫路徑，修正迴圈才知道改哪裡");
+  assert.equal(item!.needsUser ?? false, false, "這是圖真的不安全，模型要負責改");
+});
+
+test("需求驗收(安全):純讀的子流程不得被誤擋", () => {
+  const item = writeCheck("只讀取資料，不要修改", [N("t", "trigger"), sub("runChild", "pure-read")], {
+    resolveSubflow: subflowResolverFor({ "pure-read": [N("t", "trigger"), NC("read", "google-sheet-read", { sheetUrl: "https://x" })] }),
+  });
+  assert.equal(item, undefined, JSON.stringify(item));
+});
+
+test("需求驗收(安全):子流程查不到/重名/動態 target/沒有 resolver 一律 fail closed", () => {
+  const cases: [string, Parameters<typeof checkRequirements>[2], RegExp][] = [
+    ["nope", { resolveSubflow: subflowResolverFor({}) }, /找不到流程/],
+    ["dup", { resolveSubflow: subflowResolverFor({}, ["dup"]) }, /都叫「dup」/],
+    ["{{childName}}", { resolveSubflow: subflowResolverFor({}) }, /執行時才決定/],
+    ["whatever", {}, /無法查詢流程/],
+  ];
+  for (const [target, opts, expected] of cases) {
+    const item = writeCheck("只讀取資料，不要修改", [N("t", "trigger"), sub("runChild", target)], opts);
+    assert.equal(item?.met, false, `target=${target} 必須 fail closed`);
+    assert.match(item!.hint, expected);
+  }
+});
+
+test("需求驗收(安全):AI 自己寫的 readOnly:true 不算確認，仍要被攔，但要標成「等使用者」而非「模型沒做到」", () => {
+  const nodes = [N("t", "trigger"), NC("api", "http-request", { method: "POST", url: "https://api.example.com/query", readOnly: true })];
+  const item = writeCheck("只讀取資料，不要修改", nodes);
+  assert.equal(item?.met, false, "AI 說了不算，未經使用者確認仍要 fail closed");
+  assert.equal(item!.needsUser, true, "這是等使用者按確認，不是模型改得掉的事");
+  assert.match(item!.hint, /需要使用者本人確認/);
+  assert.match(item!.hint, /不要為了消除這個提醒/, "要明講不准 AI 刪掉使用者需要的查詢步驟");
+  // needsUser 的項目不得餵回修正迴圈——否則模型只會把使用者要的步驟刪掉來消警告
+  assert.equal(unmetFeedback(checkRequirements("只讀取資料，不要修改", g(nodes))), "");
+  assert.match(checklistText(checkRequirements("只讀取資料，不要修改", g(nodes))), /🔒/);
+});
+
+test("需求驗收(安全):使用者確認過的那個節點才放行；沒建議唯讀的 POST 一律當成真的寫入", () => {
+  const nodes = [N("t", "trigger"), NC("api", "http-request", { method: "POST", url: "https://api.example.com/query", readOnly: true })];
+  assert.equal(writeCheck("只讀取資料，不要修改", nodes, { readOnlyApprovedNodeIds: new Set(["api"]) }), undefined);
+  // 確認是綁節點的：確認了別的節點不會讓這個節點沾光
+  assert.equal(writeCheck("只讀取資料，不要修改", nodes, { readOnlyApprovedNodeIds: new Set(["other"]) })?.met, false);
+  // AI 根本沒建議唯讀的 POST 是普通的未授權寫入，要照常要求模型移除(不是等使用者)
+  const plain = writeCheck("只讀取資料，不要修改", [N("t", "trigger"), NC("api", "http-request", { method: "POST", url: "https://x" })]);
+  assert.equal(plain?.met, false);
+  assert.equal(plain!.needsUser ?? false, false);
+});
+
+test("需求驗收(安全):同時有真違規與待確認時，不得因為待確認就整項放過模型", () => {
+  const item = writeCheck("只讀取資料，不要修改", [
+    N("t", "trigger"),
+    NC("api", "http-request", { method: "POST", url: "https://x", readOnly: true }),
+    N("w", "google-sheet-append"),
+  ]);
+  assert.equal(item?.met, false);
+  assert.equal(item!.needsUser ?? false, false, "有真的違規時必須照常要求模型修，不能被待確認蓋過去");
+  assert.match(item!.hint, /w\(google-sheet-append\)/);
+});
+
+test("需求驗收(安全):迴圈內嵌的 http-request 永遠拿不到使用者確認(內嵌步驟無法逐一確認)", () => {
+  const loop: WorkflowNode = {
+    id: "loop", type: "repeat-steps", label: "loop",
+    config: { items: "{{list}}", steps: JSON.stringify([{ type: "http-request", config: { method: "POST", url: "https://x", readOnly: true } }]) },
+    position: { x: 0, y: 0 },
+  };
+  const item = writeCheck("只讀取資料，不要修改", [N("t", "trigger"), loop], { readOnlyApprovedNodeIds: new Set(["loop"]) });
+  assert.equal(item?.met, false);
+  assert.equal(item!.needsUser ?? false, false, "內嵌步驟不能走「等使用者確認」那條路，只能當成真的寫入");
+  assert.match(item!.hint, /loop\[步驟0\]\(http-request\)/);
+});
+
+// ── onFailureWorkflow 也是委派(P0 第五輪，使用者獨立重現) ──────────────────────────
+// engine 在主流程失敗後會依 wf.onFailureWorkflow 直接 startWorkflowRun 它。只掃 run-workflow 的話，
+// 主圖乾乾淨淨、寫入全放在失敗備援流程裡，需求驗收照樣判安全。
+const READ_MAIN = [N("t", "trigger"), NC("read", "google-sheet-read", { sheetUrl: "https://x" })];
+const failureCheck = (onFailureWorkflow: string, graphs: Record<string, WorkflowNode[]>) =>
+  checkRequirements("只讀取資料，不要修改", { nodes: READ_MAIN, edges: [], onFailureWorkflow }, {
+    resolveSubflow: subflowResolverFor(graphs),
+  }).find((i) => i.key === "noUnrequestedWrite");
+
+test("需求驗收(安全):只讀需求下，失敗備援流程會寫入/外送/未確認POST/未知程式碼都要被攔", () => {
+  const cases: [string, WorkflowNode[]][] = [
+    ["fb-sheet", [N("t", "trigger"), N("writeSheet", "google-sheet-append")]],
+    ["fb-mail", [N("t", "trigger"), NC("mail", "send-email", { to: "x@y", subject: "s", body: "b" })]],
+    ["fb-notify", [N("t", "trigger"), NC("ping", "telegram-notify", { text: "x" })]],
+    ["fb-post", [N("t", "trigger"), NC("api", "http-request", { method: "POST", url: "https://x", readOnly: true })]],
+    ["fb-unknown", [N("t", "trigger"), N("code", "custom-code")]],
+  ];
+  for (const [name, nodes] of cases) {
+    const item = failureCheck(name, { [name]: nodes });
+    assert.equal(item?.met, false, `失敗備援指向 ${name} 必須被攔：${JSON.stringify(item)}`);
+    assert.match(item!.hint, /onFailureWorkflow → /, "路徑要看得出問題出在失敗備援設定");
+    assert.equal(item!.needsUser ?? false, false, "別人流程裡的端點不能靠本流程的使用者確認解決");
+  }
+});
+
+test("需求驗收(安全):純讀的失敗備援流程不得被誤擋", () => {
+  assert.equal(failureCheck("fb-read", { "fb-read": [N("t", "trigger"), NC("read", "google-sheet-read", { sheetUrl: "https://x" })] }), undefined);
+});
+
+test("需求驗收(安全):失敗備援找不到/歧義/動態值/沒有 resolver 一律 fail closed", () => {
+  assert.equal(failureCheck("nope", {})?.met, false);
+  assert.equal(
+    checkRequirements("只讀取資料，不要修改", { nodes: READ_MAIN, edges: [], onFailureWorkflow: "dup" }, { resolveSubflow: subflowResolverFor({}, ["dup"]) })
+      .find((i) => i.key === "noUnrequestedWrite")?.met,
+    false,
+  );
+  assert.equal(failureCheck("{{which}}", {})?.met, false);
+  assert.equal(
+    checkRequirements("只讀取資料，不要修改", { nodes: READ_MAIN, edges: [], onFailureWorkflow: "anything" }, {})
+      .find((i) => i.key === "noUnrequestedWrite")?.met,
+    false,
+    "沒有 resolver 就看不到備援流程，不能說它安全",
+  );
+});
+
+test("需求驗收(安全):沒有只讀類需求時，失敗備援不受這條規則影響(不擴大既有行為)", () => {
+  const item = checkRequirements("讀資料後整理成報告檔", { nodes: READ_MAIN, edges: [], onFailureWorkflow: "fb-sheet" }, {
+    resolveSubflow: subflowResolverFor({ "fb-sheet": [N("t", "trigger"), N("writeSheet", "google-sheet-append")] }),
+  }).find((i) => i.key === "noUnrequestedWrite");
+  assert.equal(item, undefined, "沒有「只讀/不要修改」的需求就不該憑空多出寫入限制");
 });

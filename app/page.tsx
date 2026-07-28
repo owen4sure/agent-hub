@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { PageHeader, StatCard, StatusDot, EmptyState, statusLabel, formatDate } from "@/components/ui";
 import { seedImportWelcome } from "@/lib/wfChatStore";
+import { N8nMigrationDialog, type N8nImportResult } from "./N8nMigrationDialog";
 
 interface WorkflowSummary {
   id: string;
@@ -92,6 +93,7 @@ export default function HomePage() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  const [showN8nMigration, setShowN8nMigration] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const [dismissedFailures, setDismissedFailures] = useState<string[]>([]);
   const [proposals, setProposals] = useState<FixProposal[]>([]);
@@ -231,6 +233,8 @@ export default function HomePage() {
           needsManualLogin: Boolean(data.needsManualLogin),
           importedScheduleCount: data.importedScheduleCount ?? 0,
           skippedScheduleCount: data.skippedScheduleCount ?? 0,
+          importedScenarioCount: data.importedScenarioCount ?? 0,
+          skippedScenarioCount: data.skippedScenarioCount ?? 0,
         });
         router.push(`/workflows/${data.id}`);
       } else {
@@ -617,6 +621,7 @@ export default function HomePage() {
               ⬇ 匯入
               <input ref={fileRef} type="file" accept=".json" onChange={handleImport} className="hidden" />
             </label>
+            <button onClick={() => setShowN8nMigration(true)} className="btn btn-ghost">🔁 n8n 安全轉換</button>
             <button onClick={createNew} disabled={creating} className="btn btn-primary">{creating ? "建立中…" : "＋ 建立新流程"}</button>
           </>
         }
@@ -626,6 +631,21 @@ export default function HomePage() {
       {importError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>{importError}</div>}
       {groupError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>{groupError}</div>}
       {folderActionError && <div className="card px-4 py-3 mb-4 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>{folderActionError}</div>}
+      {showN8nMigration && <N8nMigrationDialog onClose={() => setShowN8nMigration(false)} onCreated={(result: N8nImportResult) => {
+        seedImportWelcome(result.id, {
+          missingSecrets: [],
+          clearedCodeCount: result.clearedCodeCount,
+          clearedEmailCount: 0,
+          clearedEmailLabels: [],
+          needsManualLogin: false,
+          importedScheduleCount: 0,
+          skippedScheduleCount: 0,
+          n8nReviewCount: result.reviewCount,
+          n8nUnsupportedCount: result.unsupportedCount,
+          n8nClearedCredentialCount: result.clearedCredentialCount,
+        });
+        router.push(`/workflows/${result.id}`);
+      }} />}
 
       {health && (!health.ok || (health.missingSecretKeys?.length ?? 0) > 0 || !health.modelApiConfigured) && (
         <div className="card px-4 py-3 mb-5 text-sm space-y-1.5" style={{ borderColor: health.ok ? "var(--amber)" : "var(--red)" }}>

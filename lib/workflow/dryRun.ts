@@ -1,4 +1,5 @@
 import type { WorkflowNode } from "./types";
+import { configuredSideEffects, dryRunSkipTypes, isPlaceholderCodeText } from "./sideEffects";
 
 /**
  * 只讀驗證(dry-run)——使用者「叫 AI 去看檔案、證明有沒有看懂」用的。判斷某個節點在只讀模式要不要略過。
@@ -9,10 +10,13 @@ import type { WorkflowNode } from "./types";
  * - fetch:去信箱/瀏覽器把輸入抓進來的 → 只有「使用者已經直接給了檔案」時才略過,改用他給的那份。
  */
 
-export const DRYRUN_WRITE_TYPES = new Set([
-  "telegram-notify", "slack-notify", "line-notify", "send-email", "desktop-notify",
-  "google-sheet-append", "google-sheet-update", "write-file",
-]);
+// 改由 sideEffects.ts 這份「涵蓋所有節點型別」的分類推導，取代原本手寫的字串清單——新增會寄信/
+// 寫檔的節點型別時，作者一定要在那份分類裡做一次明確決定，不會像以前一樣漏掉某一個消費端就安靜
+// 失去防護。用 dryRun:"skip" 這個欄位而不是用副作用分類推導：excel-process／google-slides-* 確實
+// 有副作用(分類照實寫)，但它們是「節點自己在動手前 return」，整步略過反而會讓讀取/驗證的輸出消失、
+// 下游拿不到資料而假成功。**能力**與**只讀試跑怎麼處理它**是兩件事，分開記才不會為了配合其中一邊
+// 而謊報另一邊(這正是遠端寫入被需求驗收放行的 P0 成因)。
+export const DRYRUN_WRITE_TYPES = dryRunSkipTypes();
 
 export const DRYRUN_FETCH_TYPES = new Set(["find-email", "email-read", "download-attachment", "browser-login"]);
 
@@ -29,12 +33,10 @@ export interface DryRunSkippedWrite {
   input: Record<string, unknown>;
 }
 
-// custom-code 是萬用的——沒辦法只看型別知道它是「抽數字」還是「寫回試算表」,只能看意圖/程式碼有沒有寫出的跡象。
-// 命中就當寫出、略過(寧可少做也不誤寫);純讀取/計算的抽取碼不會命中這些關鍵字。
-// 已有 code 時只能用可執行的 side-effect 訊號判斷。把「填入」「寫回」這種中文放進來會誤傷
-// 讀取程式裡的防呆錯誤(例如「避免把 0 填入」)，安全試跑反而從未執行真正要驗的計算。
-const CUSTOM_CODE_WRITER_RE = /values\s*(?:\.|\[['"])(?:update|append)|batchUpdate|spreadsheets\s*\.\s*values|setValue|getCell\s*\([^)]*\)\s*\.\s*value\s*=|\.(?:addRow|spliceRows|insertRow|deleteRow)\s*\(|xlsx\s*\.\s*writeFile|(?:\.|\[['"])(?:writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream|truncate|truncateSync|unlink|unlinkSync|rm|rmSync|rmdir|rmdirSync|rename|renameSync|copyFile|copyFileSync|mkdir|mkdirSync|chmod|chmodSync|chown|chownSync)['"]?\s*(?:\]|\()|fs\s*\.\s*(?:promises\s*\.\s*)?(?:write|append|rm|unlink|rename|copyFile|mkdir|createWriteStream)|method\s*:\s*(?:['"]?(?:POST|PUT|PATCH|DELETE)|[^,}\n]*(?:POST|PUT|PATCH|DELETE))|axios\s*(?:\.|\[['"])(?:post|put|patch|delete)|(?:got|request)\s*(?:\.|\[['"])(?:post|put|patch|delete)|sendMail|sendMessage|child_process|\b(?:exec|execFile|spawn|fork)\s*\(|\b(?:INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+TABLE)\b/i;
-const CUSTOM_INTENT_WRITER_RE = /寫入|填入|回填|寫回|更新到|上傳到|送出到|刪除檔案|移動檔案|建立資料夾/i;
+// custom-code 是萬用的——沒辦法只看型別知道它是「抽數字」還是「寫回試算表」,只能看意圖/程式碼有沒有
+// 寫出的跡象。這組「有沒有寫出訊號」的判定已經抽到 sideEffects.ts 的 configuredSideEffects()，
+// 跟需求驗收共用同一份(以前只有這裡有，requirementCheck 完全沒有，所以「只讀」需求下 custom-code
+// 想寫什麼就寫什麼)。這個檔案只保留 dry-run 專屬、跟「有沒有副作用」不同層次的能力面判斷。
 
 // custom-code 跟主程式跑在同一個 Node.js 行程，單靠「POST/寫檔」幾個字無法構成真正的只讀保證。
 // 但 ctx.session 本身不能一概攔住：例如前往 Drive、讀檔名、輸出 fileType 是真正的讀取步驟；
@@ -63,22 +65,14 @@ const CUSTOM_MUTATING_BROWSER_RE = /\bctx\s*\.\s*session\s*\.\s*getBrowser\s*\(|
 // 不能因為「有 import fs」就讓純讀 Excel 被跳過、下游拿空資料卻假裝成功。
 const SAFE_DYNAMIC_IMPORTS = new Set(["exceljs", "xlsx", "path", "node:path", "crypto", "node:crypto", "fs", "node:fs"]);
 
-// 避免從 codegen 匯入而把 registry → customCode → dryRun → codegen 拉成初始化循環；
-// 規則必須與 codegen.isPlaceholderCode 一致。
-function isPlaceholderCodeForDryRun(code: string): boolean {
-  const value = code.trim();
-  return !value || /^return\s*\{\s*\.\.\.\s*ctx\.input\s*,?\s*\}\s*;?$/.test(value);
-}
-
 export function customCodeIsUnsafeForDryRun(config: Record<string, unknown>): boolean {
   const code = String(config.code ?? "");
-  // 已有可執行 code 時，安全性必須以「它實際會做什麼」判斷，不能掃白話 intent。
-  // 例如「對不上就停止、不把猜測數字填回去」是純讀取/計算的保護條件，舊規則只看到「填回」
-  // 就把它略過，讓 AI 修復的安全驗證全綠卻根本沒有跑計算。空殼尚未產碼時才退回看 intent，
-  // 以免「等等會寫表」的步驟在沒有可檢查 code 時被錯放行。
-  const isPlaceholder = isPlaceholderCodeForDryRun(code);
+  // 「這段程式碼/意圖會不會寫出去」的判定共用 sideEffects.configuredSideEffects()，跟需求驗收同一份。
+  // 已有可執行 code 時它只看 code(不掃白話 intent)：例如「對不上就停止、不把猜測數字填回去」是純
+  // 讀取/計算的保護條件，若掃 intent 會被「填回」誤判成寫入，安全驗證全綠卻根本沒跑計算。
+  const isPlaceholder = isPlaceholderCodeText(code);
   const text = isPlaceholder ? String(config.intent ?? "") : code;
-  const hasWriterSignal = isPlaceholder ? CUSTOM_INTENT_WRITER_RE.test(text) : CUSTOM_CODE_WRITER_RE.test(text);
+  const hasWriterSignal = configuredSideEffects("custom-code", config).effects.length > 0;
   if (hasWriterSignal || CUSTOM_UNSAFE_CAPABILITY_RE.test(text) || CUSTOM_MUTATING_BROWSER_RE.test(text)) return true;
   const literalImportRe = /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
   for (const match of code.matchAll(literalImportRe)) {
@@ -89,14 +83,22 @@ export function customCodeIsUnsafeForDryRun(config: Record<string, unknown>): bo
   return false;
 }
 
-export function dryRunSkipKind(node: WorkflowNode, fileProvided: boolean): "write" | "fetch" | null {
+export interface DryRunSkipOptions {
+  /** 這條流程裡「已經被**使用者**確認為唯讀」的 http-request 節點 id(見 httpReadOnlyApproval.ts)。
+   * dryRun 是純函式、碰不到 DB，由呼叫端(engine/preview)查好傳進來。沒傳 = 一律未確認 = 照樣攔住。
+   * repeat-steps 的內嵌步驟沒有真正的 node id、也無法在畫面上逐一確認，所以永遠拿不到豁免。 */
+  readOnlyApprovedNodeIds?: ReadonlySet<string>;
+}
+
+export function dryRunSkipKind(node: WorkflowNode, fileProvided: boolean, opts: DryRunSkipOptions = {}): "write" | "fetch" | null {
   const t = node.type;
   const cfg = (node.config ?? {}) as Record<string, unknown>;
   if (DRYRUN_WRITE_TYPES.has(t)) return "write";
-  if (t === "http-request") {
-    const method = String(cfg.method ?? "GET").toUpperCase();
-    if (method !== "GET" && method !== "HEAD") return "write"; // 打 API 寫資料(POST/PUT…)算寫出
-  }
+  // http-request 的「這次會不會寫」由設定決定，跟需求驗收共用 configuredSideEffects()：
+  // 預設不信任 POST/PUT/PATCH/DELETE。**只有使用者本人確認過這一份精確請求**才會放行——
+  // 節點上的 readOnly 只是 AI 的建議，AI 自己說了不算(不然 AI 一句話就能繞過整個只讀保證)。
+  if (t === "http-request"
+    && configuredSideEffects(t, cfg, { readOnlyApproved: opts.readOnlyApprovedNodeIds?.has(node.id) }).effects.length > 0) return "write";
   if (t === "custom-code" && customCodeIsUnsafeForDryRun(cfg)) return "write";
   if (fileProvided && DRYRUN_FETCH_TYPES.has(t)) return "fetch";
   return null;

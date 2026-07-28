@@ -15,12 +15,17 @@ import { assertRunnableGraph, hasExecutableSteps, withSchemaDefaults } from "./g
 import { getWorkflow, findWorkflowByRef, deriveRequiresSecrets } from "./store";
 import { getNodeDef } from "./registry";
 import { dryRunSkipKind, DRY_RUN_SKIPPED_WRITES_KEY } from "./dryRun";
+import { approvedReadOnlyNodeIds } from "./httpReadOnlyApproval";
+import { assertSafetyContract, SafetyContractViolationError } from "./safetyContract";
 import { markPendingNodeRunsSkipped } from "./runState";
 import { workflowExecutionFingerprint } from "./fingerprint";
+import { assertCurrentEvidence } from "./evidencePassport";
+import { AcceptanceSpecOutdatedError, acceptanceSpecOutdated } from "./acceptanceSpec";
 import { collectRunSeeds, downstreamNodeIds, type RunSeedRow } from "./partialRun";
 import { ExternalPreflightError, preflightExternalIntegrations } from "./preflight";
 import { isPlaceholderCode } from "./codegen";
 import { PermanentError, RetryableError, WaitingForHuman } from "./types";
+import { clearPendingAction, listPendingActionKeys, recordCompletedAction } from "./idempotency";
 import type { Workflow, WorkflowNode, RunSession, NodeContext } from "./types";
 
 // 併發上限的預設(依 CPU 推算)；實際值由「設定」的 maxConcurrent 覆寫，1=依序、>1=併行
@@ -35,8 +40,8 @@ const AUTO_RETRY_DELAY_MINUTES = 5;
 const MAX_AUTO_RETRIES = 2;
 
 /** manual=使用者按執行；其餘都是無人值守的自動觸發(結果要靠桌面通知讓人知道) */
-export type TriggerSource = "manual" | "schedule" | "watch" | "webhook" | "form" | "error" | "email" | "telegram" | "line" | "retry";
-const TRIGGER_LABEL: Record<TriggerSource, string> = { manual: "手動", schedule: "排程", watch: "資料夾監聽", webhook: "Webhook", form: "表單", error: "錯誤觸發", email: "收信觸發", telegram: "Telegram 訊息", line: "LINE 訊息", retry: "失敗自動重跑" };
+export type TriggerSource = "manual" | "schedule" | "watch" | "webhook" | "form" | "error" | "email" | "telegram" | "line" | "retry" | "replay" | "health-check";
+const TRIGGER_LABEL: Record<TriggerSource, string> = { manual: "手動", schedule: "排程", watch: "資料夾監聽", webhook: "Webhook", form: "表單", error: "錯誤觸發", email: "收信觸發", telegram: "Telegram 訊息", line: "LINE 訊息", retry: "失敗自動重跑", replay: "安全重播", "health-check": "健康巡檢" };
 
 /** 續跑規格：從某個節點接著跑，之前成功的節點沿用結果不重跑(修好一步不用整條從頭來、簽核恢復也靠它) */
 export interface ResumeSpec {
@@ -67,6 +72,12 @@ interface QueueItem {
   secretOverrides?: Record<string, string>;
   /** 同上：本輪對話貼的來源網址可暫時替換唯一對應的讀取步驟，不存回 workflow。 */
   nodeConfigOverrides?: Record<string, Record<string, unknown>>;
+  /** 只限情境 dry-run：指定每個 wait-approval 要模擬 approved/rejected。 */
+  scenarioApprovalDecisions?: Record<string, "approved" | "rejected">;
+  /** 只限情境 dry-run：在指定節點進入 execute 前故意模擬失敗，驗證 error 備援出口。 */
+  scenarioForcedFailures?: Record<string, string>;
+  /** 安全重播只把失敗步驟當下收到的 input 注入該步；不得與一般流程輸入混用。 */
+  replayNodeInput?: { nodeId: string; input: Record<string, unknown> };
 }
 
 const queue: QueueItem[] = [];
@@ -257,7 +268,7 @@ function topoOrder(wf: Workflow): WorkflowNode[] {
 export function startWorkflowRun(
   workflowId: string,
   triggerParams: Record<string, unknown> = {},
-  options: { headed?: boolean; trigger?: TriggerSource; dryRun?: boolean; secretOverrides?: Record<string, string>; nodeConfigOverrides?: Record<string, Record<string, unknown>>; confirmedPreview?: boolean; startAtNodeId?: string; onlyNodeIds?: string[] } = {},
+  options: { headed?: boolean; trigger?: TriggerSource; dryRun?: boolean; secretOverrides?: Record<string, string>; nodeConfigOverrides?: Record<string, Record<string, unknown>>; scenarioApprovalDecisions?: Record<string, "approved" | "rejected">; scenarioForcedFailures?: Record<string, string>; confirmedPreview?: boolean; startAtNodeId?: string; onlyNodeIds?: string[]; replayNodeInput?: { nodeId: string; input: Record<string, unknown> } } = {},
 ): string {
   const db = getDb();
   const wf = getWorkflow(workflowId);
@@ -271,8 +282,20 @@ export function startWorkflowRun(
   if (options.onlyNodeIds?.length && options.onlyNodeIds.some((nid) => !wf.nodes.some((n) => n.id === nid))) {
     throw new Error("選取的步驟有的不在這條流程裡(流程可能剛被改過)，請重新整理頁面再試一次");
   }
+  if (options.replayNodeInput && !wf.nodes.some((n) => n.id === options.replayNodeInput!.nodeId)) {
+    throw new Error("要安全重播的步驟已經不在目前流程裡，請先檢查流程版本。");
+  }
   if (wf.importedUntrusted) {
     throw new Error("這是尚未確認的外部匯入流程，請先在流程頁手動執行並確認安全提醒");
+  }
+  // 安全試跑本身就是讓使用者重新驗證答案的路徑，不能被舊答案閘門鎖死；
+  // 真正會碰外部資料的執行，以及所有無人值守觸發，才必須先重新確認目前版本。
+  if (!options.dryRun && acceptanceSpecOutdated(wf.acceptanceSpec, wf, workflowExecutionFingerprint)) {
+    const acceptanceError = new AcceptanceSpecOutdatedError();
+    if ((options.trigger ?? "manual") !== "manual") {
+      notifyDesktop(`「${wf.name}」已暫停自動執行`, acceptanceError.message);
+    }
+    throw acceptanceError;
   }
   // 部分執行(框選幾步/從某步開始)的語意由使用者拍板(2026-07-16)：「圈起來執行的，那就執行到底，
   // 除非我有說只測試不更改任何資料」——所以這裡尊重呼叫端的 dryRun，預設是「真的執行」(含寫入/發送)；
@@ -282,9 +305,30 @@ export function startWorkflowRun(
   // 不相信「建圖當下驗過」：手動編輯、版本還原、舊資料或其他 API 都可能在之後把圖改壞。
   // 這裡是 manual/schedule/watch/webhook/form/email/Telegram/LINE/子流程共同會經過的唯一入口。
   assertRunnableGraph(wf.nodes, wf.edges);
+  // 使用者曾明確要求「這條流程不變更任何資料」時，每次執行前都要重掃一次本圖與整條委派鏈——
+  // 建圖當下的需求驗收只證明「那一刻看起來安全」，被呼叫的子流程／失敗備援流程之後可以被改成
+  // 會寫入或寄信，母流程一個字都沒動(P0)。刻意放在建立 run 之前、任何節點執行之前，而且是所有
+  // 觸發來源(manual/schedule/watch/webhook/form/子流程/失敗備援)共同必經的這個唯一入口。
+  try {
+    assertSafetyContract(wf);
+  } catch (err) {
+    // 無人值守的觸發沒有人在看畫面——被安全契約擋下時桌面通知是使用者唯一的回報管道
+    // (鐵則 21：非 manual 一律要 notifyDesktop)。這裡還沒有 run 可以寫紀錄，所以另外留一筆 log。
+    if (err instanceof SafetyContractViolationError) {
+      const source = options.trigger ?? "manual";
+      console.warn("[safety-contract] blocked", { workflowId, trigger: source, violations: err.violations.slice(0, 8) });
+      if (source !== "manual") {
+        notifyDesktop(`「${wf.name}」已被只讀保護擋下`, `你曾要求這條流程不變更資料，但它(或它呼叫的流程)現在會寫出資料。${err.violations[0]?.path ?? ""}`);
+      }
+    }
+    throw err;
+  }
   // 只讀驗證會刻意略過寫入步驟，並把缺少設定列在預覽結果，所以不能在這裡擋；正式執行則一律
   // 在任何外部操作之前失敗，避免跑完前面幾分鐘才發現最後一個必要設定沒填。
   if (!dryRun) {
+    // 曾用真實資料驗收過的流程，改圖後不能直接把未核對的新版本寫到外部系統。
+    // 沒有歷史護照的舊流程不回溯鎖死；安全試跑本身會建立新護照。
+    assertCurrentEvidence(workflowId, false);
     const missing = getMissingWorkflowSettings(wf, options.confirmedPreview ? options.secretOverrides : undefined);
     if (missing.length > 0) throw new MissingWorkflowSettingsError(missing);
   }
@@ -371,15 +415,73 @@ export function startWorkflowRun(
       log(runId, null, `⚠️ 找到 ${candidates.length} 筆這條流程的先前執行紀錄，但都是用不同的執行參數(例如不同的期間/日期)跑的——為了不把舊參數算出的資料當成這次的結果，沒有拿它們當種子；沒有種子的步驟會標記跳過。`);
     }
   }
+  if (options.replayNodeInput) {
+    const { nodeId, input } = options.replayNodeInput;
+    resume = {
+      seeds: { [nodeId]: { ...input } },
+      seedPorts: {},
+      rerunNodeIds: [nodeId],
+      skipUnseeded: true,
+    };
+    log(runId, null, `🧪 安全重播「${wf.nodes.find((n) => n.id === nodeId)?.label ?? nodeId}」：只使用失敗當下的輸入，不重跑上游，也不會寫入或發送資料`);
+  }
 
   queue.push({
     runId, workflowId, triggerParams, headed, trigger, dryRun, resume,
     // 正式執行只接受 server 端從一次性 preview token 取回的覆寫；API body 不能直接塞。
     secretOverrides: dryRun || options.confirmedPreview ? options.secretOverrides : undefined,
     nodeConfigOverrides: dryRun || options.confirmedPreview ? options.nodeConfigOverrides : undefined,
+    scenarioApprovalDecisions: dryRun ? options.scenarioApprovalDecisions : undefined,
+    scenarioForcedFailures: dryRun ? options.scenarioForcedFailures : undefined,
+    replayNodeInput: options.replayNodeInput,
   });
   processQueue();
   return runId;
+}
+
+/**
+ * 只讀重播失敗節點：重現該節點當下收到的 input，不重跑上游、不沿用舊 output，且強制 dry-run。
+ * 目前版本若已改圖則拒絕，避免拿舊現場餵給另一個節點語意而產生誤導結果。
+ */
+export function replayFailedNodeSafely(sourceRunId: string): { ok: boolean; runId?: string; error?: string } {
+  const db = getDb();
+  const source = db.prepare(`SELECT id, workflow_id, status, headed, graph_fingerprint, failed_node FROM runs WHERE id=?`).get(sourceRunId) as
+    | { id: string; workflow_id: string; status: string; headed: number; graph_fingerprint: string | null; failed_node: string | null }
+    | undefined;
+  if (!source) return { ok: false, error: "找不到這次執行紀錄(可能已被自動清理)，請重新執行後再重播。" };
+  if (!["failed", "stopped"].includes(source.status)) return { ok: false, error: "只有失敗或已停止的執行才能安全重播。" };
+  if (!source.failed_node) return { ok: false, error: "這次執行沒有記錄到失敗步驟，無法安全重播。" };
+  const wf = getWorkflow(source.workflow_id);
+  if (!wf) return { ok: false, error: "這條流程已被刪除，無法安全重播。" };
+  if (workflowExecutionFingerprint(wf) !== source.graph_fingerprint) {
+    return { ok: false, error: "流程在失敗後已被修改；為避免把舊現場套到新邏輯，請先用目前版本重試或還原版本。" };
+  }
+  const node = wf.nodes.find((n) => n.id === source.failed_node);
+  if (!node) return { ok: false, error: "失敗的步驟已不在目前流程裡，無法安全重播。" };
+  const row = db.prepare(`SELECT status, input_json FROM node_runs WHERE run_id=? AND node_id=?`).get(sourceRunId, source.failed_node) as
+    | { status: string; input_json: string | null }
+    | undefined;
+  if (!row?.input_json) return { ok: false, error: "這一步沒有保存失敗當下的輸入，無法安全重播；請用目前版本重試。" };
+  let input: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(row.input_json);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not object");
+    input = parsed as Record<string, unknown>;
+  } catch {
+    return { ok: false, error: "失敗當下的輸入紀錄已損毀，無法安全重播。" };
+  }
+  try {
+    const runId = startWorkflowRun(source.workflow_id, {}, {
+      trigger: "replay",
+      headed: Boolean(source.headed),
+      dryRun: true,
+      onlyNodeIds: [source.failed_node],
+      replayNodeInput: { nodeId: source.failed_node, input },
+    });
+    return { ok: true, runId };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "安全重播失敗" };
+  }
 }
 
 /**
@@ -502,6 +604,33 @@ export function resumeRun(
   });
   processQueue();
   return { ok: true };
+}
+
+/** 用目前保存版本從頭重跑同一份輸入，不沿用舊版節點結果或一次性覆寫。 */
+export function retryRunWithCurrentWorkflow(runId: string): { ok: boolean; runId?: string; error?: string } {
+  const db = getDb();
+  const run = db.prepare(`SELECT id, workflow_id, status, headed, trigger_params_json, dry_run FROM runs WHERE id=?`).get(runId) as
+    | { id: string; workflow_id: string; status: string; headed: number; trigger_params_json: string | null; dry_run: number }
+    | undefined;
+  if (!run) return { ok: false, error: "找不到這次執行紀錄(可能已被自動清理)，請直接重新執行。" };
+  if (!getWorkflow(run.workflow_id)) return { ok: false, error: "這條流程已被刪除，不能重試。" };
+  if (["running", "queued"].includes(run.status)) return { ok: false, error: "這次執行還在跑，不能再開一個重試。" };
+  if (!["failed", "stopped"].includes(run.status)) return { ok: false, error: "只有失敗或已停止的執行才能用目前版本重試。" };
+  let params: Record<string, unknown> = {};
+  try {
+    const parsed = run.trigger_params_json ? JSON.parse(run.trigger_params_json) : {};
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) params = parsed as Record<string, unknown>;
+  } catch { return { ok: false, error: "這次執行的輸入資料已損毀，請重新填寫執行參數。" }; }
+  // 手動重試是新的一次嘗試，不要把無人值守自動重試的計數帶過來，否則剛修好的流程
+  // 可能一開始就被當成「已重試兩次」而失去後續暫時性錯誤的自動恢復機會。
+  delete params.__retryAttempt;
+  try {
+    const nextRunId = startWorkflowRun(run.workflow_id, params, { trigger: "retry", headed: Boolean(run.headed), dryRun: Boolean(run.dry_run) });
+    log(nextRunId, null, `↻ 使用目前版本重新執行(來源：${runId}；不沿用舊版節點結果或一次性覆寫)`);
+    return { ok: true, runId: nextRunId };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "目前版本重試失敗" };
+  }
 }
 
 /**
@@ -643,7 +772,7 @@ function waitForRunCompletion(runId: string, timeoutMs: number, signal?: AbortSi
 export function runWorkflowAndWait(
   workflowId: string,
   triggerParams: Record<string, unknown>,
-  options: { headed?: boolean; timeoutMs?: number; dryRun?: boolean; secretOverrides?: Record<string, string>; nodeConfigOverrides?: Record<string, Record<string, unknown>>; signal?: AbortSignal } = {},
+  options: { headed?: boolean; timeoutMs?: number; dryRun?: boolean; secretOverrides?: Record<string, string>; nodeConfigOverrides?: Record<string, Record<string, unknown>>; scenarioApprovalDecisions?: Record<string, "approved" | "rejected">; scenarioForcedFailures?: Record<string, string>; signal?: AbortSignal } = {},
 ): Promise<RunFinal> {
   const runId = startWorkflowRun(workflowId, triggerParams, {
     headed: options.headed,
@@ -651,6 +780,8 @@ export function runWorkflowAndWait(
     dryRun: options.dryRun,
     secretOverrides: options.secretOverrides,
     nodeConfigOverrides: options.nodeConfigOverrides,
+    scenarioApprovalDecisions: options.scenarioApprovalDecisions,
+    scenarioForcedFailures: options.scenarioForcedFailures,
   });
   // 呼叫端(autofix 的總時間預算)可以給更短的上限，但不能超過引擎預設的天花板
   const timeoutMs = Math.min(Math.max(options.timeoutMs ?? RUN_WAIT_TIMEOUT_MS, 10_000), RUN_WAIT_TIMEOUT_MS);
@@ -700,6 +831,7 @@ function pruneRuns(workflowId: string) {
     )
     .all(workflowId, KEEP_RUNS) as { id: string }[];
   for (const { id } of old) {
+    db.prepare(`DELETE FROM repeat_item_checkpoints WHERE run_id = ?`).run(id);
     db.prepare(`DELETE FROM node_runs WHERE run_id = ?`).run(id);
     db.prepare(`DELETE FROM run_logs WHERE run_id = ?`).run(id);
     // 產出檔紀錄與檔案要跟著 run 一起清。以前是「有登記成 run_files 的檔就保留」，結果 run_files 列
@@ -965,6 +1097,9 @@ async function executeWorkflow(item: QueueItem) {
   }
 
   db.prepare(`UPDATE runs SET status = 'running' WHERE id = ?`).run(runId);
+  // 只讀試跑要放行「使用者確認過的唯讀 POST」時，先一次查好整張圖的確認狀態——dryRunSkipKind 是
+  // 純函式碰不到 DB。確認綁 method/url/headers/body 指紋，AI 改過設定就自動失效(見 httpReadOnlyApproval)。
+  const readOnlyApprovedNodeIds = approvedReadOnlyNodeIds(workflowId, wf.nodes);
   const { baseUrl, apiKey } = getGlobalSettings();
   const model = getWorkflowModel(workflowId, wf.defaultModel);
   const requiredSecretKeys = new Set((deriveRequiresSecrets(wf) ?? []).map((field) => field.key));
@@ -1184,11 +1319,18 @@ async function executeWorkflow(item: QueueItem) {
     for (const uid of upstreamIds) Object.assign(input, nodeOutputs.get(uid) ?? {});
     // 也把 trigger 參數一路帶著方便引用(只補 input 還沒有的 key，上游算出的值優先)
     for (const [k, v] of Object.entries(triggerParams)) if (!(k in input)) input[k] = v;
+    // 安全重播是唯一可以覆蓋正常資料流 input 的路徑：這份資料來自失敗當下已保存的
+    // node_runs.input_json，且只允許對應的單一節點使用。它不進 trigger_params_json，
+    // 不會被前端回傳，也不會讓上游重新執行或把舊 output 當成新 input。
+    if (item.replayNodeInput?.nodeId === node.id) {
+      Object.keys(input).forEach((key) => delete input[key]);
+      Object.assign(input, item.replayNodeInput.input);
+    }
 
     // ── 只讀驗證:略過會寫出/發送的步驟(不改使用者資料),使用者已給檔案時也略過去抓輸入的步驟 ──
     // 透傳 input 當這步的 output,下游還能引用上游算出的欄位(含使用者給的檔案路徑);當成功處理讓下游正常流。
     if (dryRun) {
-      const skipKind = dryRunSkipKind(node, hasProvidedFile);
+      const skipKind = dryRunSkipKind(node, hasProvidedFile, { readOnlyApprovedNodeIds });
       if (skipKind) {
         if (skipKind === "write") withheldWrites.push(node.label);
         nodeOutputs.set(node.id, { ...input });
@@ -1227,6 +1369,7 @@ async function executeWorkflow(item: QueueItem) {
       debugDir,
       session,
       dryRun,
+      scenarioApprovalDecisions: dryRun ? item.scenarioApprovalDecisions : undefined,
       cancelSignal: abortController.signal,
       log: (msg: string) => log(runId, node.id, msg),
       registerFile: (filename, filePath, mime, kind = "output") => {
@@ -1241,6 +1384,9 @@ async function executeWorkflow(item: QueueItem) {
     };
 
     try {
+      if (dryRun && item.scenarioForcedFailures?.[node.id]) {
+        throw new PermanentError(`情境安全驗證：刻意模擬「${node.label}」失敗，只為確認出錯時備援路徑；不會真的執行這一步的外部操作`);
+      }
       const { result, attempt } = await runNodeWithRetry(node, ctx, def.retryable, def.maxAttempts);
       // 存進 nodeOutputs 的是「這個節點收到的 input + 它自己新增的欄位」，不是單純 result.output——
       // 這樣任何下游節點(不管中間隔了幾個節點)都能繼續用 {{欄位}} 引用更早以前算出來的資料。
@@ -1383,7 +1529,7 @@ async function executeWorkflow(item: QueueItem) {
       .run(failError, fullReason, resolution, failedNode || null, runId);
     log(runId, null, `❌ 執行失敗：${fullReason}`);
     // 無人值守觸發(排程/資料夾監聽/webhook)的失敗一定要主動通知——這是使用者唯一能知道「沒跑成功」的管道，不然只能自己想到才會去開網頁看
-    if (trigger !== "manual") {
+    if (trigger !== "manual" && trigger !== "health-check") {
       // 判定為「外部服務暫時性問題」(不是邏輯/帳密/設定問題)時，AI 改設定沒用，但重跑同一份設定
       // 很可能就直接成功——正式流程排一次延後自動重跑，不用使用者自己想到要手動重試(真實踩過的
       // 抱怨：「失敗要重複跑啊，不然就停滯了」)。用 __retryAttempt 帶在觸發參數裡數第幾次重試，
@@ -1469,7 +1615,7 @@ async function executeWorkflow(item: QueueItem) {
       (varWarnings > 0 ? `⚠️ 但有 ${varWarnings} 個設定裡的 {{變數}} 沒有對應到資料，可能讓檔名或內容出現 {{...}} 字樣——請檢查產出結果，不對就在對話裡跟 AI 說。` : "");
     db.prepare(`UPDATE runs SET status='success', reason=?, finished_at=datetime('now') WHERE id=?`).run(reason, runId);
     log(runId, null, varWarnings > 0 ? `✅ 執行完成(有 ${varWarnings} 個變數警告，見上方紀錄)` : "✅ 執行完成");
-    if (trigger !== "manual") notifyDesktop(`「${wf.name}」${TRIGGER_LABEL[trigger]}執行完成`, reason);
+    if (trigger !== "manual" && trigger !== "health-check") notifyDesktop(`「${wf.name}」${TRIGGER_LABEL[trigger]}執行完成`, reason);
   }
   cancelCause.delete(runId); // 讀過(或沒用到)都要清，避免 Map 隨 run 數量無限長大
   notifyFinished(runId); // 一定通知等待者(runWorkflowAndWait)，不會讓 promise 卡住
@@ -1519,6 +1665,63 @@ export function getRun(runId: string) {
 export function getRunLogs(runId: string, afterId = 0) {
   const db = getDb();
   return db.prepare(`SELECT id, node_id, ts, line FROM run_logs WHERE run_id = ? AND id > ? ORDER BY id ASC`).all(runId, afterId);
+}
+
+/**
+ * 外部服務已收到請求、但本機沒有拿到明確回應時，將不確定動作轉成白話決策卡。
+ * 只回傳節點名稱與下一步，不回傳 key、帳密、輸入或外部服務原文。
+ */
+export function getPendingEffects(runId: string): { nodeId: string; nodeLabel: string; action: "external-effect"; choices: ["confirmed", "retry"] }[] {
+  const run = getDb().prepare(`SELECT workflow_id, status FROM runs WHERE id=?`).get(runId) as { workflow_id: string; status: string } | undefined;
+  if (!run || !["failed", "stopped"].includes(run.status)) return [];
+  const wf = getWorkflow(run.workflow_id);
+  if (!wf) return [];
+  return listPendingActionKeys(runId).map((key) => {
+    const nodeId = key.slice(`${runId}:`.length);
+    return {
+      nodeId,
+      nodeLabel: wf.nodes.find((node) => node.id === nodeId)?.label ?? nodeId,
+      action: "external-effect" as const,
+      choices: ["confirmed", "retry"] as ["confirmed", "retry"],
+    };
+  });
+}
+
+/**
+ * 解決一個 pending 外部動作並從原 run 續跑：
+ * - retry：使用者確認遠端沒有完成，清除 pending 後重試同一動作。
+ * - confirmed：使用者確認遠端已完成，記成「人確認」的完成結果，避免再次送出，再繼續下游。
+ * confirmed 刻意只產生通用旗標，不捏造遠端 row id／訊息 id 等未取得的資料。
+ */
+export function resolvePendingEffect(
+  runId: string,
+  nodeId: string,
+  decision: "confirmed" | "retry",
+): { ok: boolean; error?: string } {
+  const db = getDb();
+  const run = db.prepare(`SELECT workflow_id, status FROM runs WHERE id=?`).get(runId) as { workflow_id: string; status: string } | undefined;
+  if (!run) return { ok: false, error: "找不到這次執行紀錄。" };
+  if (!["failed", "stopped"].includes(run.status)) return { ok: false, error: "這次執行目前不能處理不確定的外部動作。" };
+  const wf = getWorkflow(run.workflow_id);
+  const node = wf?.nodes.find((candidate) => candidate.id === nodeId);
+  if (!node) return { ok: false, error: "找不到這個步驟，流程可能已被修改。" };
+  const key = `${runId}:${nodeId}`;
+  if (!listPendingActionKeys(runId).includes(key)) return { ok: false, error: "這個外部動作已經被處理，不能重複決定。" };
+  if (decision === "retry") {
+    if (!clearPendingAction(key)) return { ok: false, error: "外部動作狀態剛被另一個操作處理，請重新整理。" };
+    log(runId, nodeId, `[${node.label}] 你確認上次沒有完成，允許重新發起外部動作`);
+  } else {
+    const row = db.prepare(`SELECT input_json FROM node_runs WHERE run_id=? AND node_id=?`).get(runId, nodeId) as { input_json: string | null } | undefined;
+    let input: Record<string, unknown> = {};
+    try {
+      const parsed = row?.input_json ? JSON.parse(row.input_json) : {};
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) input = parsed as Record<string, unknown>;
+    } catch { /* 只帶通用確認旗標，損毀 input 不阻止明確的人類決策 */ }
+    recordCompletedAction(key, { ...input, effectConfirmedByUser: true });
+    log(runId, nodeId, `[${node.label}] 你確認外部動作已完成；平台不會再次送出，繼續往下跑。遠端未回傳的編號／筆數不會被捏造`);
+  }
+  const resumed = resumeRun(runId);
+  return resumed.ok ? { ok: true } : { ok: false, error: resumed.error ?? "已處理外部動作，但無法續跑後續步驟。" };
 }
 
 export function listRuns(workflowId: string) {

@@ -44,6 +44,7 @@ test("wait-approval 安全試跑：不建立真的簽核紀錄、不打 Telegram
     assert.equal(fetchCalled, false, "安全試跑不該打任何外部 API");
     assert.equal(countApprovalsForTestRun(), before, "安全試跑不該在 approvals 資料表多寫一筆");
     assert.equal(result.output.approved, true);
+    assert.deepEqual(result.activePorts, ["approved"]);
     assert.equal(result.output.foo, "bar", "上游輸入要透傳給下游");
     assert.match(String(result.output.decision), /只讀驗證/);
   } finally {
@@ -51,6 +52,24 @@ test("wait-approval 安全試跑：不建立真的簽核紀錄、不打 Telegram
     // 保底清理：萬一防護失效真的寫了資料，測試結束後不留垃圾在正式 DB 裡。
     getDb().prepare(`DELETE FROM approvals WHERE run_id = ?`).run(TEST_RUN_ID);
   }
+});
+
+test("wait-approval 情境安全試跑可指定拒絕出口，而且不會把核准分支一起跑下去", async () => {
+  const result = await waitApprovalNode.execute({
+    runId: TEST_RUN_ID,
+    workflowId: "test-wf-dryrun-waitapproval",
+    nodeId: "approval",
+    input: {},
+    config: { message: "測試簽核", channels: "desktop", timeoutHours: "1" },
+    secrets: {},
+    dryRun: true,
+    scenarioApprovalDecisions: { approval: "rejected" },
+    cancelSignal: new AbortController().signal,
+    log: () => {},
+  } as never);
+  assert.equal(result.output.approved, false);
+  assert.match(String(result.output.decision), /拒絕/);
+  assert.deepEqual(result.activePorts, ["rejected"]);
 });
 
 test("wait-approval 安全試跑：管道設定錯誤(指定 Telegram 卻沒填金鑰)仍然要報錯，不能因為是安全試跑就放行", async () => {

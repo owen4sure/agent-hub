@@ -3,6 +3,7 @@ import { getWorkflow, isValidWorkflowId } from "@/lib/workflow/store";
 import { getGlobalSettings, getSharedSecrets } from "@/lib/settingsStore";
 import { redactKnownSecrets } from "@/lib/exportSanitizer";
 import { listSchedules } from "@/lib/scheduler";
+import { exportPortableScenarios } from "@/lib/workflow/scenarioTests";
 
 // 匯出 workflow 定義(不含帳密)。排程(cron/啟用狀態/觸發參數)存在獨立的 schedules 表、不在
 // workflow JSON 裡，以前匯出只序列化 wf 本身，排程會無聲遺失——跟 copyWorkflow() 早就修過的
@@ -20,7 +21,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   });
   const { apiKey } = getGlobalSettings();
   const bundle = redactKnownSecrets(
-    { ...wf, builtin: false, schedules },
+    { ...wf, builtin: false, schedules, verificationPassport: { version: 1, scenarios: exportPortableScenarios(id) } },
     { ...getSharedSecrets(), ...(apiKey ? { MODEL_API_KEY: apiKey } : {}) },
   );
   return new NextResponse(JSON.stringify(bundle, null, 2), {

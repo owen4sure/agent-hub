@@ -8,6 +8,7 @@ import { checkRunSemantics } from "@/lib/workflow/resultCheck";
 import { recordFix } from "@/lib/workflow/learnedFixes";
 import { resolveParams } from "@/lib/relativeDate";
 import { autorunActive } from "@/lib/workflow/busyLocks";
+import { hasActiveRepairSession } from "@/lib/workflow/repairSessions";
 
 /**
  * 使用者在首頁通知橫幅按「套用並重跑」：把 AI 先前想好的提案套進 workflow，備份現況(可還原)，
@@ -22,7 +23,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   // 這條正式流程若正在跑 autorun/autofix，不能同時套用提案——兩邊各自以自己讀到的舊快照
   // 存檔，晚存的那個會把對方的合法改動整批覆蓋掉(踩過同類 bug 才在其他修改入口都補上這道檢查，
   // 這裡以前漏接)。
-  if (autorunActive.has(proposal.workflow_id)) {
+  if (autorunActive.has(proposal.workflow_id) || hasActiveRepairSession(proposal.workflow_id)) {
     return NextResponse.json({ error: "這條流程的自動測試/修復正在進行中，等它跑完再套用提案(不然會互相蓋掉對方的修改)" }, { status: 409 });
   }
 

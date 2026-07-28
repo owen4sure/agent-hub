@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getClient } from "@/lib/modelClient";
 import { getWorkflow, saveWorkflow, backupWorkflow, deriveRequiresSecrets, findWorkflowByRef, graphUntouchedSinceApply } from "@/lib/workflow/store";
+import { recordReadOnlyContractFromUserText } from "@/lib/workflow/safetyContract";
 import { getGlobalSettings, getWorkflowModel, getWorkflowSecrets, setWorkflowSecrets } from "@/lib/settingsStore";
 import { parseChatCredentials, scrubSecretValues } from "@/lib/workflow/chatCredentials";
 import { buildWorkflow, describeSuggestedSchedule, type ChatMessage } from "@/lib/workflow/builder";
@@ -31,6 +32,9 @@ import { slidesRefreshNodesNeedingOAuthSetup } from "@/lib/googleSlidesApi";
 import { applyGraphStructureEdits, hasStructureChanges } from "@/lib/workflow/graphStructure";
 import { tryApplySimpleChatStructure } from "@/lib/workflow/simpleChatStructure";
 import { shouldAutoInspectRuntime } from "@/lib/workflow/runtimeInspectionIntent";
+import { hasActiveRepairSession } from "@/lib/workflow/repairSessions";
+
+const isRepairActive = (workflowId: string) => autorunActive.has(workflowId) || hasActiveRepairSession(workflowId);
 
 // 提出建圖(可能回問題、回可套用的圖、或直接改好現有節點)
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -83,6 +87,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const rawLastUserCommandText = (rawLastUserForCommand?.parts ?? [])
     .map((part) => part.kind === "text" ? part.text : "")
     .join("\n");
+  // 使用者自己明確說「只讀／只分析／不要修改／不要寫入」時，把它記成這條流程的安全契約(存 DB，
+  // AI 改不到)。之後每次執行前會依它重掃本圖與整條委派鏈——建圖當下的需求驗收只證明「那一刻看起來
+  // 安全」，被呼叫的子流程/失敗備援之後被改成會寫入的話，母流程一個字都沒動也該被擋下(P0)。
+  // 只從**使用者本人這一則訊息的原文**建立，不看模型的摘要或推論；解除只能由使用者走另一個 API。
+  try { recordReadOnlyContractFromUserText(id, rawLastUserCommandText); } catch { /* 記不起來不該擋住建圖 */ }
   let rawChatCommand = body.previewOnly ? "preview-run" : classifyChatCommand(rawLastUserCommandText);
   // 不只前端要知道「空白畫布不能測」：舊版網頁、第三方呼叫或快取中的前端仍可能把
   // 「幫我建立流程，先安全測試」送成 preview-run。若這條圖根本沒有可執行步驟，安全試跑
@@ -246,7 +255,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     // 先做無副作用 capabilities 探測；真的支援 v3 才一次存進所有 Sheet 寫入節點。
     const pastedSheetScriptUrl = rawAppsScriptUrl;
     if (pastedSheetScriptUrl) {
-      if (autorunActive.has(id)) {
+      if (isRepairActive(id)) {
         return NextResponse.json({ phase: "clarify", message: "這條流程的自動測試／修復正在執行，等它停下後再貼一次網址，避免兩邊同時改設定。" });
       }
       let probed: { spreadsheetName?: string };
@@ -298,7 +307,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     // 與 AI structure 相同的伺服器端驗證，複雜結構或有歧義時才回到模型，不會偷猜。
     // P0 安全閘門：這兩條都是「偵測到就直接寫入」的確定性通道，使用者句尾明確叫停時
     // 不能執行(以前跟 concreteEditIntent 完全無關，只要引號名稱緊貼「刪掉」就會真的刪節點)。
-    if (!autorunActive.has(id) && !explicitEditRefusal) {
+    if (!isRepairActive(id) && !explicitEditRefusal) {
       const simpleStructure = tryApplySimpleChatStructure(id, lastUserText);
       if (simpleStructure) {
         return NextResponse.json({ phase: "edits", message: simpleStructure.message, changes: simpleStructure.changes });
@@ -356,7 +365,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const { pairs, remainder } = parseReplacePairs(lastUserText);
     let replaceNote = "";
     if (pairs.length > 0) {
-      if (autorunActive.has(id)) {
+      if (isRepairActive(id)) {
         return NextResponse.json({ phase: "clarify", message: "這條流程的自動測試/修復正在進行中，等它跑完我再幫你改(不然會互相蓋掉對方的修改)。" });
       }
       // P0 安全閘門：使用者句尾明確叫停時，只計算「換了會影響哪裡」不真的寫入(apply:false)——
@@ -552,7 +561,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (result.phase === "edits") {
       // 自動測試迴圈(autorun)進行中不能同時改 config——兩邊互相覆蓋、它的驗證會對不上自己的改動，
       // 最後止損還原還會把這裡的合法改動一起滅掉
-      if (autorunActive.has(id)) {
+      if (isRepairActive(id)) {
         return NextResponse.json({ phase: "clarify", message: "這條流程的自動測試正在進行中，等它跑完我再幫你改(不然會互相蓋掉對方的修改)。" });
       }
       // P0 安全閘門(2026-07 第三輪外部審查)：即使前面判斷使用者只是在問問題，模型自己仍可能回
@@ -878,7 +887,7 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
   }
   // 自動測試/修復迴圈進行中不能整包換圖——迴圈後續的修復與還原會作用在完全不同的圖上，
   // restoreIfEdited 還可能把新圖的節點 config(id 常沿用 n1/n2)回滾成舊圖的快照(與 POST edits 同一防護)
-  if (autorunActive.has(id)) {
+  if (isRepairActive(id)) {
     return NextResponse.json({ error: "這條流程的自動測試/修復正在進行中，等它跑完再套用新流程(不然會互相蓋掉對方的修改)" }, { status: 409 });
   }
   // ── 套用計畫(GPT 體檢 #6 交易一致性):①先驗證所有內容 ②備份 ③寫圖 ④觸發設定

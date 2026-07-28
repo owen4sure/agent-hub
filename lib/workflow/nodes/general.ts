@@ -4,6 +4,8 @@ import { assertNoUnresolvedVars, cfgStr, makeClient, resolveTemplate } from "../
 import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../../claudeCodeClient";
 import { callAIWithRetry } from "../../aiRetry";
 import { fetchWithUrlGuard } from "../../urlGuard";
+import { urlSourceEvidence } from "../runtimeEvidence";
+import { parseResponseContract, parseStatusSpec, statusMatches, validateResponseContract } from "../httpContract";
 
 export const httpRequestNode: NodeDefinition = {
   type: "http-request",
@@ -17,6 +19,13 @@ export const httpRequestNode: NodeDefinition = {
     { key: "url", label: "網址", type: "text", default: "" },
     { key: "headers", label: "Headers(JSON)", type: "textarea", default: "{}" },
     { key: "body", label: "Body(JSON 或文字)", type: "textarea", default: "" },
+    { key: "successStatus", label: "哪些 HTTP 狀態算成功", type: "text", default: "200-299", help: "例如 200-299，或 200,201。非成功狀態會讓這一步明確失敗。" },
+    { key: "responseSchema", label: "回應欄位合約(JSON，可留空)", type: "textarea", default: "", allowEmpty: true, help: "例如 {\"id\":\"string\",\"data.items\":\"array\"}；不符合就停止，不把錯誤資料傳給下游。" },
+    // 讀取用的 POST 是真實存在的(平台自己的建圖配方就教 AI 用 POST .../databases/{id}/query 讀 Notion)，
+    // 但**不能靠猜**：/v1/pages(建立)跟 /v1/databases/{id}/query(查詢)只差在路徑，用網址 regex 猜錯
+    // 一次就是真的送出資料。所以做成明確、預設關閉的宣告：勾了才會在只讀試跑時真的執行，也才不會被
+    // 「只讀取／不要修改」的需求驗收攔下。沒勾 = 一律當成會寫入(既有行為)。
+    { key: "readOnly", label: "這個呼叫只是查詢，不會改動對方的資料", type: "boolean", default: "false" },
   ],
   retryable: true,
   async execute(ctx) {
@@ -38,6 +47,10 @@ export const httpRequestNode: NodeDefinition = {
       }
     }
     const bodyStr = cfgStr(ctx, "body");
+    let statusSpec: ReturnType<typeof parseStatusSpec>;
+    try { statusSpec = parseStatusSpec(cfgStr(ctx, "successStatus", "200-299")); } catch (error) { throw new PermanentError(error instanceof Error ? error.message : "成功狀態碼格式不正確"); }
+    let responseContract: ReturnType<typeof parseResponseContract>;
+    try { responseContract = parseResponseContract(cfgStr(ctx, "responseSchema", "")); } catch (error) { throw new PermanentError(error instanceof Error ? error.message : "回應欄位合約格式不正確"); }
     // 加上逾時與大小上限，避免卡死或把巨大回應塞爆記憶體。同時接上 ctx.cancelSignal——
     // 不接的話使用者按「停止執行」對這個節點完全沒作用，要等 30 秒逾時自然到才會真的停下來
     // (這是「按停止不會停」的其中一個根因：這是一個 fetch，跟瀏覽器頁面無關，resetPage() 救不到它)。
@@ -88,7 +101,12 @@ export const httpRequestNode: NodeDefinition = {
       // 非 JSON 回應
     }
     ctx.log(`${method} ${url} → ${res.status}`);
-    return { output: { status: res.status, body: text, json } };
+    if (!statusMatches(res.status, statusSpec)) {
+      throw new PermanentError(`${method} ${url} 回傳 HTTP ${res.status}，不在允許的成功狀態 ${cfgStr(ctx, "successStatus", "200-299")} 內`);
+    }
+    const contractErrors = validateResponseContract(json, responseContract);
+    if (contractErrors.length > 0) throw new PermanentError(`API 回應不符合欄位合約：${contractErrors.slice(0, 8).join("；")}`);
+    return { output: { status: res.status, body: text, json, sourceEvidence: urlSourceEvidence(url, { observed: { status: res.status, textChars: text.length } }) } };
   },
 };
 

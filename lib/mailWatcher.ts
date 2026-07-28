@@ -16,6 +16,7 @@ import {
   type MailSummary,
 } from "./mailClient";
 import type { Workflow } from "./workflow/types";
+import { getAutomationReadiness } from "./workflow/automationReadiness";
 
 /**
  * 收信觸發：trigger 節點 config.mailWatch="on" 的「正式」流程，每 60 秒用 IMAP 掃一次信箱，
@@ -250,6 +251,11 @@ export async function scanMailboxesOnce(): Promise<void> {
   const groups = new Map<string, { wf: Workflow; cfg: MailTriggerConfig }[]>();
   for (const wf of workflows) {
     if (wf.status !== "official") continue;
+    const readiness = getAutomationReadiness(wf, "mail-watcher");
+    if (!readiness.ready) {
+      console.warn(`[mailWatcher] ${wf.name}: 自動觸發檢查未通過，暫停收信觸發 (${readiness.items[0]?.title ?? "未知原因"})`);
+      continue;
+    }
     const trigger = wf.nodes.find((n) => n.type === "trigger");
     const cfg = mailTriggerConfig(trigger?.config);
     if (!cfg) continue;

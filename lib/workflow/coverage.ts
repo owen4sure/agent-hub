@@ -11,6 +11,7 @@ import type { WorkflowNode, WorkflowEdge } from "./types";
 export interface BranchPortCoverage {
   nodeId: string;
   nodeLabel: string;
+  nodeType: string;
   port: string;
   /** 給人看的出口名(核准/拒絕/出錯時/選項文字…) */
   portLabel: string;
@@ -41,6 +42,7 @@ export function computeCoverage(
   seen: Set<string>, // `${nodeId} ${port}`
 ): CoverageReport {
   const labelById = new Map(nodes.map((n) => [n.id, n.label]));
+  const typeById = new Map(nodes.map((n) => [n.id, n.type]));
   const ports: BranchPortCoverage[] = [];
   const dedup = new Set<string>();
   for (const e of edges) {
@@ -51,6 +53,7 @@ export function computeCoverage(
     ports.push({
       nodeId: e.from,
       nodeLabel: labelById.get(e.from) ?? e.from,
+      nodeType: typeById.get(e.from) ?? "",
       port: e.fromPort,
       portLabel: portLabel(e.fromPort),
       covered: seen.has(key),

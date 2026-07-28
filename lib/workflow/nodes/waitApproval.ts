@@ -85,14 +85,17 @@ export const waitApprovalNode: NodeDefinition = {
     // 跟 googleSlidesCreate/googleSlidesRefresh 同一種做法：節點自己在真的動手前 return,而不是進 DRYRUN_WRITE_TYPES。
     // 模擬「核准」而非「拒絕」：多數流程的核准分支才是後續步驟要驗證的主線,拒絕分支通常只是通知即結束。
     if (ctx.dryRun) {
-      ctx.log("只讀驗證：已確認通知管道設定正確，但不會真的建立簽核、不會發任何通知——直接模擬「核准」讓下游分支可以被驗證");
+      const decision = ctx.scenarioApprovalDecisions?.[ctx.nodeId] ?? "approved";
+      const approved = decision === "approved";
+      ctx.log(`只讀驗證：已確認通知管道設定正確，但不會真的建立簽核、不會發任何通知——模擬「${approved ? "核准" : "拒絕"}」只走對應分支`);
       return {
         output: {
           ...ctx.input,
-          approved: true,
-          decision: "核准(只讀驗證模擬，非真人簽核)",
+          approved,
+          decision: `${approved ? "核准" : "拒絕"}(只讀驗證模擬，非真人簽核)`,
           decisionNote: "這是只讀驗證，沒有真的通知任何人，也沒有真人簽核",
         },
+        activePorts: [decision],
       };
     }
 

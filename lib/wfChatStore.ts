@@ -1008,6 +1008,12 @@ export async function confirmPendingExecution(id: string, confirmImported = fals
       await prepareChatPreview(id, get(id).chat, pending.params);
       return;
     }
+    if (start.status === 409 && started.code === "ACCEPTANCE_SPEC_OUTDATED") {
+      set(id, { pendingExecution: null });
+      appendAssistantNote(id, "這條流程的驗收答案屬於舊版本；我不會直接執行。現在先用安全只讀模式重新驗證，確認後再回來執行。");
+      await startAutoTest(id, undefined, { source: "chat", params: pending.params });
+      return;
+    }
     if (start.status === 409 && started.code === "PREVIEW_INPUT_EXPIRED") {
       set(id, { pendingExecution: null });
       appendAssistantNote(id, "安全預覽時用的附件／網址已過期，或確認鍵被重複送出；我不會改拿別份資料執行。現在重新安全試跑，請再核對一次。");
@@ -1148,6 +1154,14 @@ export interface ImportWelcomeSummary {
   importedScheduleCount: number;
   /** cron 格式不正確而沒帶入的排程筆數，需要使用者自己補設定 */
   skippedScheduleCount: number;
+  /** 可攜式驗證護照中，與目前圖版本相符而重新建立的情境數 */
+  importedScenarioCount?: number;
+  /** 因圖版本不一致或內容不完整而沒有帶入的情境數 */
+  skippedScenarioCount?: number;
+  /** n8n 安全轉換的額外缺口：不把不確定節點假裝成等價移植。 */
+  n8nReviewCount?: number;
+  n8nUnsupportedCount?: number;
+  n8nClearedCredentialCount?: number;
 }
 
 /**
@@ -1170,6 +1184,21 @@ export function seedImportWelcome(id: string, summary: ImportWelcomeSummary) {
   }
   if (summary.skippedScheduleCount > 0) {
     points.push(`有 ${summary.skippedScheduleCount} 筆排程的時間格式看起來不正確，沒有一併帶入，需要到「排程」頁重新設定。`);
+  }
+  if ((summary.importedScenarioCount ?? 0) > 0) {
+    points.push(`已帶回 ${summary.importedScenarioCount} 個驗證情境；它們的輸入會在這台電腦重新加密保存，之後可以安全重播，不會直接執行外部流程裡的舊紀錄。`);
+  }
+  if ((summary.skippedScenarioCount ?? 0) > 0) {
+    points.push(`有 ${summary.skippedScenarioCount} 個驗證情境沒有帶入，因為它們對應的流程版本不同或內容不完整；請先檢查目前流程，再用實際資料重新保存情境，不會拿舊版本的綠燈背書。`);
+  }
+  if ((summary.n8nClearedCredentialCount ?? 0) > 0) {
+    points.push(`n8n 原流程裡有 ${summary.n8nClearedCredentialCount} 組連線憑證沒有帶進來；這是刻意的安全設計，請在 Agent Hub 的設定卡重新填入，不會偷用原本的密鑰。`);
+  }
+  if ((summary.n8nReviewCount ?? 0) > 0) {
+    points.push(`有 ${summary.n8nReviewCount} 個 n8n 步驟需要重新確認，因為原本的參數、帳密或寫入方向不能直接視為安全等價；請先看畫布上的黃色步驟，再按「🪄 測到會跑」。`);
+  }
+  if ((summary.n8nUnsupportedCount ?? 0) > 0) {
+    points.push(`有 ${summary.n8nUnsupportedCount} 個 n8n 步驟目前沒有安全的一對一積木，已保留成待重新描述的步驟；它們不會被偷偷執行。`);
   }
   // 排程能不能帶回是「有沒有東西要補」以外的另一件事——不是需要你動手的安全機制，
   // 純粹告知帶了幾筆、且解釋為什麼不會馬上開始跑(草稿狀態)，所以獨立於上面的 points 之外處理。

@@ -73,3 +73,14 @@ export function recordCompletedAction(key: string, output: Record<string, unknow
     .run(key, JSON.stringify(output));
   db.prepare(`DELETE FROM idempotent_actions WHERE created_at < datetime('now', '-14 days')`).run();
 }
+
+/** 取得某次 run 尚未確認結果的外部動作；key 不直接回給瀏覽器，避免把內部識別細節變成 UI 契約。 */
+export function listPendingActionKeys(runId: string): string[] {
+  return (getDb().prepare(`SELECT key FROM idempotent_actions WHERE status='pending' AND key LIKE ? ORDER BY created_at ASC`).all(`${runId}:%`) as { key: string }[])
+    .map((row) => row.key);
+}
+
+/** 使用者確認「其實沒有完成」後，才允許同一個邏輯動作再次發起外部呼叫。 */
+export function clearPendingAction(key: string): boolean {
+  return getDb().prepare(`DELETE FROM idempotent_actions WHERE key=? AND status='pending'`).run(key).changes > 0;
+}

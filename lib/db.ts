@@ -84,6 +84,18 @@ function init(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_runs_wf ON runs(workflow_id, started_at DESC);
 
+    CREATE TABLE IF NOT EXISTS workflow_scenarios (
+      id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      graph_fingerprint TEXT NOT NULL,
+      params_json TEXT NOT NULL,
+      expected_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_scenarios_wf ON workflow_scenarios(workflow_id, updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS node_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id TEXT NOT NULL,
@@ -97,6 +109,22 @@ function init(): Database.Database {
       finished_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_node_runs ON node_runs(run_id);
+
+    -- repeat-steps 每一項的可恢復檢查點。output_json 不是明文：由 repeatCheckpoint.ts
+    -- 用本機 vault 加密，避免批次輸出可能包含帳號、信件或檔案內容時被直接讀取。
+    CREATE TABLE IF NOT EXISTS repeat_item_checkpoints (
+      run_id TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      item_index INTEGER NOT NULL,
+      item_fingerprint TEXT NOT NULL,
+      status TEXT NOT NULL,
+      output_json TEXT,
+      error TEXT,
+      attempt INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (run_id, node_id, item_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_repeat_checkpoints_run ON repeat_item_checkpoints(run_id, node_id);
 
     CREATE TABLE IF NOT EXISTS run_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -119,6 +147,64 @@ function init(): Database.Database {
       kind TEXT NOT NULL DEFAULT 'output'
     );
     CREATE INDEX IF NOT EXISTS idx_run_files_wf ON run_files(workflow_id, created_at DESC);
+
+    -- 通過真實只讀驗收的「證據護照」：只存指紋/摘要，不存檔案內容、帳密或模型原文。
+    -- 它讓每次成功驗收都成為可比對的長期資產，而不是一次性聊天結果。
+    CREATE TABLE IF NOT EXISTS workflow_evidence (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workflow_id TEXT NOT NULL,
+      run_id TEXT NOT NULL UNIQUE,
+      graph_fingerprint TEXT NOT NULL,
+      validation_level TEXT NOT NULL,
+      evidence_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_evidence_wf ON workflow_evidence(workflow_id, created_at DESC);
+
+    -- 自動觸發啟用護照：只存 readiness 摘要與流程指紋，不存帳密、輸入資料或模型原文。
+    -- 同一版本/同一檢查結果由應用層去重；版本或阻擋原因改變才留下新快照。
+    CREATE TABLE IF NOT EXISTS workflow_automation_readiness (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workflow_id TEXT NOT NULL,
+      graph_fingerprint TEXT NOT NULL,
+      ready INTEGER NOT NULL,
+      readiness_json TEXT NOT NULL,
+      checked_at TEXT NOT NULL,
+      checked_by TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_automation_readiness_wf ON workflow_automation_readiness(workflow_id, id DESC);
+
+    -- 已保存情境的長期安全巡檢：只重播 dry-run，不碰外部寫入；active_batch_id 用來
+    -- 防止 daemon + dev 同時啟動同一條流程的巡檢。
+    CREATE TABLE IF NOT EXISTS workflow_health_checks (
+      workflow_id TEXT PRIMARY KEY,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      interval_minutes INTEGER NOT NULL DEFAULT 1440,
+      next_run_at TEXT,
+      active_batch_id TEXT,
+      last_batch_id TEXT,
+      last_status TEXT,
+      last_summary TEXT,
+      last_graph_fingerprint TEXT,
+      last_finished_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_health_checks_due ON workflow_health_checks(enabled, next_run_at);
+
+    CREATE TABLE IF NOT EXISTS workflow_health_runs (
+      id TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL,
+      workflow_id TEXT NOT NULL,
+      scenario_id TEXT NOT NULL,
+      run_id TEXT,
+      status TEXT NOT NULL DEFAULT 'queued',
+      matched INTEGER,
+      mismatches_json TEXT NOT NULL DEFAULT '[]',
+      error TEXT,
+      created_at TEXT NOT NULL,
+      finished_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_health_runs_batch ON workflow_health_runs(batch_id, created_at);
 
     CREATE TABLE IF NOT EXISTS schedules (
       id TEXT PRIMARY KEY,
@@ -231,6 +317,32 @@ function init(): Database.Database {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_idempotent_actions_created ON idempotent_actions(created_at);
+
+    -- 使用者對「某個 http-request 節點的這一份精確請求真的只是查詢、不會寫資料」的明確確認。
+    -- 刻意存在 DB 而不是 workflow JSON 的 config 裡：config 是 AI 建圖/修復/匯入都能直接改寫的地方，
+    -- 把安全批准放在那裡等於「AI 自己批准自己」(真實踩過的 P0：AI 只要在節點上寫 readOnly:true，
+    -- 就能讓一個真的會寫入的 POST 通過只讀檢查)。fingerprint 綁 method+url+headers+body，
+    -- 其中任何一項被改掉(AI 修改、節點編輯、匯入、流程修復)確認就自動失效。
+    -- 使用者對「這條流程不准變更任何資料」的明確授權契約。跟 http_read_only_approvals 同樣的理由存在
+    -- DB 而不是 workflow JSON：JSON 是 AI 建圖/修復/匯入都能改寫的地方，安全契約放那裡等於 AI 能自己
+    -- 解除自己的限制。source_text 存使用者原話(稽核用，不存模型的摘要)；banned_effects 是 JSON 陣列，
+    -- 空陣列 = 已被使用者明確解除(保留這一列當稽核軌跡，不刪除)。
+    CREATE TABLE IF NOT EXISTS workflow_safety_contracts (
+      workflow_id TEXT PRIMARY KEY,
+      banned_effects TEXT NOT NULL,
+      source_text TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT,
+      updated_note TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS http_read_only_approvals (
+      workflow_id TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      approved_at TEXT NOT NULL,
+      PRIMARY KEY (workflow_id, node_id)
+    );
   `);
 
   // 無痛升級：schema 有變動時對既有 DB 補欄位，永遠不需要刪 DB(才不會弄丟已存的帳密/設定)。
@@ -253,6 +365,9 @@ function init(): Database.Database {
   // 部分執行(從這步開始測/只測這幾步)挑「可沿用種子」的舊 run 時，必須核對圖版本——沒有這欄就只能
   // 盲挑「最近一次成功過的 run」，可能把已經改過設定/日期區間的舊邏輯結果，靜默當成今天的資料沿用。
   addColumnIfMissing(db, "runs", "graph_fingerprint", "graph_fingerprint TEXT");
+  addColumnIfMissing(db, "runs", "scenario_id", "scenario_id TEXT");
+  addColumnIfMissing(db, "workflow_scenarios", "controls_json", "controls_json TEXT NOT NULL DEFAULT '{}'");
+  addColumnIfMissing(db, "workflow_health_checks", "last_graph_fingerprint", "last_graph_fingerprint TEXT");
   // 正式流程無人值守失敗的背景修法提案改用整圖感知修復(aiRepairGraph)後，真正原因可能在別的節點
   // (不只是失敗回報的那個)——這欄存「除了主要那格以外，還一併要改的節點」，套用提案時一起套。
   addColumnIfMissing(db, "fix_proposals", "extra_edits_json", "extra_edits_json TEXT");

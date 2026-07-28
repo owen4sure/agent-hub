@@ -6,9 +6,9 @@
  * 使用守則：會「改 config + 重跑驗證」的迴圈(autorun/autofix)開跑前 add、finally 裡 delete(雙向互斥)；
  * 單發修改入口(/build 的 edits 與 PUT 套圖)只需 has() 檢查讓路。
  *
- * 已知限制：這是進程內的 Set——AGENTS.md 鐵則13 的「daemon+dev 雙進程」場景擋不到跨進程並發。
- * 可接受的原因：autorun/autofix 都是使用者在 UI 上手動觸發的，同一個人同時開兩個進程的 UI 對
- * 同一條流程按測試的機率極低；真要根治需要 DB 級鎖(帶 owner_pid+過期時間)，等真的踩到再上。
+ * 這個 Set 是同一進程內的快速路徑；跨進程的正式鎖存在 repair_sessions(SQLite)，所有會改 workflow
+ * 的 API 另外查 hasActiveRepairSession()。兩層都保留：Set 讓同一個 server 立即回應，SQLite 讓
+ * daemon + dev 雙進程仍共享同一個不可覆蓋的修復狀態。
  */
 export const autorunActive = new Set<string>();
 

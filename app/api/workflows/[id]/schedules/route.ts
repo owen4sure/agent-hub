@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { listSchedules, createSchedule, isValidCron } from "@/lib/scheduler";
 import { getWorkflow } from "@/lib/workflow/store";
+import { automationReadinessResponse, getAutomationReadiness } from "@/lib/workflow/automationReadiness";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -25,6 +26,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     wf = null;
   }
   if (!wf) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
+  if (wf.status === "official") {
+    const readiness = getAutomationReadiness(wf, "schedule-create");
+    if (!readiness.ready) return NextResponse.json(automationReadinessResponse(readiness), { status: 409 });
+  }
   const sid = createSchedule(id, body.cron, body.params ?? {});
   return NextResponse.json({ id: sid });
 }

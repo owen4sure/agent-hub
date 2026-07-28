@@ -4,6 +4,7 @@ import { getWorkflow } from "../store";
 import { scanSecretKeys } from "../secretScan";
 import { generateCustomCode, isPlaceholderCode, PLACEHOLDER_CODE } from "../codegen";
 import { customCodeIsUnsafeForDryRun, DRY_RUN_SKIPPED_WRITES_KEY } from "../dryRun";
+import { executeCustomCodeInProcessSandbox } from "../customCodeProcessSandbox";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as any;
@@ -12,7 +13,8 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as
  * 逃生口：庫裡沒有的特殊需求，AI 依白話寫這段程式碼(使用者永遠不看)。
  * 契約：config.code 是一段 async 函式主體，收到 ctx(同 NodeContext)，回傳 output 物件。
  * 例：`const page = await ctx.session.getPage(); await page.goto(ctx.config.url); return { title: await page.title() };`
- * 在同一個行程內執行 → 可共用瀏覽器 session 等資源。
+ * 正式執行時在同一個行程內執行 → 可共用瀏覽器 session 等資源；只讀安全試跑則改用
+ * 受限 VM 與唯讀瀏覽器能力，不能把「只測試」繞成外送、點擊或本機寫入。
  *
  * AI 建流程圖時通常只寫 intent(白話描述)、code 是預設空殼——第一次執行走到這裡時，
  * 自動依 intent 產生實際程式碼並存回節點(下次直接用)。不能讓空殼默默跑過去：
@@ -79,13 +81,27 @@ export const customCodeNode: NodeDefinition = {
       };
     }
 
-    let fn: (ctx: unknown) => Promise<unknown>;
-    try {
-      fn = new AsyncFunction("ctx", code);
-    } catch (err) {
-      throw new PermanentError(`自訂程式碼語法錯誤：${err instanceof Error ? err.message : String(err)}`);
+    let result: unknown;
+    if (ctx.dryRun) {
+      try {
+        const sandboxResult = await executeCustomCodeInProcessSandbox(ctx, code);
+        if (sandboxResult.permissionMode === "vm-fallback") {
+          ctx.log("⚠️ 目前 Node 不支援作業系統權限隔離；已降級為獨立子程序 VM，只讀結果不可視為完整 OS 隔離");
+        }
+        result = sandboxResult.value;
+      } catch (err) {
+        if (err instanceof PermanentError) throw err;
+        throw new PermanentError(`自訂程式碼語法或安全執行錯誤：${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else {
+      let fn: (ctx: unknown) => Promise<unknown>;
+      try {
+        fn = new AsyncFunction("ctx", code);
+      } catch (err) {
+        throw new PermanentError(`自訂程式碼語法錯誤：${err instanceof Error ? err.message : String(err)}`);
+      }
+      result = await fn(ctx);
     }
-    const result = await fn(ctx);
     // 裸陣列絕不能當 output：物件展開會把它變成 {"0":…,"1":…} 這種索引鍵垃圾,下游引用欄位名永遠讀不到、
     // 流程還全綠(實測踩過:模型產的擷取程式碼 return [record],彙整步驟讀 incomeChannelData 恆空)。
     // 老實報錯讓修復迴圈有具體燃料,不准靜默把資料弄丟。

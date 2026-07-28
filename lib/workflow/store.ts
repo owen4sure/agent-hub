@@ -11,6 +11,7 @@ import { separateOverlappingNodes } from "./layout";
 import { copyChatAttachmentsForWorkflow, deleteChatAttachmentsForWorkflow } from "../chatAttachments";
 import { deleteWorkflowChatState, getWorkflowChatState } from "./chatStateStore";
 import type { Workflow } from "./types";
+import { normalizeAcceptanceSpec } from "./acceptanceSpec";
 
 const EXAMPLES_DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), "examples");
 const USER_DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), "data", "workflows");
@@ -201,8 +202,31 @@ function isWorkflowFileShape(raw: unknown, expectedId: string): raw is Workflow 
   if (raw.description !== undefined && typeof raw.description !== "string") return false;
   if (raw.longDescription !== undefined && typeof raw.longDescription !== "string") return false;
   if (raw.defaultModel !== undefined && typeof raw.defaultModel !== "string") return false;
+  if (raw.acceptanceSpec !== undefined) {
+    try { normalizeAcceptanceSpec(raw.acceptanceSpec); } catch { return false; }
+  }
   if (raw.onFailureWorkflow !== undefined && typeof raw.onFailureWorkflow !== "string") return false;
   if (raw.group !== undefined && typeof raw.group !== "string") return false;
+  if (raw.n8nMigrationAcknowledgedAt !== undefined && typeof raw.n8nMigrationAcknowledgedAt !== "string") return false;
+  if (raw.n8nMigrationReviews !== undefined && (!isPlainObject(raw.n8nMigrationReviews) || Object.keys(raw.n8nMigrationReviews).length > 1_000 ||
+    !Object.values(raw.n8nMigrationReviews).every((review) => isPlainObject(review) && review.decision === "acknowledged" &&
+      typeof review.reviewedAt === "string" && (review.note === undefined || (typeof review.note === "string" && review.note.length <= 500))))) return false;
+  if (raw.n8nMigration !== undefined) {
+    if (!isPlainObject(raw.n8nMigration)) return false;
+    const migration = raw.n8nMigration;
+    if (typeof migration.sourceName !== "string" || migration.sourceName.length > 160 ||
+      typeof migration.sourceFingerprint !== "string" || !/^[a-f0-9]{16}$/.test(migration.sourceFingerprint) ||
+      !Number.isInteger(migration.sourceNodeCount) || (migration.sourceNodeCount as number) < 0 || (migration.sourceNodeCount as number) > 1_000 ||
+      !Number.isInteger(migration.sourceEdgeCount) || (migration.sourceEdgeCount as number) < 0 || (migration.sourceEdgeCount as number) > 5_000 ||
+      (migration.unmappedConnectionCount !== undefined && (typeof migration.unmappedConnectionCount !== "number" || !Number.isInteger(migration.unmappedConnectionCount) || migration.unmappedConnectionCount < 0 || migration.unmappedConnectionCount > 5_000)) ||
+      !Number.isInteger(migration.mappedCount) || !Number.isInteger(migration.reviewCount) || !Number.isInteger(migration.unsupportedCount) ||
+      !Number.isInteger(migration.clearedCodeCount) || !Number.isInteger(migration.clearedCredentialCount) ||
+      typeof migration.importedAt !== "string" || !Array.isArray(migration.originalNodes) || migration.originalNodes.length > 1_000 ||
+      !migration.originalNodes.every((node) => isPlainObject(node) && typeof node.agentHubNodeId === "string" &&
+        typeof node.label === "string" && node.label.length <= 160 && typeof node.n8nType === "string" && node.n8nType.length <= 300 &&
+        (node.status === "mapped" || node.status === "review" || node.status === "unsupported") &&
+        (node.suggestedType === null || typeof node.suggestedType === "string"))) return false;
+  }
   if (raw.copyHandoff !== undefined && (!isPlainObject(raw.copyHandoff) || typeof raw.copyHandoff.sourceName !== "string" || typeof raw.copyHandoff.summary !== "string" || typeof raw.copyHandoff.copiedAt !== "string" ||
     (raw.copyHandoff.attachments !== undefined && (!Array.isArray(raw.copyHandoff.attachments) || !raw.copyHandoff.attachments.every((item) => isPlainObject(item) && typeof item.assetId === "string" && typeof item.name === "string" && (item.kind === "file" || item.kind === "image")))))) return false;
   return true;
@@ -244,7 +268,11 @@ function readWorkflowFile(scope: "example" | "user", filename: string): Workflow
     onFailureWorkflow: raw.onFailureWorkflow,
     group: raw.group,
     importedUntrusted: raw.importedUntrusted === true,
+    n8nMigration: raw.n8nMigration as Workflow["n8nMigration"],
+    n8nMigrationAcknowledgedAt: raw.n8nMigrationAcknowledgedAt,
+    n8nMigrationReviews: raw.n8nMigrationReviews as Workflow["n8nMigrationReviews"],
     copyHandoff: raw.copyHandoff as Workflow["copyHandoff"],
+    acceptanceSpec: raw.acceptanceSpec as Workflow["acceptanceSpec"],
     nodes: raw.nodes ?? [],
     edges: raw.edges ?? [],
   });
@@ -409,7 +437,12 @@ export function saveWorkflow(wf: Workflow): void {
   // API／舊資料仍能繞過；放在唯一存檔入口才是全系統不變量。
   const separated = separateOverlappingNodes(nodes);
   if (separated.changed) nodes = nodes.map((node) => ({ ...node, position: separated.positions[node.id] }));
-  const normalized: Workflow = { ...effective, nodes };
+  const baseNodes = base?.nodes;
+  const baseEdges = base?.edges;
+  const graphChangedSinceLoad = Boolean(baseNodes && baseEdges && (JSON.stringify(baseNodes) !== JSON.stringify(nodes) || JSON.stringify(baseEdges) !== JSON.stringify(effective.edges)));
+  const normalized: Workflow = graphChangedSinceLoad
+    ? { ...effective, nodes, n8nMigrationAcknowledgedAt: undefined, n8nMigrationReviews: undefined }
+    : { ...effective, nodes };
   const toSave: Workflow = { ...normalized, builtin: false, requiresSecrets: deriveRequiresSecrets(normalized) };
   // 原子寫入：先寫暫存檔再 rename(同一檔案系統內 rename 是原子的)。
   // 直接 writeFileSync 寫到一半程式崩潰/斷電，會留下半截 JSON，整個 workflow 檔就毀了。
@@ -573,7 +606,12 @@ export function deleteWorkflow(id: string): void {
   db.prepare(`DELETE FROM run_files WHERE workflow_id = ?`).run(id);
   db.prepare(`DELETE FROM watch_seen WHERE workflow_id = ?`).run(id);
   db.prepare(`DELETE FROM approvals WHERE workflow_id = ?`).run(id); // 待簽核的也一併作廢，首頁不能留「已刪除流程」的簽核卡
+  // 情境測試輸入雖然是本機加密保存，也屬於這條流程的私有資料；刪除流程時不可留下可解密的孤兒。
+  db.prepare(`DELETE FROM workflow_scenarios WHERE workflow_id = ?`).run(id);
+  db.prepare(`DELETE FROM workflow_health_runs WHERE workflow_id = ?`).run(id);
+  db.prepare(`DELETE FROM workflow_health_checks WHERE workflow_id = ?`).run(id);
   for (const runId of runIds) {
+    db.prepare(`DELETE FROM repeat_item_checkpoints WHERE run_id = ?`).run(runId);
     db.prepare(`DELETE FROM node_runs WHERE run_id = ?`).run(runId);
     db.prepare(`DELETE FROM run_logs WHERE run_id = ?`).run(runId);
     fs.rmSync(/* turbopackIgnore: true */ path.join(/* turbopackIgnore: true */ process.cwd(), "data", "runs", runId), { recursive: true, force: true });
@@ -688,6 +726,20 @@ export function listBackups(id: string): BackupInfo[] {
       }
     })
     .filter((b): b is BackupInfo => b !== null);
+}
+
+/** 讀取單一歷史版本給唯讀比較使用；不回傳給模型，也不允許任意路徑。 */
+export function readBackupWorkflow(id: string, filename: string): Workflow | null {
+  assertValidId(id);
+  if (!/^[0-9T-]+Z\.json$/.test(filename)) throw new Error("不合法的備份檔名");
+  const backupPath = path.join(/*turbopackIgnore: true*/ historyDir(id), filename);
+  if (!fs.existsSync(/* turbopackIgnore: true */ backupPath)) return null;
+  try {
+    const backup = JSON.parse(fs.readFileSync(/* turbopackIgnore: true */ backupPath, "utf-8")) as Workflow;
+    return backup.id === id && Array.isArray(backup.nodes) && Array.isArray(backup.edges) ? backup : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

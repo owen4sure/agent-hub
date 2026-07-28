@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { updateSchedule, deleteSchedule, isValidCron } from "@/lib/scheduler";
+import { getDb } from "@/lib/db";
+import { getWorkflow } from "@/lib/workflow/store";
+import { automationReadinessResponse, getAutomationReadiness } from "@/lib/workflow/automationReadiness";
 
 export async function PATCH(
   req: Request,
@@ -23,6 +26,14 @@ export async function PATCH(
   // 跟建立排程同一套驗證：不合法的 cron 在入口就擋下來，不能等 tick 端每分鐘誤觸發
   if (body.cron !== undefined && !isValidCron(body.cron)) {
     return NextResponse.json({ error: "排程時間格式不正確" }, { status: 400 });
+  }
+  if (body.enabled === true) {
+    const row = getDb().prepare(`SELECT workflow_id FROM schedules WHERE id = ?`).get(sid) as { workflow_id: string } | undefined;
+    const wf = row ? getWorkflow(row.workflow_id) : undefined;
+    if (wf?.status === "official") {
+      const readiness = getAutomationReadiness(wf, "schedule-toggle");
+      if (!readiness.ready) return NextResponse.json(automationReadinessResponse(readiness), { status: 409 });
+    }
   }
   if (!updateSchedule(sid, body)) return NextResponse.json({ error: "找不到這個排程" }, { status: 404 });
   return NextResponse.json({ ok: true });

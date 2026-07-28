@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
-import { getWorkflow, saveWorkflow, deleteWorkflow, deriveRequiresSecrets, isBuiltin } from "@/lib/workflow/store";
+import { getWorkflow, listWorkflows, saveWorkflow, deleteWorkflow, deriveRequiresSecrets, isBuiltin } from "@/lib/workflow/store";
 import { getWorkflowModel, setWorkflowModel, getWorkflowSecrets, setWorkflowSecrets, normalizeFolderPath } from "@/lib/settingsStore";
 import { listRuns } from "@/lib/workflow/engine";
 import { autorunActive } from "@/lib/workflow/busyLocks";
@@ -11,6 +11,11 @@ import { separateOverlappingNodes } from "@/lib/workflow/layout";
 import { syncLabelForDestinationChange, type ReplacePair } from "@/lib/workflow/textReplace";
 import { getDb } from "@/lib/db";
 import { workflowExecutionFingerprint } from "@/lib/workflow/fingerprint";
+import { acceptanceSpecOutdated, isAcceptanceSpecForGraph, normalizeAcceptanceSpec, ACCEPTANCE_SPEC_OUTDATED } from "@/lib/workflow/acceptanceSpec";
+import { n8nAutomationNeedsPreview, n8nGraphNeedsReview } from "@/lib/workflow/n8nMigration";
+import { readOnlyParentsBlockedBy } from "@/lib/workflow/safetyContract";
+import { getAutomationReadiness, recordAutomationReadiness } from "@/lib/workflow/automationReadiness";
+import { hasActiveRepairSession } from "@/lib/workflow/repairSessions";
 
 const PARAM_TYPES = new Set(["text", "number", "date-or-token", "select", "boolean", "secret", "code", "textarea"]);
 
@@ -44,8 +49,29 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   // 帳密欄位每次讀都重新推導,不用磁碟上存的舊清單——custom-code 的帳密需求(ctx.secrets.X)是後來
   // 才會掃的,已存在的流程若只讀舊 requiresSecrets,設定頁永遠長不出新欄位、使用者沒地方填帳密。
   const requiresSecrets = deriveRequiresSecrets(wf);
+  // 這是提早警示，不是執行閘門：共用流程被改壞時，讓使用者在這條流程頁就知道哪些
+  // 「只讀」母流程下次會被安全保護擋下；真正的阻擋仍由 engine 的 assertSafetyContract 負責。
+  const readOnlyImpact = readOnlyParentsBlockedBy(id, listWorkflows).map((item) => ({
+    workflowId: item.workflowId,
+    workflowName: item.workflowName,
+    violations: item.violations.slice(0, 8).map((violation) => ({ path: violation.path, detail: violation.detail })),
+  }));
+  const currentFingerprint = workflowExecutionFingerprint(wf);
+  const hasSuccessfulPreview = Boolean(getDb()
+    .prepare(`SELECT id FROM runs WHERE workflow_id = ? AND graph_fingerprint = ? AND dry_run = 1 AND status IN ('success','waiting') LIMIT 1`)
+    .get(id, currentFingerprint));
+  const automationReadiness = getAutomationReadiness(wf);
+  const automationPassport = recordAutomationReadiness(wf, automationReadiness, "workflow-page");
   return NextResponse.json({
     workflow: { ...wf, requiresSecrets, model: getWorkflowModel(id, wf.defaultModel) },
+    acceptanceSpecValid: isAcceptanceSpecForGraph(wf.acceptanceSpec, wf, workflowExecutionFingerprint),
+    currentGraphFingerprint: currentFingerprint,
+    // 持續回傳而非只靠設為正式時的一次性 warning，讓觸發面板與工具列在重整後仍能說清楚
+    // 為什麼 n8n 匯入流程目前不會被排程／監聽／webhook 背景執行。
+    n8nAutomationReady: !n8nAutomationNeedsPreview(wf, hasSuccessfulPreview),
+    automationReadiness,
+    automationPassport,
+    readOnlyImpact,
     secretsSet: Object.fromEntries((requiresSecrets ?? []).map((f) => [f.key, Boolean(secrets[f.key]?.length)])),
     runs: listRuns(id),
   });
@@ -74,6 +100,19 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   if (body.group !== undefined && typeof body.group !== "string") {
     return NextResponse.json({ error: "群組名稱必須是文字" }, { status: 400 });
   }
+  if (body.acceptanceSpec !== undefined) {
+    try { normalizeAcceptanceSpec(body.acceptanceSpec); } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : "驗收標準格式不正確" }, { status: 400 });
+    }
+  }
+  if (body.acknowledgeN8nMigration !== undefined && typeof body.acknowledgeN8nMigration !== "boolean") {
+    return NextResponse.json({ error: "n8n 遷移確認格式不正確" }, { status: 400 });
+  }
+  if (body.n8nMigrationReview !== undefined && (!body.n8nMigrationReview || typeof body.n8nMigrationReview !== "object" || Array.isArray(body.n8nMigrationReview) ||
+    typeof body.n8nMigrationReview.nodeId !== "string" || body.n8nMigrationReview.nodeId.length > 100 ||
+    (body.n8nMigrationReview.note !== undefined && (typeof body.n8nMigrationReview.note !== "string" || body.n8nMigrationReview.note.length > 500)))) {
+    return NextResponse.json({ error: "n8n 單一步驟確認格式不正確" }, { status: 400 });
+  }
   if (body.onFailureWorkflow !== undefined && typeof body.onFailureWorkflow !== "string") {
     return NextResponse.json({ error: "失敗備援流程必須是名稱或 id 文字" }, { status: 400 });
   }
@@ -94,7 +133,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   }
   const changesStructure = ["addNodes", "addEdges", "removeEdges", "insertNode", "removeNodeIds"]
     .some((key) => body[key] !== undefined);
-  if (changesStructure && autorunActive.has(id)) {
+  if (changesStructure && (autorunActive.has(id) || hasActiveRepairSession(id))) {
     return NextResponse.json({ error: "這條流程的自動測試／修復正在進行中，等它跑完再改結構，避免兩邊互相覆蓋" }, { status: 409 });
   }
   if (body.status !== undefined && body.status !== "draft" && body.status !== "official") {
@@ -167,7 +206,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   // 只收 schema 裡存在的欄位、型別驗證(number/select)不合格回明確中文錯誤。
   const nodeConfig = body.nodeConfig as { id?: string; config?: Record<string, unknown> } | undefined;
   if (nodeConfig) {
-    if (autorunActive.has(id)) {
+    if (autorunActive.has(id) || hasActiveRepairSession(id)) {
       return NextResponse.json({ error: "這條流程的自動測試/修復正在進行中，等它跑完再改設定(不然會互相蓋掉)" }, { status: 409 });
     }
     if (typeof nodeConfig.id !== "string" || !nodeConfig.config || typeof nodeConfig.config !== "object" || Array.isArray(nodeConfig.config)) {
@@ -283,7 +322,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   // ── 在一條連線中間插一個節點(邊上懸停「＋」):原線拆成 from→新→to,分支 port 留在前段 ──
   const insertNode = body.insertNode as { from?: string; to?: string; fromPort?: string; type?: string; position?: { x: number; y: number } } | undefined;
   if (insertNode) {
-    if (autorunActive.has(id)) {
+    if (autorunActive.has(id) || hasActiveRepairSession(id)) {
       return NextResponse.json({ error: "這條流程的自動測試/修復正在進行中，等它跑完再改結構" }, { status: 409 });
     }
     const cur = getWorkflow(id);
@@ -312,15 +351,43 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   const changesManifest =
     body.name !== undefined || body.longDescription !== undefined || body.status !== undefined ||
     body.requiresSecrets !== undefined ||
-    body.triggerParams !== undefined || body.onFailureWorkflow !== undefined || body.group !== undefined;
+    body.triggerParams !== undefined || body.onFailureWorkflow !== undefined || body.group !== undefined || body.acceptanceSpec !== undefined || body.acknowledgeN8nMigration !== undefined || body.n8nMigrationReview !== undefined;
   if (changesManifest) {
+    if (autorunActive.has(id) || hasActiveRepairSession(id)) {
+      return NextResponse.json({ error: "這條流程的自動測試／修復正在進行中，等它跑完再改流程設定" }, { status: 409 });
+    }
     // 以「當下最新版」為底(不是函式開頭那份)——避免用過期快照把上面部分更新或其他人剛存的改動蓋掉
     const cur = getWorkflow(id) ?? wf;
+    const migrationReviews = { ...(cur.n8nMigrationReviews ?? {}) };
+    if (body.n8nMigrationReview) {
+      const target = cur.n8nMigration?.originalNodes.find((node) => node.agentHubNodeId === body.n8nMigrationReview.nodeId);
+      if (!target || target.status === "mapped") return NextResponse.json({ error: "找不到需要人工確認的 n8n 步驟" }, { status: 400 });
+      migrationReviews[target.agentHubNodeId] = { decision: "acknowledged", note: body.n8nMigrationReview.note?.trim().slice(0, 500) || undefined, reviewedAt: new Date().toISOString() };
+    }
+    if (body.acknowledgeN8nMigration === true && cur.n8nMigration) {
+      if (n8nGraphNeedsReview(cur)) {
+        const unmapped = cur.n8nMigration?.unmappedConnectionCount ?? 0;
+        return NextResponse.json({
+          error: unmapped > 0
+            ? `這份 n8n 草稿有 ${unmapped} 條特殊連線沒有安全搬移。請先在畫布重新接好，再確認遷移缺口。`
+            : "這份 n8n 草稿目前沒有任何連線。請先在畫布接好步驟，再確認遷移缺口。",
+        }, { status: 409 });
+      }
+      const unresolved = cur.n8nMigration.originalNodes.filter((node) => node.status !== "mapped");
+      const missingReviews = unresolved.filter((node) => !migrationReviews[node.agentHubNodeId]);
+      if (missingReviews.length > 0) return NextResponse.json({ error: `還有 ${missingReviews.length} 個 n8n 步驟尚未逐一確認，請先處理黃色步驟` }, { status: 400 });
+    }
     let promotionWarning: string | undefined;
     if (body.status === "official") {
       const errors = lintGraph(cur.nodes, cur.edges);
       if (errors.length > 0) {
         return NextResponse.json({ error: `這張流程圖還不能設為正式：\n${errors.slice(0, 8).map((e) => `- ${e}`).join("\n")}` }, { status: 400 });
+      }
+      if (acceptanceSpecOutdated(cur.acceptanceSpec, cur, workflowExecutionFingerprint)) {
+        return NextResponse.json({
+          error: "這條流程保留的驗收答案屬於舊版本。請先在「測到會跑」面板重新確認正確答案，或清除舊答案後再設為正式。",
+          code: ACCEPTANCE_SPEC_OUTDATED,
+        }, { status: 409 });
       }
       // lintGraph 只驗證「結構合法」(型別存在/邊指向存在的節點/無環/config 型別對)，不保證這張圖
       // 真的能跑——一張結構合法但實際會失敗的圖(選擇器錯、缺帳密、外部服務打不通…)照樣能通過這關，
@@ -333,7 +400,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
         .prepare(`SELECT id FROM runs WHERE workflow_id = ? AND graph_fingerprint = ? AND status IN ('success','waiting') LIMIT 1`)
         .get(id, fingerprint);
       if (!verifiedRun) {
-        promotionWarning = "這張流程圖結構合法，但目前這個版本還沒有任何一次執行(含安全試跑)成功過——建議先用「🪄 幫我測到會跑」或「只測試不更改資料」驗證過，再讓自動觸發(排程/監聽)開始運作。";
+        promotionWarning = cur.n8nMigration
+          ? "已設為正式，但 n8n 的排程／監聽／webhook 會先暫停；請先用「只測試不更改資料」讓同一版流程圖成功一次，再開始無人值守執行。"
+          : "這張流程圖結構合法，但目前這個版本還沒有任何一次執行(含安全試跑)成功過——建議先用「🪄 幫我測到會跑」或「只測試不更改資料」驗證過，再讓自動觸發(排程/監聽)開始運作。";
       }
     }
     // onFailureWorkflow/group：空字串=清掉設定(存成 undefined)，undefined=不改——跟 builderPrefs 同一套語意
@@ -362,6 +431,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
       triggerParams: body.triggerParams ?? cur.triggerParams,
       onFailureWorkflow: onFailure,
       group,
+      acceptanceSpec: body.acceptanceSpec === null ? undefined : body.acceptanceSpec !== undefined ? normalizeAcceptanceSpec(body.acceptanceSpec) ?? undefined : cur.acceptanceSpec,
+      n8nMigrationAcknowledgedAt: body.acknowledgeN8nMigration === true ? new Date().toISOString() : cur.n8nMigrationAcknowledgedAt,
+      n8nMigrationReviews: Object.keys(migrationReviews).length > 0 ? migrationReviews : cur.n8nMigrationReviews,
     });
     return NextResponse.json({ ok: true, ...(promotionWarning ? { warning: promotionWarning } : {}) });
   }
@@ -373,6 +445,9 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   const wf = getWorkflow(id);
   if (!wf) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
   if (isBuiltin(id)) return NextResponse.json({ error: "內建範例不能刪除，請先複製" }, { status: 400 });
+  if (autorunActive.has(id) || hasActiveRepairSession(id)) {
+    return NextResponse.json({ error: "這條流程的自動測試／修復正在進行中，等它跑完再刪除流程" }, { status: 409 });
+  }
   deleteWorkflow(id);
   return NextResponse.json({ ok: true });
 }

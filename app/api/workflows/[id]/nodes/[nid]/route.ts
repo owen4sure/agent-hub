@@ -5,6 +5,7 @@ import { getWorkflowModel } from "@/lib/settingsStore";
 import { editNode } from "@/lib/workflow/nodeEditor";
 import { getDb } from "@/lib/db";
 import { autorunActive } from "@/lib/workflow/busyLocks";
+import { hasActiveRepairSession } from "@/lib/workflow/repairSessions";
 import type { MessagePart } from "@/lib/workflow/builder";
 
 function isValidPart(p: unknown): p is MessagePart {
@@ -55,7 +56,7 @@ export async function POST(
   // 自動測試/修復迴圈進行中不能同時手動微調同一條流程的節點——迴圈事後的止損還原(restoreUnverified)
   // 會依它自己記錄的「哪些節點已驗證修好」把節點 config 蓋回迴圈開始前的快照，這裡剛存的手動修改
   // 會被無聲蓋掉且沒有任何提示(踩過的競態)。
-  if (autorunActive.has(id)) {
+  if (autorunActive.has(id) || hasActiveRepairSession(id)) {
     return NextResponse.json({ error: "這條流程的自動測試/修復正在進行中，等它跑完再手動修改(不然會被還原動作蓋掉)" }, { status: 409 });
   }
 

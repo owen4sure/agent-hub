@@ -3,10 +3,10 @@
 import { useEffect, useState } from "react";
 import { formatScheduleNextRun, humanizeCron } from "@/components/ui";
 import { SCHEDULE_MODES, WEEKDAY_NAMES, buildCron, timeValid } from "@/lib/cron";
-import { MailSection, TelegramSection, LineSection } from "./TriggerSections";
+import { MailSection, TelegramSection, LineSection, SafetyContractSection } from "./TriggerSections";
 
 /** 觸發面板：排程 / 資料夾監聽 / Webhook / 收信 / Telegram / LINE 六種自動觸發方式都在這裡設定。 */
-export function SchedulePanel({ workflowId, onClose }: { workflowId: string; onClose: () => void }) {
+export function SchedulePanel({ workflowId, onClose, automationReadiness, automationPassport, onReadinessAction }: { workflowId: string; onClose: () => void; automationReadiness?: { ready: boolean; items: { title: string; detail: string; action: string; actionCode?: string }[] } | null; automationPassport?: { id: number; checkedAt: string; checkedBy: string; matchesCurrentGraph: boolean } | null; onReadinessAction?: (actionCode?: string) => void }) {
   return (
     <div className="flex flex-col h-full">
       <div className="h-14 px-5 border-b flex items-center gap-2 shrink-0">
@@ -14,15 +14,135 @@ export function SchedulePanel({ workflowId, onClose }: { workflowId: string; onC
         <button onClick={onClose} className="ml-auto faint hover:text-[var(--text)]" aria-label="關閉">✕</button>
       </div>
       <div className="flex-1 overflow-auto p-4 space-y-6">
+        {automationReadiness && !automationReadiness.ready && (
+          <div className="rounded-lg border p-3 text-xs leading-relaxed" style={{ borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))", background: "color-mix(in srgb, var(--amber) 8%, transparent)", color: "var(--text)" }}>
+            <div className="font-medium mb-1" style={{ color: "var(--amber)" }}>⚠️ 自動觸發還有 {automationReadiness.items.length} 個啟用前檢查</div>
+            <div className="space-y-2">
+              {automationReadiness.items.map((item) => <div key={item.title} className="rounded-md border p-2" style={{ borderColor: "color-mix(in srgb, var(--amber) 25%, var(--border))" }}><div className="font-medium">{item.title}</div><div>{item.detail}</div><div className="faint">下一步：{item.action}</div>{onReadinessAction && <button type="button" className="btn btn-ghost text-xs mt-2" onClick={() => onReadinessAction(item.actionCode)}>{item.actionCode === "start-safe-test" ? "開始安全試跑" : item.actionCode === "open-settings" ? "前往設定" : item.actionCode === "open-n8n-review" ? "開啟遷移核對" : item.actionCode === "open-safety" ? "查看只讀保護" : "回到流程"}</button>}</div>)}
+              {automationPassport && <div className="faint border-t pt-2 mt-2">檢查護照 #{automationPassport.id} · 最近檢查於 {automationPassport.checkedAt}（{automationPassport.checkedBy}）{automationPassport.matchesCurrentGraph ? " · 對應目前版本" : " · 不是目前版本，需重新檢查"}</div>}
+            </div>
+          </div>
+        )}
+        {automationReadiness?.ready && automationPassport && (
+          <div className="rounded-lg border p-3 text-xs leading-relaxed" style={{ borderColor: "color-mix(in srgb, var(--green) 35%, var(--border))", background: "color-mix(in srgb, var(--green) 6%, transparent)" }}>
+            <div className="font-medium" style={{ color: "var(--green)" }}>✓ 啟用護照已通過</div>
+            <div>這一版流程已完成自動觸發檢查；最近檢查於 {automationPassport.checkedAt}（{automationPassport.checkedBy}）。</div>
+          </div>
+        )}
         <ScheduleSection workflowId={workflowId} />
+        <HealthCheckSection workflowId={workflowId} />
         <WatchSection workflowId={workflowId} />
         <WebhookSection workflowId={workflowId} />
         <MailSection workflowId={workflowId} />
         <TelegramSection workflowId={workflowId} />
         <LineSection workflowId={workflowId} />
         <OnFailureSection workflowId={workflowId} />
+        <SafetyContractSection workflowId={workflowId} />
       </div>
     </div>
+  );
+}
+
+/* ---------- ①½ 安全健康巡檢 ---------- */
+
+interface HealthCheckState {
+  enabled: boolean;
+  intervalMinutes: number;
+  nextRunAt: string | null;
+  activeBatchId: string | null;
+  lastStatus: string | null;
+  lastSummary: string | null;
+  lastFinishedAt: string | null;
+  currentScenarioCount: number;
+  staleScenarioCount: number;
+  items: { id: string; scenarioName: string; status: string; matched: boolean | null; mismatches: string[]; error: string | null }[];
+}
+
+const HEALTH_INTERVAL_LABELS: Record<number, string> = { 15: "每 15 分鐘", 60: "每小時", 360: "每 6 小時", 1440: "每天" };
+
+function HealthCheckSection({ workflowId }: { workflowId: string }) {
+  const [health, setHealth] = useState<HealthCheckState | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function load() {
+    const response = await fetch(`/api/workflows/${workflowId}/health-check`);
+    const data = response.ok ? await response.json() : null;
+    if (data?.healthCheck) setHealth(data.healthCheck as HealthCheckState);
+  }
+  useEffect(() => {
+    // 這張卡只讀自己的流程狀態；流程切換時重新載入，避免顯示上一條流程的巡檢結果。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    load().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflowId]);
+
+  async function save(enabled: boolean) {
+    if (!health) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      const response = await fetch(`/api/workflows/${workflowId}/health-check`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled, intervalMinutes: health.intervalMinutes }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "無法更新安全巡檢");
+      setHealth(data.healthCheck as HealthCheckState);
+      setMessage(enabled ? "已啟用；之後只會安全重播情境，不會寫入或發送資料。" : "已停用自動巡檢；已保存的情境不會被刪除。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "無法更新安全巡檢");
+    } finally { setSaving(false); }
+  }
+
+  async function runNow() {
+    setRunning(true);
+    setMessage(null);
+    try {
+      const response = await fetch(`/api/workflows/${workflowId}/health-check`, { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "無法開始安全巡檢");
+      setMessage("已開始安全巡檢；讀取與計算會真的進行，但寫入、寄送和通知都會被攔住。");
+      for (let i = 0; i < 30; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const latest = await fetch(`/api/workflows/${workflowId}/health-check`).then((r) => r.json());
+        if (latest.healthCheck) {
+          setHealth(latest.healthCheck as HealthCheckState);
+          if (!latest.healthCheck.activeBatchId) break;
+        }
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "無法開始安全巡檢");
+    } finally { setRunning(false); }
+  }
+
+  if (!health) return null;
+  const statusText = health.activeBatchId ? "巡檢進行中" : health.lastStatus === "passed" ? "最近一次全部通過" : health.lastStatus === "failed" ? "最近一次發現退化" : health.lastStatus === "stale" ? "需要重新保存情境" : "尚未巡檢";
+  const statusColor = health.activeBatchId || health.lastStatus === "passed" ? "var(--green)" : health.lastStatus === "failed" ? "var(--red)" : "var(--amber)";
+  return (
+    <section className="card p-3" aria-label="安全健康巡檢">
+      <SectionTitle icon="🛡️" title="安全健康巡檢" badge={<StateBadge on={health.enabled} onText="自動守護中" offText="未啟用" />} />
+      <p className="text-xs muted leading-relaxed mb-3">平台會定期重播你已保存的正確情境，確認流程改版後仍做對；只讀取與計算，絕不寫入、寄信或發送通知。</p>
+      <div className="rounded-md border p-2 text-xs mb-3" style={{ borderColor: `color-mix(in srgb, ${statusColor} 35%, var(--border))` }}>
+        <div className="font-medium" style={{ color: statusColor }}>{statusText}</div>
+        <div className="faint mt-1">目前版本有 {health.currentScenarioCount} 個可檢查情境{health.staleScenarioCount ? `，另有 ${health.staleScenarioCount} 個舊版情境` : ""}。</div>
+        {health.lastSummary && <div className="mt-1">{health.lastSummary}</div>}
+      </div>
+      <div className="flex items-center gap-2 mb-3">
+        <select aria-label="健康巡檢頻率" className="input text-sm flex-1" value={health.intervalMinutes} onChange={(e) => setHealth({ ...health, intervalMinutes: Number(e.target.value) })}>
+          {Object.entries(HEALTH_INTERVAL_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        </select>
+        <button className="btn btn-ghost text-xs" disabled={saving || health.enabled} onClick={() => save(true)}>啟用巡檢</button>
+        {health.enabled && <button className="btn btn-ghost text-xs" disabled={saving} onClick={() => save(false)}>停用</button>}
+      </div>
+      <div className="flex gap-2">
+        <button className="btn btn-ghost text-xs" disabled={running || Boolean(health.activeBatchId) || health.currentScenarioCount === 0} onClick={runNow}>{running ? "巡檢中…" : "現在檢查一次"}</button>
+        {health.currentScenarioCount === 0 && <span className="faint text-xs self-center">先保存至少一個成功情境</span>}
+      </div>
+      {health.items.length > 0 && !health.activeBatchId && <div className="mt-3 space-y-1">{health.items.slice(0, 8).map((item) => <div key={item.id} className="text-xs flex gap-2"><span>{item.status === "passed" ? "✓" : item.status === "stale" ? "⚠" : "✕"}</span><span>{item.scenarioName}</span>{item.mismatches[0] && <span className="faint truncate">— {item.mismatches[0]}</span>}</div>)}</div>}
+      {message && <p className="text-xs mt-3" role="status">{message}</p>}
+    </section>
   );
 }
 

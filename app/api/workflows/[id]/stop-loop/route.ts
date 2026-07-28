@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { autorunActive, loopCancelRequested, loopAbortControllers } from "@/lib/workflow/busyLocks";
 import { cancelRun } from "@/lib/workflow/engine";
 import { getDb } from "@/lib/db";
+import { hasActiveRepairSession } from "@/lib/workflow/repairSessions";
 
 /**
  * 使用者在「幫我測到會跑」(autorun) 或「讓 AI 修」(autofix) 進行中按「⏹ 停止」。
@@ -13,6 +14,9 @@ import { getDb } from "@/lib/db";
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   if (!autorunActive.has(id)) {
+    if (hasActiveRepairSession(id)) {
+      return NextResponse.json({ error: "這條流程的自動測試／修復正在另一個 Agent Hub 進程中執行；請在那個視窗按停止，這裡不會假裝已停止。" }, { status: 409 });
+    }
     return NextResponse.json({ error: "目前沒有正在跑的自動測試/修復" }, { status: 409 });
   }
   loopCancelRequested.add(id);

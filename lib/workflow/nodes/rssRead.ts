@@ -2,6 +2,7 @@ import type { NodeDefinition } from "../types";
 import { PermanentError, RetryableError } from "../types";
 import { cfgStr } from "../nodeHelpers";
 import { fetchWithUrlGuard } from "../../urlGuard";
+import { urlSourceEvidence } from "../runtimeEvidence";
 
 /**
  * 讀 RSS/Atom:抓一個 feed 的最新文章清單(標題/連結/時間/摘要)。
@@ -92,6 +93,6 @@ export const rssReadNode: NodeDefinition = {
     const feedTitle = pick(xml.slice(0, 4000), "title");
     const articlesText = articles.map((a, i) => `${i + 1}. ${a.title}\n   ${a.link}${a.summary ? `\n   ${a.summary.slice(0, 150)}` : ""}`).join("\n");
     ctx.log(`讀到「${feedTitle}」${articles.length} 篇(feed 共 ${blocks.length} 篇)`);
-    return { output: { articles, articleCount: articles.length, feedTitle, articlesText } };
+    return { output: { articles, articleCount: articles.length, feedTitle, articlesText, sourceEvidence: urlSourceEvidence(url, { observed: { status: 200, rowCount: articles.length } }) } };
   },
 };

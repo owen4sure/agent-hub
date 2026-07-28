@@ -3,6 +3,7 @@ import { getWorkflow, isValidWorkflowId } from "@/lib/workflow/store";
 import { QueueCapacityError, startWorkflowRun } from "@/lib/workflow/engine";
 import { resolveParams } from "@/lib/relativeDate";
 import { webhookTokenMatches } from "@/lib/webhookStore";
+import { automationReadinessResponse, getAutomationReadiness } from "@/lib/workflow/automationReadiness";
 
 const MAX_BODY_BYTES = 512 * 1024;
 
@@ -20,6 +21,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const wf = getWorkflow(id);
   // 所有無人值守觸發都只能跑正式流程；草稿可先保留 token/設定，但絕不能在背景做副作用。
   if (!wf || wf.status !== "official") return denied();
+  const automationReadiness = getAutomationReadiness(wf, "webhook");
+  if (!automationReadiness.ready) return NextResponse.json(automationReadinessResponse(automationReadiness), { status: 409 });
 
   const raw = await req.text().catch(() => "");
   if (raw.length > MAX_BODY_BYTES) {

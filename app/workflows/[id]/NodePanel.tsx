@@ -151,7 +151,36 @@ export function NodePanel({
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [sheetScriptCopied, setSheetScriptCopied] = useState(false);
   const [sheetProbe, setSheetProbe] = useState<{ busy: boolean; ok?: boolean; text?: string }>({ busy: false });
+  // 「這個 POST 只是查詢」的使用者確認狀態。刻意從伺服器讀、不從 node.config 推——config 上的
+  // readOnly 只是 AI 的建議，真正的批准存在 DB 且綁請求指紋(AI 改了網址/body 就自動失效)。
+  const [readOnlyState, setReadOnlyState] = useState<{ applicable: boolean; aiSuggestsReadOnly: boolean; approved: boolean } | null>(null);
+  const [readOnlyBusy, setReadOnlyBusy] = useState(false);
   useEffect(() => { fetchNodeDefs().then(setDefs).catch(() => {}); }, []);
+  useEffect(() => {
+    if (node.type !== "http-request") return;
+    fetch(`/api/workflows/${workflowId}/http-readonly?nodeId=${encodeURIComponent(node.id)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setReadOnlyState(d ? { applicable: !!d.applicable, aiSuggestsReadOnly: !!d.aiSuggestsReadOnly, approved: !!d.approved } : null))
+      .catch(() => {});
+  }, [workflowId, node.id, node.type, saveMsg]);
+
+  async function setReadOnlyApproval(approve: boolean) {
+    setReadOnlyBusy(true);
+    try {
+      const res = await fetch(`/api/workflows/${workflowId}/http-readonly`, {
+        method: approve ? "POST" : "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nodeId: node.id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) setReadOnlyState((prev) => (prev ? { ...prev, approved: !!data.approved } : prev));
+      else setSaveMsg(data.error ?? "確認失敗");
+    } catch {
+      setSaveMsg("確認失敗，請確認伺服器是否正常");
+    } finally {
+      setReadOnlyBusy(false);
+    }
+  }
   // 切換節點時的草稿重置不用 effect——父層用 key={node.id} 強制重建整個面板,state 天生就是乾淨的
   const schema = defs?.find((d) => d.type === node.type)?.configSchema ?? [];
   // 可直接改的欄位:排除帳密(在設定頁)、AI 管的程式碼/內嵌步驟、觸發參數衍生欄位
@@ -562,6 +591,31 @@ export function NodePanel({
                       className="input text-sm min-h-11"
                       placeholder={f.default ? `預設：${f.default}` : "留空會使用預設值"}
                     />
+                  )}
+                  {f.key === "readOnly" && node.type === "http-request" && readOnlyState?.applicable && (
+                    <div className="mt-2 rounded-lg border p-3 text-xs space-y-2" style={{ borderColor: readOnlyState.approved ? "var(--green)" : "var(--amber)" }}>
+                      {readOnlyState.approved ? (
+                        <>
+                          <p style={{ color: "var(--green)" }}>✅ 你已確認這個呼叫只是查詢。安全試跑會真的執行它。</p>
+                          <p className="faint">之後若網址、Headers、Body 或方法被改動(包括 AI 自己改)，這個確認會自動失效，需要你重新確認。</p>
+                          <button type="button" disabled={readOnlyBusy} onClick={() => setReadOnlyApproval(false)} className="btn btn-ghost text-xs">
+                            {readOnlyBusy ? "處理中…" : "取消確認"}
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <p style={{ color: "var(--amber)" }}>
+                            {readOnlyState.aiSuggestsReadOnly
+                              ? "AI 建議這是查詢，但需要你確認此端點不會寫資料。"
+                              : "這個呼叫不是 GET，系統一律當成「可能會改動對方的資料」。"}
+                          </p>
+                          <p className="faint">在你確認之前，安全試跑會略過這一步(不會真的送出)。只有你確定這個網址只是查詢、不會建立或修改對方的資料時才按確認。</p>
+                          <button type="button" disabled={readOnlyBusy} onClick={() => setReadOnlyApproval(true)} className="btn btn-ghost text-xs">
+                            {readOnlyBusy ? "處理中…" : "我確認這個呼叫只是查詢"}
+                          </button>
+                        </>
+                      )}
+                    </div>
                   )}
                   {f.key === "scriptUrl" && (
                     <div className="mt-2 space-y-2">

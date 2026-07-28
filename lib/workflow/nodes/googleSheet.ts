@@ -4,6 +4,7 @@ import { PermanentError, RetryableError } from "../types";
 import { cfgStr } from "../nodeHelpers";
 import { fetchWithUrlGuard } from "../../urlGuard";
 import { getAttemptState, getCompletedAction, idempotencyKey, markAttemptStarted, recordCompletedAction } from "../idempotency";
+import { urlSourceEvidence } from "../runtimeEvidence";
 
 /**
  * 讀 Google 試算表：不用 OAuth——只要試算表分享設定是「知道連結的任何人可檢視」，
@@ -415,6 +416,17 @@ export const googleSheetReadNode: NodeDefinition = {
       ...rows.slice(0, 30).map((r) => headers.map((h) => String(r[h] ?? "")).join(" | ")),
     ].join("\n");
     ctx.log(`讀到 ${rows.length} 筆資料(欄位：${headers.join("、")})${range ? `，範圍 ${range.toUpperCase()}` : ""}${truncated ? `，已截到前 ${maxRows} 筆` : ""}`);
-    return { output: { rows, rowCount: rows.length, headers, sheetText } };
+    return {
+      output: {
+        rows,
+        rowCount: rows.length,
+        headers,
+        sheetText,
+        sourceEvidence: urlSourceEvidence(exportUrl, {
+          selection: { ...(sheetName ? { sheet: sheetName } : {}), ...(range ? { range: range.toUpperCase() } : {}) },
+          observed: { status: res.status, rowCount: rows.length, truncated },
+        }),
+      },
+    };
   },
 };

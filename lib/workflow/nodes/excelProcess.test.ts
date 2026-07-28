@@ -88,6 +88,8 @@ test("Excel 篩選+highlight：allowEmptyResult 開啟時 0 筆也能正常完�
 
   const result = await excelProcessNode.execute(ctx);
   assert.equal(result.output.rowCount, 0);
+  assert.equal((result.output.sourceEvidence as { filename: string }).filename, "source.xlsx");
+  assert.equal((result.output.sourceEvidence as { sha256: string }).sha256.length, 64);
   assert.deepEqual(registered, ["output.xlsx"]);
   assert.ok(fs.existsSync(result.output.outputPath as string));
 

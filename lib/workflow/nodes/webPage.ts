@@ -3,6 +3,7 @@ import { PermanentError, RetryableError } from "../types";
 import { cfgStr } from "../nodeHelpers";
 import { isPrivateHost, privateUrlsAllowed } from "../../urlGuard";
 import { renderPageText } from "../../renderPage";
+import { urlSourceEvidence } from "../runtimeEvidence";
 
 const MAX_BYTES = 3 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
@@ -104,7 +105,8 @@ export const webPageNode: NodeDefinition = {
           const rendered = await renderPageText(current.href, { maxChars, signal: ctx.cancelSignal });
           if (rendered.text) {
             ctx.log(`瀏覽器補抓到「${rendered.title || title || current.hostname}」：${rendered.text.length} 字`);
-            return { output: { pageText: rendered.text, pageTitle: rendered.title || title, pageHtml: rendered.html || html.slice(0, 60_000), finalUrl: rendered.finalUrl || current.href } };
+            const finalUrl = rendered.finalUrl || current.href;
+            return { output: { pageText: rendered.text, pageTitle: rendered.title || title, pageHtml: rendered.html || html.slice(0, 60_000), finalUrl, sourceEvidence: urlSourceEvidence(finalUrl, { observed: { status: 200, textChars: rendered.text.length } }) } };
           }
         } catch (err) {
           throw new RetryableError(`用瀏覽器補抓這個網頁失敗：${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
@@ -112,7 +114,7 @@ export const webPageNode: NodeDefinition = {
         throw new PermanentError("這個網頁連用瀏覽器渲染都抓不到任何文字(可能整頁是圖片/影片,或內容要登入才看得到)——若是要登入的頁面,請改用瀏覽器登入類節點");
       }
       ctx.log(`抓到「${title || current.hostname}」：${text.length} 字`);
-      return { output: { pageText: text, pageTitle: title, pageHtml: html.slice(0, 60_000), finalUrl: current.href } };
+      return { output: { pageText: text, pageTitle: title, pageHtml: html.slice(0, 60_000), finalUrl: current.href, sourceEvidence: urlSourceEvidence(current.href, { observed: { status: res.status, textChars: text.length } }) } };
     }
   },
 };

@@ -8,7 +8,7 @@ import { checkOscillation, computeEditFingerprint } from "@/lib/workflow/oscilla
 import { runWorkflowAndWait, getMissingWorkflowSettings, isUserCancelled, getVarWarnings } from "@/lib/workflow/engine";
 import { checkRunSemantics } from "@/lib/workflow/resultCheck";
 import { autorunActive, loopCancelRequested, loopAbortControllers } from "@/lib/workflow/busyLocks";
-import { beginRepairSession, endRepairSession } from "@/lib/workflow/repairSessions";
+import { beginRepairSession, endRepairSession, hasActiveRepairSession } from "@/lib/workflow/repairSessions";
 import { recordFix } from "@/lib/workflow/learnedFixes";
 import { resolveParams } from "@/lib/relativeDate";
 import { CancelledError } from "@/lib/aiRetry";
@@ -16,6 +16,8 @@ import { getDb } from "@/lib/db";
 import { generateCustomCode, isPlaceholderCode } from "@/lib/workflow/codegen";
 import { getNodeInput } from "@/lib/workflow/repairContext";
 import { missingTriggerInputsForFailure } from "@/lib/workflow/missingRunInput";
+import { getScenario, getScenarioRepairContext, scenarioApprovalDecisions, scenarioForcedFailures, scenarioRunParams } from "@/lib/workflow/scenarioTests";
+import { workflowExecutionFingerprint } from "@/lib/workflow/fingerprint";
 import type { MessagePart } from "@/lib/workflow/builder";
 import type { NodeContext } from "@/lib/workflow/types";
 
@@ -87,7 +89,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // autorun 迴圈進行中不能同時改同一份 config——兩邊互相覆蓋、驗證結果對不上自己的改動。
   // 自己也要註冊進同一個鎖：不註冊的話互斥是單向的(autofix 跑到一半，autorun/第二個 autofix/
   // 對話 edits 照樣能開跑，兩條迴圈同時改 config+重跑、各自的還原邏輯互相滅掉對方的修復)。
-  if (autorunActive.has(id)) {
+  if (autorunActive.has(id) || hasActiveRepairSession(id)) {
     return NextResponse.json({ error: "這條流程的自動測試或修復正在進行中，等它跑完再讓 AI 修" }, { status: 409 });
   }
   autorunActive.add(id);
@@ -129,7 +131,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 }
 
 async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnType<typeof getWorkflow>>, loopSignal: AbortSignal) {
-  const body = (await req.json().catch(() => null)) as { nodeId?: unknown; params?: Record<string, unknown>; parts?: unknown } | null;
+  const body = (await req.json().catch(() => null)) as { nodeId?: unknown; params?: Record<string, unknown>; parts?: unknown; scenarioId?: unknown } | null;
   // nodeId 一定要驗證：undefined 直接進 better-sqlite3 的 .get() 會 throw 500；
   // 不存在的節點 id 則會讓後面整段修復白跑
   const nodeId = typeof body?.nodeId === "string" ? body.nodeId : "";
@@ -138,9 +140,24 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
   }
 
   const db = getDb();
+  const scenarioId = typeof body?.scenarioId === "string" ? body.scenarioId : null;
+  const scenario = scenarioId ? getScenario(id, scenarioId) : null;
+  if (scenarioId && !scenario) {
+    return NextResponse.json({ error: "找不到這個情境測試" }, { status: 404 });
+  }
+  if (scenario && workflowExecutionFingerprint(wf) !== scenario.graph_fingerprint) {
+    return NextResponse.json({ ok: false, code: "SCENARIO_OUTDATED", error: "這個情境屬於舊版流程，請先更新情境後再修復" }, { status: 409 });
+  }
   const model = getWorkflowModel(id, wf.defaultModel);
   const client = getClient();
-  const rawParams = body?.params && typeof body.params === "object" && !Array.isArray(body.params) ? body.params : {};
+  let rawParams: Record<string, unknown>;
+  try {
+    rawParams = scenario
+      ? scenarioRunParams(scenario)
+      : body?.params && typeof body.params === "object" && !Array.isArray(body.params) ? body.params : {};
+  } catch (error) {
+    return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "這個情境的輸入資料無法讀取" }, { status: 400 });
+  }
   const repairParts = normalizeRepairParts(body?.parts);
 
   const log: AttemptLog[] = [];
@@ -190,18 +207,26 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
   };
 
   // 最近一次這個節點失敗的 run(拿它的錯誤/截圖/HTML 當修復依據)
-  const lastFailedRun = (
-    db
-      .prepare(
-        `SELECT nr.run_id, r.dry_run
-         FROM node_runs nr
-         JOIN runs r ON r.id = nr.run_id
-         WHERE nr.node_id=? AND nr.status='failed' AND r.workflow_id=?
-         ORDER BY nr.id DESC LIMIT 1`,
-      )
-      .get(nodeId, id) as { run_id: string; dry_run: number } | undefined
-  );
-  let lastFailedRunId = lastFailedRun?.run_id;
+  const lastFailedRun = scenarioId
+    ? db.prepare(
+      `SELECT nr.run_id, r.dry_run
+       FROM node_runs nr
+       JOIN runs r ON r.id = nr.run_id
+       WHERE nr.node_id=? AND nr.status='failed' AND r.workflow_id=? AND r.scenario_id=?
+       ORDER BY nr.id DESC LIMIT 1`,
+    ).get(nodeId, id, scenarioId) as { run_id: string; dry_run: number } | undefined
+    : db.prepare(
+      `SELECT nr.run_id, r.dry_run
+       FROM node_runs nr
+       JOIN runs r ON r.id = nr.run_id
+       WHERE nr.node_id=? AND nr.status='failed' AND r.workflow_id=?
+       ORDER BY nr.id DESC LIMIT 1`,
+    ).get(nodeId, id) as { run_id: string; dry_run: number } | undefined;
+  const latestScenarioRun = scenarioId
+    ? db.prepare("SELECT id FROM runs WHERE workflow_id=? AND scenario_id=? ORDER BY started_at DESC LIMIT 1").get(id, scenarioId) as { id: string } | undefined
+    : undefined;
+  let lastFailedRunId = lastFailedRun?.run_id ?? latestScenarioRun?.id;
+  const initialScenarioContext = scenario && lastFailedRunId ? getScenarioRepairContext(id, scenario, lastFailedRunId) : null;
   // 點「讓 AI 修」是接續同一次失敗現場。使用者沒有另外填執行參數時，驗證必須沿用那次
   // run 的日期/檔案/表單值；舊版傳空物件重跑，純計算節點會因沒有 attachmentPath 被略過，
   // 然後 AI 把「skipped」當成修好，正是使用者看到「它根本沒跑」的根因之一。
@@ -238,6 +263,9 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
         | { error: string }
         | undefined)?.error ?? ""
     : "";
+  if (initialScenarioContext?.mismatches.length) {
+    lastError = `情境回歸沒有符合保存的結果：\n${initialScenarioContext.mismatches.join("\n")}`;
+  }
   let repairTarget = nodeId; // 修復目標節點(變數警告時可能改指向產生警告的節點)
 
   // 「本次檔案」這類執行前輸入根本是空的，AI 不可能靠改流程生出使用者電腦上的檔案。
@@ -473,7 +501,10 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
       headed: false,
       timeoutMs: remainingMs,
       dryRun: repairDryRun,
+      scenarioApprovalDecisions: scenario ? scenarioApprovalDecisions(scenario) : undefined,
+      scenarioForcedFailures: scenario ? Object.fromEntries(scenarioForcedFailures(scenario).map((nodeId) => [nodeId, "scenario"])) : undefined,
     });
+    if (scenarioId) db.prepare("UPDATE runs SET scenario_id=? WHERE id=? AND workflow_id=?").run(scenarioId, result.runId, id);
     console.info("[workflow-autofix] verification", {
       workflowId: id,
       attempt,
@@ -490,6 +521,17 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
       restoreUnverified();
       log.push({ attempt, action: "重跑驗證", result: "使用者手動停止了驗證，沒通過驗證的改動已還原" });
       return NextResponse.json({ ok: false, cancelled: true, attempts: attempt, log });
+    }
+
+    // 情境回歸的成功條件比「run 沒丟錯」更嚴格：欄位型別或分支出口只要和保存的
+    // 基準不同，就必須把第一個差異當成修復燃料，不能在表面綠燈時收工。
+    const scenarioContext = scenario && scenarioId ? getScenarioRepairContext(id, scenario, result.runId) : null;
+    if (scenarioContext?.mismatches.length) {
+      lastFailedRunId = result.runId;
+      repairTarget = scenarioContext.repairNodeId ?? repairTarget;
+      lastError = `情境回歸沒有符合保存的結果：\n${scenarioContext.mismatches.join("\n")}`;
+      log.push({ attempt, action: "情境安全重播驗證", result: `流程雖然沒有報錯，但情境仍有差異：${scenarioContext.mismatches.slice(0, 2).join("；")}，繼續修復` });
+      continue;
     }
 
     // 修好之後重跑到了「等人簽核」＝簽核之前全通過(等簽核是設計行為不是失敗)——收工，改動保留

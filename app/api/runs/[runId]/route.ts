@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getRun, getRunLogs, classifyFailure } from "@/lib/workflow/engine";
+import { getRun, getRunLogs, classifyFailure, getPendingEffects } from "@/lib/workflow/engine";
 
 export async function GET(req: Request, { params }: { params: Promise<{ runId: string }> }) {
   const { runId } = await params;
@@ -34,5 +34,5 @@ export async function GET(req: Request, { params }: { params: Promise<{ runId: s
     const { resolution, category } = classifyFailure(nr.error);
     return { ...nr, resolution, category };
   });
-  return NextResponse.json({ run: publicRun, triggerParams, nodeRuns: nodeRunsWithClassification, logs: getRunLogs(runId, afterId) });
+  return NextResponse.json({ run: publicRun, triggerParams, nodeRuns: nodeRunsWithClassification, logs: getRunLogs(runId, afterId), pendingEffects: getPendingEffects(runId) });
 }

@@ -4,6 +4,7 @@ import { startWorkflowRun } from "@/lib/workflow/engine";
 import { resolveParams } from "@/lib/relativeDate";
 import { getSharedSecrets } from "@/lib/settingsStore";
 import { lineTokenMatches, verifyLineSignature, extractLineTextEvents } from "@/lib/lineHook";
+import { automationReadinessResponse, getAutomationReadiness } from "@/lib/workflow/automationReadiness";
 
 const MAX_BODY_BYTES = 512 * 1024;
 const MAX_EVENTS_PER_CALL = 5;
@@ -21,6 +22,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (!lineTokenMatches(id, token)) return denied();
   const wf = getWorkflow(id);
   if (!wf || wf.status !== "official") return denied();
+  const automationReadiness = getAutomationReadiness(wf, "line-webhook");
+  if (!automationReadiness.ready) return NextResponse.json(automationReadinessResponse(automationReadiness), { status: 409 });
 
   const raw = await req.text().catch(() => "");
   if (raw.length > MAX_BODY_BYTES) {

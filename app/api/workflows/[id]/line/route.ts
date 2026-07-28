@@ -3,6 +3,8 @@ import { getWorkflow, saveWorkflow, isValidWorkflowId } from "@/lib/workflow/sto
 import { getLineToken, rotateLineToken, disableLineToken, restoreLineToken } from "@/lib/lineHook";
 import { getSharedSecrets } from "@/lib/settingsStore";
 import { autorunActive } from "@/lib/workflow/busyLocks";
+import { hasActiveRepairSession } from "@/lib/workflow/repairSessions";
+import { automationReadinessResponse, getAutomationReadiness } from "@/lib/workflow/automationReadiness";
 
 /**
  * 觸發面板用：查詢/啟用(重新產生)/停用這條流程的 LINE 訊息觸發。
@@ -39,8 +41,12 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const wf = isValidWorkflowId(id) ? getWorkflow(id) : null;
   if (!wf) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
   if (wf.builtin) return NextResponse.json({ error: "內建範例不能啟用觸發，請先複製" }, { status: 400 });
-  if (autorunActive.has(id)) {
+  if (autorunActive.has(id) || hasActiveRepairSession(id)) {
     return NextResponse.json({ error: "這條流程的自動測試/修復正在進行中，等它跑完再啟用 LINE 觸發" }, { status: 409 });
+  }
+  if (wf.status === "official") {
+    const readiness = getAutomationReadiness(wf, "line-enable");
+    if (!readiness.ready) return NextResponse.json(automationReadinessResponse(readiness), { status: 409 });
   }
   if (!wf.nodes.some((n) => n.type === "trigger")) {
     return NextResponse.json({ error: "這條流程沒有「開始」節點" }, { status: 400 });
@@ -65,7 +71,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   if (!isValidWorkflowId(id) || !getWorkflow(id)) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
-  if (autorunActive.has(id)) {
+  if (autorunActive.has(id) || hasActiveRepairSession(id)) {
     return NextResponse.json({ error: "這條流程的自動測試/修復正在進行中，等它跑完再停用 LINE 觸發" }, { status: 409 });
   }
   const previousToken = getLineToken(id);

@@ -1,6 +1,7 @@
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import ExcelJS from "exceljs";
 import type { NodeDefinition } from "../types";
 import { PermanentError } from "../types";
@@ -74,6 +75,30 @@ function findColumnByHeader(sheet: ExcelJS.Worksheet, headerRow: number, colCoun
     if (String(sheet.getRow(headerRow).getCell(c).value ?? "").trim() === headerText) return c;
   }
   return 0;
+}
+
+function sourceEvidence(inputPath: string, sheet: ExcelJS.Worksheet, sheetName: string, headerText: string, headerRow: number, dataCount: number) {
+  let sha256: string | null = null;
+  let size: number | null = null;
+  try {
+    const stat = fs.statSync(inputPath);
+    size = stat.size;
+    sha256 = createHash("sha256").update(fs.readFileSync(inputPath)).digest("hex");
+  } catch {
+    // The workbook was already read successfully; evidence stays useful even if stat/hash is unavailable.
+  }
+  return {
+    kind: "file" as const,
+    filename: path.basename(inputPath),
+    sha256,
+    size,
+    sheet: sheetName,
+    headerText,
+    headerRow,
+    rowCount: sheet.rowCount,
+    columnCount: sheet.columnCount,
+    matchedRowCount: dataCount,
+  };
 }
 
 /**
@@ -173,6 +198,7 @@ export const excelProcessNode: NodeDefinition = {
           rowCount: dataCount,
           filename: `${outputName}.xlsx`,
           validationOnly: true,
+          sourceEvidence: sourceEvidence(inputPath, sheet, sheetName, headerText, headerRowIndex, dataCount),
         },
       };
     }
@@ -252,6 +278,14 @@ export const excelProcessNode: NodeDefinition = {
       desktopPath = null;
     }
 
-    return { output: { outputPath, desktopPath, rowCount: dataCount, filename } };
+    return {
+      output: {
+        outputPath,
+        desktopPath,
+        rowCount: dataCount,
+        filename,
+        sourceEvidence: sourceEvidence(inputPath, sheet, sheetName, headerText, headerRowIndex, dataCount),
+      },
+    };
   },
 };

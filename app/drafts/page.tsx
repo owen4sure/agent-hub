@@ -75,6 +75,8 @@ export default function DraftsPage() {
           needsManualLogin: Boolean(data.needsManualLogin),
           importedScheduleCount: data.importedScheduleCount ?? 0,
           skippedScheduleCount: data.skippedScheduleCount ?? 0,
+          importedScenarioCount: data.importedScenarioCount ?? 0,
+          skippedScenarioCount: data.skippedScenarioCount ?? 0,
         });
         router.push(`/workflows/${data.id}`);
       } else {

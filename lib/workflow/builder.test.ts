@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BUILDER_MAX_OUTPUT_TOKENS, bareTechnicalTokens, buildWorkflow, builderGatewayTimeoutMs, builderModelForHistory, describeSuggestedSchedule, effectiveRequirementText, existingGraphEditSystemPrompt, explicitTriggerInputKeys, inferAttachmentRoleHint, isLikelyExistingGraphEdit, looksLikeBrokenStructuredOutput, needsBusinessDataSourceClarification, normalizeBuilderGraphObject, readinessNotes, systemPrompt, trimHistoryForBuilder, userRequirementText, validateSuggestedSchedule, wantsAutoWebhook, wantsFullGraphReplacement, wireManualFileUpload } from "./builder";
+import { BUILDER_MAX_OUTPUT_TOKENS, authorizesImmediateBuild, bareTechnicalTokens, buildWorkflow, builderGatewayTimeoutMs, builderModelForHistory, describeSuggestedSchedule, effectiveRequirementText, existingGraphEditSystemPrompt, explicitTriggerInputKeys, inferAttachmentRoleHint, isLikelyExistingGraphEdit, looksLikeBrokenStructuredOutput, needsBusinessDataSourceClarification, normalizeBuilderGraphObject, readinessNotes, systemPrompt, trimHistoryForBuilder, userRequirementText, validateSuggestedSchedule, wantsAutoWebhook, wantsFullGraphReplacement, wireManualFileUpload } from "./builder";
+import { lintGraph, lintVarRefWarnings } from "./graphLint";
+import { checkRequirements } from "./requirementCheck";
 import type { WorkflowNode } from "./types";
 
 test("builder schedule：接受常用中文需求會產生的排程", () => {
@@ -812,4 +814,384 @@ test("builder 現有流程重建：後續明確指令可以推翻舊限制，驗
   assert.equal(result.phase, "ready");
   assert.equal(calls, 1, "不得因已被推翻的『不要存檔』要求模型再修一輪");
   assert.equal(result.phase === "ready" ? result.nodes.some((node) => node.type === "write-file") : false, true);
+});
+
+test("authorizesImmediateBuild：認得各種等義的『不要再問、用預設直接建』說法，一般敘述不誤觸發", () => {
+  for (const text of [
+    "每次執行時讓我選檔，都用合理預設，直接建圖，不用再問。",
+    "別問了，先做一版出來給我看",
+    "細節你自己決定就好",
+    "剩下的都用預設值",
+    "不必再確認，直接畫流程",
+    "隨你安排，馬上給我流程",
+  ]) assert.equal(authorizesImmediateBuild(text), true, text);
+  for (const text of [
+    "每個月的報表要寄給主管，附件用 Excel。",
+    "如果金額超過一萬就要先問我一次",
+    "把預設的收件人改成我自己",
+  ]) assert.equal(authorizesImmediateBuild(text), false, text);
+});
+
+// 真實踩過的小白阻塞(這次修的主線)：全新空白 workflow，使用者描述「一份月份清單，每個月各自找信→
+// 下載附件→擷取數字→彙整成檔案」，系統照設計先問一次資料來源；使用者明確回答「每次執行時讓我選檔，
+// 都用合理預設，直接建圖，不用再問」之後，平台仍然把模型的下一句反問原封不動丟回畫面，使用者除了
+// 重打同一句話之外完全沒有出路。收斂責任在平台，不能靠模型自律。
+test("builder 小白從零建流程：使用者說「執行時讓我選檔、直接建圖不用再問」之後，必須收斂成可執行的 ready", async () => {
+  const readyGraph = {
+    phase: "ready",
+    message: "已建立逐月處理的流程。",
+    triggerParams: [
+      { key: "filePath", label: "本次要處理的檔案", type: "text", help: "執行時直接選檔即可" },
+      { key: "months", label: "要處理的月份(逗號分隔)", type: "text", default: "2026-05,2026-06" },
+    ],
+    nodes: [
+      { id: "n1", type: "trigger", label: "開始", config: {} },
+      { id: "n2", type: "custom-code", label: "產生月份清單", config: { intent: "把執行時填入的月份字串拆成一份月份清單陣列 monthList，每一項含 label 與搜尋用日期" } },
+      {
+        id: "n3",
+        type: "repeat-steps",
+        label: "逐月找信並擷取數字",
+        config: {
+          items: "{{monthList}}",
+          itemVar: "item",
+          outputKey: "monthlyResults",
+          steps: JSON.stringify([
+            { type: "find-email", label: "找當月的信", config: { date: "{{item.searchDate}}", subjectContains: "月報" } },
+            { type: "download-attachment", label: "下載附件", config: { nameContains: "" } },
+            { type: "custom-code", label: "從附件擷取數字", config: { intent: "讀取剛下載的 Excel 附件，擷取當月數字並回傳 { month, amount }" } },
+          ]),
+        },
+      },
+      { id: "n4", type: "custom-code", label: "彙整每月數字", config: { intent: "把每個月擷取到的數字彙整成一份表格文字 summaryText，含每月一列與總計" } },
+      { id: "n5", type: "write-file", label: "輸出彙整檔案", config: { fileName: "每月彙整.csv", content: "{{summaryText}}" } },
+    ],
+    edges: [
+      { from: "n1", to: "n2" },
+      { from: "n2", to: "n3" },
+      { from: "n3", to: "n4" },
+      { from: "n4", to: "n5" },
+    ],
+  };
+  // 第一輪照舊反問(模型還是想問資料來源)，平台必須自己把它擋下來、要求出圖，不能丟回畫面。
+  const responses = [
+    JSON.stringify({ phase: "clarify", message: "請問這些信件在哪個信箱？資料來源是什麼？" }),
+    JSON.stringify(readyGraph),
+  ];
+  let calls = 0;
+  const client = { chat: { completions: { create: async () => {
+    calls++;
+    return { choices: [{ message: { content: responses.shift() ?? "" }, finish_reason: "stop" }] };
+  } } } } as never;
+
+  const result = await buildWorkflow(
+    client,
+    "test-builder-model",
+    [
+      { role: "user", parts: [{ kind: "text", text: "給我一份月份清單，每個月都要去找那個月的信、下載附件、擷取數字，最後彙整成一份檔案。細節用合理預設。" }] },
+      { role: "assistant", parts: [{ kind: "text", text: "我可以做，但不能替你編業績數字。資料目前在哪裡？" }] },
+      { role: "user", parts: [{ kind: "text", text: "每次執行時讓我選檔，都用合理預設，直接建圖，不用再問。" }] },
+    ],
+    { nodes: [{ id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } }], edges: [] },
+  );
+
+  assert.equal(result.phase, "ready", "使用者已明確授權直接建圖，不能再停在 clarify");
+  assert.equal(calls, 2, "模型的無效反問要被擋下並要求重出，不是直接回給使用者");
+  if (result.phase !== "ready") return;
+
+  // ① 有 repeat-steps 迴圈(不是把同一段步驟複製好幾遍)
+  const loop = result.nodes.find((node) => node.type === "repeat-steps");
+  assert.ok(loop, "月份清單逐項處理必須收成 repeat-steps");
+  // ② 有執行期才提供的檔案輸入參數
+  assert.ok(
+    (result.triggerParams ?? []).some((field) => !field.derived && /file|path|檔|附件/i.test(`${field.key} ${field.label}`)),
+    "「執行時讓我選檔」必須變成執行期的檔案輸入參數",
+  );
+  // ③ 找信／下載附件／擷取／彙整／輸出檔案的結構都在(擷取步驟在迴圈裡)
+  const steps = JSON.parse(String(loop!.config.steps)) as { type: string; config: Record<string, unknown> }[];
+  assert.deepEqual(steps.map((s) => s.type), ["find-email", "download-attachment", "custom-code"]);
+  assert.ok(result.nodes.some((node) => node.type === "custom-code" && /彙整/.test(String(node.config.intent ?? ""))), "要有彙整步驟");
+  assert.ok(result.nodes.some((node) => node.type === "write-file"), "要有輸出檔案步驟");
+  // ④ 沒有虛構資料：不能出現模擬/測試數字的 custom-code
+  assert.equal(
+    JSON.stringify(result.nodes.map((node) => node.config)).match(/模擬|假資料|測試用|synthetic|mock/i),
+    null,
+    "不准用編造的數字冒充真實資料",
+  );
+  // ⑤ 圖必須通過既有的結構檢查、變數來源檢查與需求核對，且訊息裡不留任何 ⚠️ 未達成項
+  assert.deepEqual(lintGraph(result.nodes, result.edges), []);
+  assert.deepEqual(lintVarRefWarnings(result.nodes, result.edges, result.triggerParams), []);
+  const requirementText = "給我一份月份清單，每個月都要去找那個月的信、下載附件、擷取數字，最後彙整成一份檔案。細節用合理預設。\n\n每次執行時讓我選檔，都用合理預設，直接建圖，不用再問。";
+  const unmet = checkRequirements(requirementText, { nodes: result.nodes, edges: result.edges, triggerParams: result.triggerParams }).filter((item) => !item.met);
+  assert.deepEqual(unmet.map((item) => item.key), [], "需求核對不能有未達成項");
+  assert.equal(/⚠️/.test(result.message), false, `回覆不該帶未解析變數或需求核對警告：${result.message}`);
+});
+
+// 迴圈是容器型節點：讀檔/彙整這些步驟被收進 repeat-steps 的 config.steps 之後，只看頂層節點的
+// 需求驗收會把正確的流程判成「檔案根本不會被讀取」，兩輪需求修正燒完就退回 clarify——使用者看到的
+// 症狀跟「AI 一直反問」一模一樣，但根因在確定性檢查本身有盲區(AGENTS.md 容器型節點鐵則③)。
+test("requirementCheck 容器盲區：迴圈內嵌步驟也算真的步驟，不能因為藏在 repeat-steps 裡就判成沒做到", () => {
+  const nested = JSON.stringify([
+    { type: "download-attachment", label: "下載附件", config: {} },
+    { type: "custom-code", label: "讀附件擷取數字", config: { intent: "讀取下載的 Excel 附件並擷取數字" } },
+  ]);
+  const graph = {
+    nodes: [
+      { id: "n1", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
+      { id: "n2", type: "repeat-steps", label: "逐月處理", config: { items: "{{monthList}}", steps: nested }, position: { x: 0, y: 0 } },
+    ],
+    edges: [{ from: "n1", to: "n2" }],
+    triggerParams: [{ key: "filePath", label: "本次要處理的檔案", type: "text" as const }],
+  };
+  const text = "我每次執行時讓我選檔，讀取裡面的數字";
+  const item = checkRequirements(text, graph).find((i) => i.key === "manualFileUpload");
+  assert.ok(item, "應該要有手動選檔這一項");
+  assert.equal(item!.met, true, "讀檔步驟收在 repeat-steps 迴圈裡也是真的讀檔步驟");
+});
+
+// 修 checkRequirements 而沒有把錯誤真的餵回模型，等於只讓清單好看、圖照樣交付。這條測試盯住整條
+// 迴路：模型把 send-email 藏在 repeat-steps 的內嵌步驟裡 → 需求驗收攔下 → **具體的巢狀座標**
+// (loop[步驟N])出現在餵回模型的修正指示裡 → 模型移除那一步之後才收斂成 ready。
+test("builder 否定外送：藏在 repeat-steps 內嵌步驟裡的寄信也要被打回，且具體巢狀座標要餵回模型", async () => {
+  const stepsWithEmail = [
+    { type: "custom-code", label: "整理這一筆", config: { intent: "整理這一筆資料並輸出 summary" } },
+    { type: "send-email", label: "寄出", config: { to: "x@example.com", subject: "結果", body: "{{summary}}" } },
+  ];
+  const stepsClean = [stepsWithEmail[0]];
+  const graph = (steps: unknown[]) => ({
+    phase: "ready",
+    message: "已建立逐筆處理流程。",
+    nodes: [
+      { id: "trigger", type: "trigger", label: "開始", config: {} },
+      { id: "list", type: "custom-code", label: "產生清單", config: { intent: "產生要處理的資料清單 items" } },
+      { id: "loop", type: "repeat-steps", label: "逐筆處理", config: { items: "{{items}}", itemVar: "item", outputKey: "results", steps: JSON.stringify(steps) } },
+    ],
+    edges: [{ from: "trigger", to: "list" }, { from: "list", to: "loop" }],
+  });
+  const responses = [JSON.stringify(graph(stepsWithEmail)), JSON.stringify(graph(stepsClean))];
+  const sentMessages: string[] = [];
+  let calls = 0;
+  const client = { chat: { completions: { create: async (req: { messages: { content: unknown }[] }) => {
+    calls++;
+    sentMessages.push(req.messages.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n"));
+    return { choices: [{ message: { content: responses.shift() ?? "" }, finish_reason: "stop" }] };
+  } } } } as never;
+
+  const result = await buildWorkflow(
+    client,
+    "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "把每一筆資料整理起來就好，不要寄信也不要通知。" }] }],
+    { nodes: [{ id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } }], edges: [] },
+  );
+
+  assert.equal(calls, 2, "第一版藏著寄信步驟，必須被打回重出一次");
+  assert.match(sentMessages[1], /loop\[步驟1\]\(send-email\)/, "餵回模型的修正指示要指名是迴圈裡的第幾步，不能只說『有未授權的寄信』");
+  assert.equal(result.phase, "ready");
+  if (result.phase !== "ready") return;
+  const steps = JSON.parse(String(result.nodes.find((node) => node.id === "loop")?.config.steps)) as { type: string }[];
+  assert.equal(steps.some((step) => step.type === "send-email"), false, "最終交付的圖不得留下未授權的寄信步驟");
+  assert.equal(/⚠️/.test(result.message), false, `收斂後不該還帶未達成警告：${result.message}`);
+});
+
+// 深度政策若只有 lint／需求驗收知道，模型永遠不會學會改——建圖修正迴圈必須真的收到那則錯誤，
+// 而且錯誤裡要有完整 path，模型才知道是「哪一層的哪一步」超限。這條測試盯住整條迴路。
+test("builder 巢狀上限：模型畫出超深的巢狀迴圈時，完整 path 要出現在第二輪 prompt，並收斂成合法圖", async () => {
+  const deepSteps = JSON.stringify([
+    { type: "repeat-steps", label: "再一層", config: { items: "{{sub}}", outputKey: "r2", steps: JSON.stringify([
+      { type: "repeat-steps", label: "又一層", config: { items: "{{sub2}}", outputKey: "r3", steps: JSON.stringify([
+        { type: "send-email", label: "寄出", config: { to: "x@example.com", subject: "s", body: "b" } },
+      ]) } },
+    ]) } },
+  ]);
+  const graph = (steps: string) => ({
+    phase: "ready",
+    message: "已建立逐筆處理流程。",
+    nodes: [
+      { id: "trigger", type: "trigger", label: "開始", config: {} },
+      { id: "list", type: "custom-code", label: "產生清單", config: { intent: "產生要處理的資料清單 items" } },
+      { id: "loop", type: "repeat-steps", label: "逐筆處理", config: { items: "{{items}}", itemVar: "item", outputKey: "results", steps } },
+    ],
+    edges: [{ from: "trigger", to: "list" }, { from: "list", to: "loop" }],
+  });
+  const responses = [
+    JSON.stringify(graph(deepSteps)),
+    JSON.stringify(graph(JSON.stringify([{ type: "custom-code", label: "整理這一筆", config: { intent: "整理這一筆資料並輸出 summary" } }]))),
+  ];
+  const sentMessages: string[] = [];
+  let calls = 0;
+  const client = { chat: { completions: { create: async (req: { messages: { content: unknown }[] }) => {
+    calls++;
+    sentMessages.push(req.messages.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n"));
+    return { choices: [{ message: { content: responses.shift() ?? "" }, finish_reason: "stop" }] };
+  } } } } as never;
+
+  const result = await buildWorkflow(
+    client,
+    "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "每一筆資料都整理一次就好，不要寄信也不要通知。" }] }],
+    { nodes: [{ id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } }], edges: [] },
+  );
+
+  assert.equal(calls, 2, "超深巢狀必須被打回重出一次");
+  assert.match(sentMessages[1], /巢狀層數超過上限/, "lint 的巢狀錯誤要真的進到修正迴圈的 prompt");
+  assert.match(sentMessages[1], /loop\[步驟0\]\[步驟0\]/, "錯誤要帶完整 path，模型才知道是哪一層的哪一步");
+  assert.equal(result.phase, "ready");
+  if (result.phase !== "ready") return;
+  const steps = JSON.parse(String(result.nodes.find((node) => node.id === "loop")?.config.steps)) as { type: string }[];
+  assert.deepEqual(steps.map((s) => s.type), ["custom-code"], "最終交付的圖不得留下超深巢狀或未授權寄信");
+});
+
+// 需求驗收攔到遠端寫入卻沒把錯誤餵回模型，等於只讓清單好看、圖照樣交付。這條盯住整條迴路：
+// 模型在「只讀」需求下偷塞 google-sheet-append → 需求驗收攔下 → 具體節點 path 進到第二輪 prompt
+// → 模型移除後才收斂成 ready。
+test("builder 未授權遠端寫入：只讀需求下模型偷塞 google-sheet-append，要被打回且 path 進到第二輪 prompt", async () => {
+  const base = {
+    nodes: [
+      { id: "trigger", type: "trigger", label: "開始", config: {} },
+      { id: "read", type: "google-sheet-read", label: "讀取資料", config: { sheetUrl: "https://docs.google.com/spreadsheets/d/abc/edit" } },
+      { id: "calc", type: "custom-code", label: "計算", config: { intent: "計算每個部門的加總與平均" } },
+    ],
+    edges: [{ from: "trigger", to: "read" }, { from: "read", to: "calc" }],
+  };
+  const withWrite = {
+    phase: "ready",
+    message: "已建立。",
+    nodes: [...base.nodes, { id: "back", type: "google-sheet-append", label: "寫回試算表", config: { sheetUrl: "https://docs.google.com/spreadsheets/d/abc/edit", values: "{{total}}" } }],
+    edges: [...base.edges, { from: "calc", to: "back" }],
+  };
+  const responses = [JSON.stringify(withWrite), JSON.stringify({ phase: "ready", message: "已改成只讀取和計算。", ...base })];
+  const sentMessages: string[] = [];
+  let calls = 0;
+  const client = { chat: { completions: { create: async (req: { messages: { content: unknown }[] }) => {
+    calls++;
+    sentMessages.push(req.messages.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n"));
+    return { choices: [{ message: { content: responses.shift() ?? "" }, finish_reason: "stop" }] };
+  } } } } as never;
+
+  const result = await buildWorkflow(
+    client,
+    "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "讀這份 Google 試算表 https://docs.google.com/spreadsheets/d/abc/edit 幫我算每個部門的加總，只讀取資料，不要修改、不要產出檔案。" }] }],
+    { nodes: [{ id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } }], edges: [] },
+  );
+
+  assert.equal(calls, 2, "未授權的遠端寫入必須被打回重出一次");
+  assert.match(sentMessages[1], /back\(google-sheet-append\)/, "餵回模型的修正指示要指名是哪個節點，不能只說『有未授權的寫入』");
+  assert.equal(result.phase, "ready");
+  if (result.phase !== "ready") return;
+  assert.equal(result.nodes.some((node) => node.type === "google-sheet-append"), false, "最終交付的圖不得留下未授權的遠端寫入");
+  assert.equal(/⚠️/.test(result.message), false, `收斂後不該還帶未達成警告：${result.message}`);
+});
+
+// 只讀需求下把寫入藏進子流程，是需求驗收看不到本流程節點型別就放行的典型繞過。這條盯住整條迴路：
+// 需求驗收攔下 → **完整呼叫路徑**進到第二輪 prompt → 模型改成不呼叫那條子流程後才收斂。
+// 這裡刻意用一個確定不存在的子流程名稱，讓測試不依賴這台機器 data/workflows 的實際內容：
+// 「查不到 = fail closed」本身就是要驗的行為之一。
+test("builder 子流程繞過：只讀需求下呼叫來路不明的子流程要被打回，路徑要進第二輪 prompt", async () => {
+  const base = {
+    nodes: [
+      { id: "trigger", type: "trigger", label: "開始", config: {} },
+      { id: "read", type: "google-sheet-read", label: "讀取資料", config: { sheetUrl: "https://docs.google.com/spreadsheets/d/abc/edit" } },
+      { id: "calc", type: "custom-code", label: "計算", config: { intent: "計算每個部門的加總與平均" } },
+    ],
+    edges: [{ from: "trigger", to: "read" }, { from: "read", to: "calc" }],
+  };
+  const withSub = {
+    phase: "ready",
+    message: "已建立。",
+    nodes: [...base.nodes, { id: "runChild", type: "run-workflow", label: "呼叫共用流程", config: { target: "不存在的共用寫入流程-測試用" } }],
+    edges: [...base.edges, { from: "calc", to: "runChild" }],
+  };
+  const responses = [JSON.stringify(withSub), JSON.stringify({ phase: "ready", message: "已改成只讀取和計算。", ...base })];
+  const sentMessages: string[] = [];
+  let calls = 0;
+  const client = { chat: { completions: { create: async (req: { messages: { content: unknown }[] }) => {
+    calls++;
+    sentMessages.push(req.messages.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n"));
+    return { choices: [{ message: { content: responses.shift() ?? "" }, finish_reason: "stop" }] };
+  } } } } as never;
+
+  const result = await buildWorkflow(
+    client,
+    "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "讀這份 Google 試算表 https://docs.google.com/spreadsheets/d/abc/edit 算每個部門的加總，只讀取資料，不要修改。" }] }],
+    { nodes: [{ id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } }], edges: [] },
+  );
+
+  assert.equal(calls, 2, "看不透的子流程呼叫必須被打回重出一次");
+  assert.match(sentMessages[1], /runChild/, "餵回模型的修正指示要指名是哪個子流程呼叫節點");
+  assert.match(sentMessages[1], /無法確認/, "要講清楚是「看不到所以不能放行」，模型才不會以為只要換個名字就好");
+  assert.equal(result.phase, "ready");
+  if (result.phase !== "ready") return;
+  assert.equal(result.nodes.some((node) => node.type === "run-workflow"), false, "最終交付的圖不得留下無法確認的子流程呼叫");
+});
+
+// 「等使用者確認」跟「圖不安全」必須分開：AI 建議唯讀的查詢步驟不能被修正迴圈逼著刪掉。
+test("builder 唯讀待確認：AI 建議唯讀的 POST 不得被修正迴圈當成錯誤而刪除，一次就收斂", async () => {
+  let calls = 0;
+  const client = { chat: { completions: { create: async () => {
+    calls++;
+    return { choices: [{ message: { content: JSON.stringify({
+      phase: "ready",
+      message: "已建立只讀取的流程。",
+      nodes: [
+        { id: "trigger", type: "trigger", label: "開始", config: {} },
+        { id: "query", type: "http-request", label: "查詢資料庫", config: { method: "POST", url: "https://api.notion.com/v1/databases/abc/query", headers: "{}", body: "{}", readOnly: true } },
+        { id: "calc", type: "custom-code", label: "整理", config: { intent: "整理查詢結果並計算筆數" } },
+      ],
+      edges: [{ from: "trigger", to: "query" }, { from: "query", to: "calc" }],
+    }) }, finish_reason: "stop" }] };
+  } } } } as never;
+
+  const result = await buildWorkflow(
+    client,
+    "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "用 Notion API 查詢資料庫內容並統計筆數，只讀取資料，不要修改。" }] }],
+    { nodes: [{ id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } }], edges: [] },
+  );
+
+  assert.equal(calls, 1, "『等使用者確認』不是模型的錯，不該逼它重跑一輪");
+  assert.equal(result.phase, "ready");
+  if (result.phase !== "ready") return;
+  assert.equal(result.nodes.some((node) => node.id === "query"), true, "使用者需要的查詢步驟不得被刪掉");
+  assert.match(result.message, /🔒/, "核對清單要讓使用者看到「這一項在等你確認」");
+});
+
+// 失敗備援是流程層級的設定、不是節點——模型可以在 phase:"ready" 直接帶 onFailureWorkflow。
+// 只讀需求下它指向一條看不透的流程時，必須跟 run-workflow 一樣被打回，且路徑要進第二輪 prompt。
+test("builder 失敗備援繞過：只讀需求下 onFailureWorkflow 指向看不透的流程要被打回", async () => {
+  const base = {
+    nodes: [
+      { id: "trigger", type: "trigger", label: "開始", config: {} },
+      { id: "read", type: "google-sheet-read", label: "讀取資料", config: { sheetUrl: "https://docs.google.com/spreadsheets/d/abc/edit" } },
+      { id: "calc", type: "custom-code", label: "計算", config: { intent: "計算每個部門的加總與平均" } },
+    ],
+    edges: [{ from: "trigger", to: "read" }, { from: "read", to: "calc" }],
+  };
+  const responses = [
+    JSON.stringify({ phase: "ready", message: "已建立。", ...base, onFailureWorkflow: "不存在的失敗通知流程-測試用" }),
+    JSON.stringify({ phase: "ready", message: "已拿掉失敗備援。", ...base }),
+  ];
+  const sentMessages: string[] = [];
+  let calls = 0;
+  const client = { chat: { completions: { create: async (req: { messages: { content: unknown }[] }) => {
+    calls++;
+    sentMessages.push(req.messages.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n"));
+    return { choices: [{ message: { content: responses.shift() ?? "" }, finish_reason: "stop" }] };
+  } } } } as never;
+
+  const result = await buildWorkflow(
+    client,
+    "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "讀這份 Google 試算表 https://docs.google.com/spreadsheets/d/abc/edit 算每個部門的加總，只讀取資料，不要修改。" }] }],
+    { nodes: [{ id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } }], edges: [] },
+  );
+
+  assert.equal(calls, 2, "看不透的失敗備援必須被打回重出一次");
+  // 目標查不到時還沒有子流程 id 可以接在後面，路徑就是 onFailureWorkflow 本身；重點是模型要知道
+  // 問題出在「失敗備援設定」這個流程層級欄位，而不是圖上某個節點。
+  assert.match(sentMessages[1], /onFailureWorkflow\(找不到流程「不存在的失敗通知流程-測試用」/, "餵回模型的修正指示要指出問題在失敗備援設定與是哪一個 target");
+  assert.match(sentMessages[1], /無法確認|找不到流程/, "要講清楚是「看不到所以不能放行」");
+  assert.equal(result.phase, "ready");
+  if (result.phase !== "ready") return;
+  assert.equal(result.phase === "ready" ? result.onFailureWorkflow : undefined, undefined, "最終交付的圖不得留下無法確認的失敗備援");
 });

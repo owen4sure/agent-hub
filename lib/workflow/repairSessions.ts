@@ -60,6 +60,16 @@ interface RepairSessionRow {
 }
 
 /**
+ * 所有會改 workflow 的 API 共用這個查詢，而不是各自只看進程內的 Set。
+ * 常駐 daemon 與使用者手動開的 dev server 會共用同一顆 SQLite；只要資料庫裡
+ * 有一筆 owner_pid 仍活著的修復 session，另一個進程就必須讓路。
+ */
+export function hasActiveRepairSession(workflowId: string): boolean {
+  const rows = getDb().prepare(`SELECT owner_pid FROM repair_sessions WHERE workflow_id = ?`).all(workflowId) as { owner_pid: number }[];
+  return rows.some((row) => isPidAlive(row.owner_pid));
+}
+
+/**
  * 啟動時掃描孤兒修復session：owner_pid 已死代表上次那個迴圈連自己的還原都沒機會跑。
  * 同一條流程可能疊了好幾筆孤兒紀錄(連續好幾次都在半路被中斷)——只還原成「最舊那筆」記錄的快照
  * (最早、最可能是乾淨的起點)，而不是逐筆疊還原，避免中間某筆快照其實也是別筆未驗證改動的結果。

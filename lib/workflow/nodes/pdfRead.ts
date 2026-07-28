@@ -3,6 +3,7 @@ import pdfParse from "pdf-parse";
 import type { NodeDefinition } from "../types";
 import { PermanentError } from "../types";
 import { cfgStr } from "../nodeHelpers";
+import { fileSourceEvidence } from "../runtimeEvidence";
 
 /**
  * 讀一個 PDF 檔，抽出裡面的純文字。發票/報表常常是 PDF 而不是 Excel，
@@ -32,6 +33,12 @@ export const pdfReadNode: NodeDefinition = {
       throw new PermanentError(`這個檔案不是有效的 PDF，或已損毀：${err instanceof Error ? err.message : String(err)}`);
     }
     ctx.log(`讀到 ${result.numpages} 頁，共 ${result.text.length} 字`);
-    return { output: { text: result.text, numPages: result.numpages } };
+    return {
+      output: {
+        text: result.text,
+        numPages: result.numpages,
+        sourceEvidence: fileSourceEvidence(inputPath, { numPages: result.numpages, textChars: result.text.length }),
+      },
+    };
   },
 };

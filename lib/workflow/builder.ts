@@ -21,6 +21,7 @@ import { KNOWN_WORKING_MODELS, MODELS, VISION_MODELS, supportsVision } from "../
 import { plainLanguage } from "./plainLanguage";
 import { parseCron } from "../cron";
 import { hasStructureChanges, planGraphStructureEdits, type GraphStructureEdits } from "./graphStructure";
+import { storeSubflowResolver } from "./subflowResolver";
 
 export type MessagePart =
   | { kind: "text"; text: string }
@@ -422,7 +423,10 @@ export function wireManualFileUpload(
   // 在執行期直接讀 ctx.input.filePath，只要 triggerParams 宣告了 filePath，custom-code 就能透過
   // ctx.input 自動拿到(鐵則 6a：上游欄位一律沿整條鏈往下傳)，不需要、也無法像內建節點那樣硬塞 config。
   // 用 hasCustomCodeFileReader 判斷「這是不是讀檔用的 custom-code」，跟 checkRequirements 共用同一個
-  // 判斷式，避免這裡覺得已經處理好、驗收那邊卻認不得，兩邊各自認定不一致。
+  // 判斷式，避免這裡覺得已經處理好、驗收那邊卻認不得，兩邊各自認定不一致。它會連 repeat-steps 內嵌
+  // 步驟一起看(見 flattenGraphNodes)——「每個月各自下載附件再讀取」這種需求，讀檔步驟本來就該收在
+  // 迴圈裡。上面那段「直接把 {{filePath}} 塞進 config」刻意只處理頂層內建節點：迴圈內嵌步驟讀的是
+  // 每一輪自己抓到的那份檔案，硬塞使用者這次選的路徑會把整個迴圈改成重複讀同一個檔。
   if (!hasCustomCodeFileReader(nodes)) return { nodes, triggerParams };
   // 對帳/比對兩份資料這類天生需要一次上傳多個檔案的情境，AI 自己回傳的 JSON 常常已經正確宣告好
   // 語意化的檔案參數(如 orderFile/bankFile)，custom-code 的 intent 也已經引用這些名稱。這種情況
@@ -457,6 +461,45 @@ export function needsBusinessDataSourceClarification(requirementText: string, ha
   const impliedMailAttachment = /收到|寄來|寄給我|信箱|郵件|email|mail/i.test(requirementText) && /附件/.test(requirementText);
   return !(explicitSource || impliedMailAttachment);
 }
+
+/**
+ * 使用者已經明確授權「不要再問了，用合理預設直接把流程建出來」。
+ *
+ * 這是小白最容易卡死的地方：他已經把需求講完、也回答過一次澄清，接著明說「直接建圖，不用再問」，
+ * 但平台只有兩道很窄的護欄擋得住無效反問(必須附了範例檔、或模型剛好回了四句寫死的罐頭句之一)，
+ * 其餘一律原封不動把 clarify 丟回畫面——使用者除了再打一次同樣的話之外沒有任何出路(真實踩過)。
+ *
+ * 刻意用「多組等義訊號各自獨立成立」而不是比對特定句子：使用者不會照系統想像的措辭講話，
+ * 「不用再問」「別問了」「你決定就好」「都用預設」「直接建」表達的是同一件事。誤判的代價很小
+ * (最多是 AI 先出一版帶假設清單的草稿，本來就是 clarifyCapNote 連問三輪後的既定行為)，
+ * 漏判的代價則是使用者完全卡住，所以這裡刻意寬鬆。
+ */
+export function authorizesImmediateBuild(text: string): boolean {
+  const t = text.replace(/\s+/g, "");
+  // ①明講不要再問(不用再問／別問了／不必確認／不用來回)
+  if (/(?:不用|不要|不必|無需|不需|別|毋須)(?:再)?(?:問|反問|追問|確認|來回)/.test(t)) return true;
+  // ②明講直接動手(直接建圖／先做一版／馬上產出流程／先畫出來)
+  if (/(?:直接|先|馬上|立刻|現在就|趕快|盡量)[^。\n]{0,6}(?:建|做|畫|產|生成|給我|出一版|來一版)[^。\n]{0,6}(?:圖|流程|工作流|草稿|一版|出來)/.test(t)) return true;
+  // ③明講用預設值(都用合理預設／照預設來／取預設值)
+  if (/(?:用|按|照|取|給|走)[^。\n]{0,4}(?:合理(?:的)?預設|預設值|預設就好|預設即可|預設設定)/.test(t)) return true;
+  if (/合理預設|合理的預設值?/.test(t)) return true;
+  // ④明講交給 AI 判斷(你決定／你判斷／隨你／看著辦／自己安排)
+  if (/(?:你|AI|系統)(?:自己)?(?:決定|判斷|安排|挑|選就好|看著辦)|隨(?:你|便)|由你(?:決定|判斷|安排)/.test(t)) return true;
+  return false;
+}
+
+/**
+ * 使用者已授權直接建圖時，餵給模型的確定性契約——system prompt(第一輪就講)與修正迴圈(模型還是
+ * 反問時餵回)共用同一份，兩邊講的話不能不一樣。內容刻意只描述「平台有什麼能力、什麼絕對不准做」，
+ * 不描述任何特定業務情境，才不會把某一次的需求寫死成通用規則。
+ */
+const IMMEDIATE_BUILD_CONTRACT =
+  "使用者已經明確授權「用合理預設直接建圖、不要再反問」。這一輪禁止回 phase:\"clarify\"，一定要回 phase:\"ready\" 的完整流程圖：\n" +
+  "①還沒拿到的資料一律做成「執行時才提供」的輸入，不是繼續追問：使用者說「執行時讓我選檔／到時候再給檔案」時，在 triggerParams 宣告檔案類參數(例如 key:\"filePath\"、label:\"本次要處理的檔案\"、type:\"text\")，讀檔/Excel/PDF 節點的路徑欄位填 {{filePath}}。這是手動選檔，不是資料夾監聽——不要追問資料夾絕對路徑，也不要填 trigger.watchPath。\n" +
+  "①-2 但**使用者本來就描述過的步驟要原樣保留**(例如去信箱找那個月的信、下載附件、上網抓資料)：「執行時提供檔案」只是把缺的那一份資料來源補上，不是把整條流程改寫成「只讀一個本機檔」。不要為了簡化而刪掉使用者明講過的環節。\n" +
+  "②絕對不准自己編造任何業務數字、假 Excel 或測試資料，也不准假裝已經讀到檔案內容；沒有的東西就做成上面那種執行期輸入。\n" +
+  "③需求是「對一份清單裡的每一項重複做同一組步驟」時，用 repeat-steps 節點收成一份定義(items 引用上游那份清單，steps 裡用 {{item}}／{{item.欄位}} 取當次項目)，不要把同一段步驟複製好幾遍。\n" +
+  "④你做的假設用條列寫在 message 讓使用者核對，不要用反問代替假設。";
 
 /**
  * 建好圖之後的「可執行性提示」:告訴使用者這條流程是「馬上能測」還是「還缺什麼」——
@@ -994,6 +1037,7 @@ ${runtimeSection(rc)}
 - **GitHub**:PAT(secret 欄名 githubToken)。開 issue=POST https://api.github.com/repos/{owner}/{repo}/issues。**讀 issues/內容=GET 同類網址(同一組 Authorization),{{body}} 餵 AI**。
 - **Google Drive/Calendar 寫入**:跟「寫入 Google 試算表」同一招——使用者在自己的 Apps Script 部署一個 doPost 網頁應用程式(可存檔到 Drive/建日曆事件),流程 POST 過去。在 message 裡講清楚這個做法。
 - 通用原則:API 金鑰一律放共用帳密(宣告 requiresSecrets 讓設定頁長出欄位),節點 headers/body 用 {{金鑰欄名}} 引用;不確定某服務的 API 細節就在 message 裡老實說明你用的端點與假設。
+- **只是查詢卻要用 POST 的端點**(如上面 Notion 的 /databases/{id}/query):在那個 http-request 節點的 config 加 "readOnly": true。系統預設把所有 POST/PUT/PATCH/DELETE 當成「會改動對方資料」——安全試跑會整步略過它、使用者說「只讀取/不要修改」時需求驗收也會擋下來。**只有真的不會改動對方資料的查詢端點才可以加這個宣告**;會建立/更新/刪除資料的呼叫絕對不准加(那等於騙過安全機制真的把資料寫出去)。網址看起來像查詢不算數,一定要明確宣告。
 
 - 使用者說「給同事一個網頁表單填,填完就跑」：這是表單觸發——系統會在套用時**自動啟用並把表單網址顯示給使用者**。**表單的欄位=這條流程的 triggerParams**:把要填的欄位宣告成 triggerParams(key/label/type/select 選項),下游用 {{key}} 引用;沒宣告參數時表單只有一個通用「備註」欄({{note}})。
 
@@ -1151,9 +1195,15 @@ export async function buildWorkflow(
   const hasAttachedResource = fullHistory.some((message) =>
     message.role === "user" && message.parts.some((part) => part.kind === "file" || part.kind === "image"),
   );
+  // 使用者已經明確說「用合理預設直接建、不要再問」，而且我們**先前已經問過一次**了——再問第二次
+  // 就是把使用者困在原地(他除了重打同一句話沒有別的出路)。這時不再擋，改由 IMMEDIATE_BUILD_CONTRACT
+  // 要求模型把「還沒拿到的資料」做成執行期輸入；「不准編造業務數字」的底線由那份契約 + 需求驗收的
+  // realBusinessData 這項繼續守住，不是放行造假。第一輪(還沒問過)仍照常問一次，那一次是必要的。
+  const buildNowAuthorized = authorizesImmediateBuild(requirementText);
+  const alreadyClarifiedOnce = fullHistory.some((message) => message.role === "assistant" && !message.isControl);
   // 從零建立時，沒有真實業務數據來源不能靠合理預設補齊；這不是技術細節，而是會直接決定
   // 流程內容正不正確的唯一關鍵事。直接白話詢問，避免白等模型、避免它反問投影片版型或造假。
-  if (currentGraph.nodes.length <= 1 && needsBusinessDataSourceClarification(requirementText, hasAttachedResource)) {
+  if (currentGraph.nodes.length <= 1 && !(buildNowAuthorized && alreadyClarifiedOnce) && needsBusinessDataSourceClarification(requirementText, hasAttachedResource)) {
     return {
       phase: "clarify",
       // 這句是所有「數字類需求但沒說資料來源」的通用回覆，不能寫死特定情境的下一步(如投影片張數)——
@@ -1187,6 +1237,9 @@ export async function buildWorkflow(
     assistantTurns >= 3 && nothingBuiltYet
       ? `\n\n【重要】你已經反問使用者 ${assistantTurns} 輪了。這一輪請直接輸出流程圖(phase:"ready")：還不確定的細節用合理預設值，並在 message 裡條列你做的假設請使用者確認。只有「缺了就完全無法動工」的資訊(例如要登入哪個網站)才允許再問。`
       : "";
+  // 使用者已經自己喊停反問時，不必等連問三輪才收斂——第一次呼叫模型就把契約講明白，比讓它先回一次
+  // 無效的 clarify、再靠修正迴圈糾正省一整輪往返(對正在等的使用者就是省下幾十秒的空等)。
+  const immediateBuildNote = nothingBuiltYet && buildNowAuthorized ? `\n\n【重要】${IMMEDIATE_BUILD_CONTRACT}` : "";
   // 社群藍圖檢索:用最新一則使用者需求對 community/index.json(n8n 社群庫 2000+ 條的 metadata)
   // 做關鍵字檢索,把最相近的幾條當「同型流程參考」注入——使用者問到任何常見自動化,
   // 模型手上都有真實世界的結構藍圖可對照,不用憑空想步驟拆法。索引缺檔時回空字串,功能靜默停用。
@@ -1196,7 +1249,7 @@ export async function buildWorkflow(
   const gatewayTimeoutMs = builderGatewayTimeoutMs(useEditPrompt);
   const fullSystemPrompt = (useEditPrompt
     ? existingGraphEditSystemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph, currentGraph.inheritedContext, currentGraph.confirmedRules)
-    : systemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph, currentGraph.inheritedContext, currentGraph.confirmedRules) + communityRefs + clarifyCapNote
+    : systemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph, currentGraph.inheritedContext, currentGraph.confirmedRules) + communityRefs + clarifyCapNote + immediateBuildNote
   ) + secretsStatusSection(currentGraph.requiredSecretsStatus);
   console.info("[workflow-builder] context", {
     systemChars: fullSystemPrompt.length,
@@ -1337,7 +1390,10 @@ export async function buildWorkflow(
     const compact = message.replace(/[，,。！!？?\s]/g, "");
     return ["我需要更多資訊可以再描述一下嗎", "我需要更多資訊請再描述一下", "資訊不足請再描述一下", "請再描述一下"].includes(compact);
   };
-  const hasConcreteInitialRequest = nothingBuiltYet && latestUserText.trim().length >= 16 && /(?:上傳|選擇|拖曳|讀取|抓取|整理|計算|彙整|寄|填|更新|建立|產生|通知|提醒|監聽|每天|每週|每月|自動)/.test(latestUserText);
+  // 用「累積到現在的整份需求」判斷需求夠不夠具體，不能只看最後一則訊息：從零建圖時具體需求幾乎都在
+  // 第一輪講完，後面幾輪都是在回答澄清(「每次執行時讓我選檔」這種回答本身短又不像完整需求)。真實踩過：
+  // 只看最後一句，使用者一旦回答過澄清，這個旗標就永遠是 false，罐頭反問的護欄從第二輪起完全失效。
+  const hasConcreteInitialRequest = nothingBuiltYet && requirementText.trim().length >= 16 && /(?:上傳|選(?:擇|檔)?|拖曳|讀取|抓取|整理|計算|彙整|寄|填|更新|建立|產生|通知|提醒|監聽|每天|每週|每月|自動)/.test(requirementText);
 
   for (let attempt = 0; attempt <= MAX_CORRECTIONS; attempt++) {
     onStage?.(
@@ -1563,8 +1619,16 @@ export async function buildWorkflow(
           // ── 需求完整性驗收(GPT 體檢 #2):lint 保證「圖合法」,這裡保證「需求有做到」。
           //    確定性規則從使用者原話抽契約(簽核/門檻/通知/存檔/排程…),沒對應到的餵回模型補一次;
           //    補完(或補不動)都把 ✓/✗ 清單附在回覆——沒做到的事要明講,不能默默當建好。 ──
-          const reqItems = checkRequirements(requirementText, { nodes, edges, triggerParams, schedule, onFailureWorkflow });
-          const unmet = reqItems.filter((i) => !i.met);
+          // 注入子流程 resolver：requirementCheck 自己不能碰檔案系統(見 subflowEffects.ts)，但建圖時
+          // 一定要看得到「被呼叫的那條流程裡有沒有寫入」，否則把寫入藏進子流程就繞過只讀限制(P0)。
+          const reqItems = checkRequirements(
+            requirementText,
+            { nodes, edges, triggerParams, schedule, onFailureWorkflow },
+            { resolveSubflow: storeSubflowResolver },
+          );
+          // needsUser 的項目(AI 建議唯讀的 POST 還等使用者確認)不算「模型沒做到」——它不是模型能
+          // 修的事，餵回去只會讓模型把使用者真正需要的查詢步驟刪掉來消除警告。仍會顯示在核對清單裡。
+          const unmet = reqItems.filter((i) => !i.met && !i.needsUser);
           if (unmet.length > 0) {
             // 「還缺需求」絕不是可交付的 ready。以前修正輪數用完後會掉進下面的
             // ready 分支，讓畫面宣稱流程已建好，實際卻把「每週手動上傳」做成沒有人
@@ -1616,6 +1680,10 @@ export async function buildWorkflow(
         lastProblems = [
           "使用者已附範例檔且明講每次執行會手動上傳/選檔；這不是資料夾監聽，禁止追問資料夾或絕對路徑。請直接回 phase:ready：triggerParams 必須有 filePath(text、label=本次要處理的檔案)，讀檔/Excel/PDF 節點 path 用 {{filePath}}；不要填 trigger.watchPath。",
         ];
+      } else if (nothingBuiltYet && buildNowAuthorized) {
+        // 使用者已經明確喊停反問，模型卻還在問。這不是使用者需要回答的缺口，是模型沒收斂——
+        // 直接把契約餵回去要求出圖，不能再把同一類問題丟回畫面(他已經沒有別的話可以講了)。
+        lastProblems = [IMMEDIATE_BUILD_CONTRACT];
       } else if (hasConcreteInitialRequest && genericClarify(clarifyMessage)) {
         lastProblems = [
           "使用者的需求已經具體，但你只回了沒有指出任何缺口的罐頭反問。不要把資料格式、欄位位置或技術設定丟回給使用者；請用合理預設直接產出 phase:ready 的可安全試跑流程。若需要假設，寫在 message 讓使用者核對，不要回 phase:clarify。",

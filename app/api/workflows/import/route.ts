@@ -3,9 +3,12 @@ import { randomUUID } from "node:crypto";
 import { getWorkflow, listWorkflows, saveWorkflow } from "@/lib/workflow/store";
 import { getWorkflowSecrets } from "@/lib/settingsStore";
 import { createSchedule, updateSchedule, isValidCron } from "@/lib/scheduler";
+import { clearHttpReadOnlyApprovals } from "@/lib/workflow/httpReadOnlyApproval";
+import { clearSafetyContract } from "@/lib/workflow/safetyContract";
 import { DEFAULT_MODEL } from "@/lib/models";
 import { lintGraph } from "@/lib/workflow/graphLint";
 import type { Workflow, WorkflowNode, WorkflowEdge, ParamField } from "@/lib/workflow/types";
+import { importPortableScenarios } from "@/lib/workflow/scenarioTests";
 
 function bad() {
   return NextResponse.json({ error: "匯入的檔案格式不正確" }, { status: 400 });
@@ -149,6 +152,13 @@ export async function POST(req: Request) {
     edges: edges as WorkflowEdge[],
   };
   saveWorkflow(wf);
+  // 使用者的「這個 POST 只是查詢」確認絕不可以跟著匯入檔跑到這台機器上：那是**這台機器的使用者**
+  // 對某一份精確請求做的安全批准，不是流程定義的一部分。確認存在 DB(不在 workflow JSON 裡)，所以
+  // 匯入檔本來就帶不進來；這裡再明確清一次，避免「新流程沿用到舊 id 的殘留批准」這種邊界情況。
+  clearHttpReadOnlyApprovals(newId);
+  // 只讀保護契約同理：那是**這台機器的使用者**對某一條流程做的授權決定，不是流程定義的一部分，
+  // 不能跟著匯入檔跑過來，也不能讓新流程沿用到舊 id 的殘留契約。
+  clearSafetyContract(newId);
 
   // 排程不在 workflow JSON 裡(獨立的 schedules 表，見 export/route.ts 的說明)，這裡把匯出檔帶的
   // schedules 欄位還原成新流程底下的排程。單筆 cron 格式不合法就跳過那一筆、不擋掉整個匯入
@@ -167,6 +177,10 @@ export async function POST(req: Request) {
     }
   }
 
+  const passport = isObj(body.verificationPassport) ? body.verificationPassport : null;
+  const passportScenarios = passport && passport.version === 1 ? passport.scenarios : null;
+  const importedPassport = importPortableScenarios(newId, passportScenarios);
+
   // saveWorkflow 內部會用 deriveRequiresSecrets 依實際節點圖重算 requiresSecrets(比外來檔案
   // 宣告的更準確)，回應前重讀一次存好的版本才能算出真正還缺哪些帳密——不能直接用上面組的
   // wf.requiresSecrets，那是匯入檔案宣告的舊值，可能跟實際節點需要的不一致。
@@ -182,5 +196,7 @@ export async function POST(req: Request) {
     needsManualLogin: counters.needsManualLogin,
     importedScheduleCount,
     skippedScheduleCount,
+    importedScenarioCount: importedPassport.imported,
+    skippedScenarioCount: importedPassport.skipped,
   });
 }

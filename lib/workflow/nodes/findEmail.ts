@@ -3,6 +3,7 @@ import fs from "node:fs";
 import type { NodeDefinition, NodeContext } from "../types";
 import { PermanentError } from "../types";
 import { cfgStr } from "../nodeHelpers";
+import { mailSourceEvidence } from "../runtimeEvidence";
 
 async function saveDebug(ctx: NodeContext, step: string) {
   const dir = path.join(ctx.debugDir, ctx.nodeId);
@@ -128,7 +129,7 @@ export const findEmailNode: NodeDefinition = {
       await cells.nth(pick).click({ timeout: 10000 });
       await page.waitForTimeout(1500);
       await saveDebug(ctx, "02-opened");
-      return { output: { found: count, subject, date: usedDay } };
+      return { output: { found: count, subject, date: usedDay, sourceEvidence: mailSourceEvidence(`webmail:${subject}:${usedDay}:${count}`, "Webmail 搜尋結果", { found: count, matchedRowCount: 1 }) } };
     }
 
     // 報表信是每天寄的，但週末/國定假日不一定有。若「指定的那一天」剛好沒有(例如月底最後一天正好是週日)，
@@ -179,6 +180,6 @@ export const findEmailNode: NodeDefinition = {
     await cell.first().click({ timeout: 10000 });
     await page.waitForTimeout(1500);
     await saveDebug(ctx, "02-opened");
-    return { output: { found: count, subject, date: usedDate } };
+    return { output: { found: count, subject, date: usedDate, sourceEvidence: mailSourceEvidence(`webmail:${lastQuery}:${usedDate}:${count}`, "Webmail 搜尋結果", { found: count, matchedRowCount: 1 }) } };
   },
 };

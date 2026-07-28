@@ -3,7 +3,9 @@ import { getDb } from "./db";
 import { resumeRun, startWorkflowRun } from "./workflow/engine";
 import { getWorkflow } from "./workflow/store";
 import { resolveParams } from "./relativeDate";
+import { getAutomationReadiness } from "./workflow/automationReadiness";
 import { sweepExpiredApprovals } from "./approvals";
+import { sweepHealthChecks } from "./workflow/healthCheck";
 
 export interface ScheduleRow {
   id: string;
@@ -266,6 +268,11 @@ function tick() {
   } catch (err) {
     console.error("[scheduler] 失敗自動重跑掃描失敗:", err);
   }
+  try {
+    sweepHealthChecks();
+  } catch (err) {
+    console.error("[scheduler] 健康巡檢掃描失敗:", err);
+  }
   const dt = taipeiParts(now);
   const minuteKey = `${dt.year}-${pad(dt.month)}-${pad(dt.day)}T${pad(dt.hour)}:${pad(dt.minute)}`;
   const nowStr = `${dt.year}-${pad(dt.month)}-${pad(dt.day)} ${pad(dt.hour)}:${pad(dt.minute)}`;
@@ -283,6 +290,12 @@ function tick() {
       // 會自然開始生效，跟資料夾／收信監聽的產品語意一致。
       if (wf.status !== "official") {
         db.prepare(`UPDATE schedules SET next_run_at = ? WHERE id = ?`).run(computeNextRun(sched.cron, now), sched.id);
+        continue;
+      }
+      const readiness = getAutomationReadiness(wf, "scheduler");
+      if (!readiness.ready) {
+        // 不搶佔 last_fired_minute：完成檢查後，下一個 tick 仍能補跑這次排程。
+        console.warn(`[scheduler] ${wf.name}: 自動觸發檢查未通過，暫停背景排程 (${readiness.items[0]?.title ?? "未知原因"})`);
         continue;
       }
 

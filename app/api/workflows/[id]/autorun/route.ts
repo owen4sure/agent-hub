@@ -9,7 +9,7 @@ import { applyGraphStructureEdits, type GraphStructureEdits } from "@/lib/workfl
 import { checkOscillation, computeEditFingerprint } from "@/lib/workflow/oscillationGuard";
 import { runWorkflowAndWait, classifyFailure, getMissingWorkflowSettings, isUserCancelled, getVarWarnings } from "@/lib/workflow/engine";
 import { autorunActive, loopCancelRequested, loopAbortControllers } from "@/lib/workflow/busyLocks";
-import { beginRepairSession, endRepairSession } from "@/lib/workflow/repairSessions";
+import { beginRepairSession, endRepairSession, hasActiveRepairSession } from "@/lib/workflow/repairSessions";
 import { recordFix } from "@/lib/workflow/learnedFixes";
 import { checkRunSemantics, verifyAgainstExpected } from "@/lib/workflow/resultCheck";
 import { resolveParams } from "@/lib/relativeDate";
@@ -18,6 +18,7 @@ import { getDb } from "@/lib/db";
 import { fillSampleParams, fileSampleKind, writeSampleFile } from "@/lib/workflow/sampleData";
 import { sampleMailForTest } from "@/lib/mailWatcher";
 import { getWorkflowCoverage } from "@/lib/workflow/coverage";
+import { recordEvidencePassport } from "@/lib/workflow/evidencePassport";
 import { hasExecutableSteps } from "@/lib/workflow/graphLint";
 import type { WorkflowNode } from "@/lib/workflow/types";
 
@@ -95,7 +96,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       steps: [{ kind: "human", title: "執行前還有設定沒填", detail: `請先到「設定」頁補上：${missing.map((item) => item.label).join("、")}。這次沒有開始登入或抓資料。` }],
     }, { status: 400 });
   }
-  if (autorunActive.has(id)) {
+  if (autorunActive.has(id) || hasActiveRepairSession(id)) {
     return NextResponse.json({ error: "這條流程的自動測試已經在跑了，等它結束再開新的一輪" }, { status: 409 });
   }
   autorunActive.add(id);
@@ -653,8 +654,21 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
       steps.push({ kind: "done", title: "流程接線與基本邏輯已通過，但尚未用你的真實資料驗證", detail: `這輪有使用系統產生的測試資料，所以只能確認步驟能接起來，不能當成正式驗收。請用一份真實但可安全測試的資料再跑一次；在那之前不能直接設為正式。${coverageNote}` });
       return NextResponse.json({ ok: true, canPromote: false, validationLevel: "simulated", steps, runId: result.runId });
     }
+    // 真實只讀驗收通過後蓋成證據護照：保存圖版本、每步摘要、分支覆蓋與產出指紋，
+    // 不保存原文、帳密或模型回覆，讓成功可以在後續執行中被比對而不是一次性消失。
+    let evidenceRecorded = false;
+    try {
+      evidenceRecorded = Boolean(recordEvidencePassport({
+        runId: result.runId,
+        workflowId: id,
+        varWarnings: result.varWarnings,
+        validationLevel: "real-readonly",
+      }));
+    } catch (error) {
+      console.warn("[evidence-passport] record failed", error instanceof Error ? error.message : String(error));
+    }
     steps.push({ kind: "done", title: "完成！已用真實資料完成只讀驗證", detail: `這是安全排練：讀取與計算都是真的；寫入 Google Sheet、寄信、發通知都被攔住，沒有真的送出。核對上面列出的結果與計畫寫入內容沒問題後，才可以設為正式或按「▶ 執行」真的寫入。${coverageNote}` });
-    return NextResponse.json({ ok: true, canPromote: true, validationLevel: "real-readonly", steps, runId: result.runId });
+    return NextResponse.json({ ok: true, canPromote: true, validationLevel: "real-readonly", evidenceRecorded, steps, runId: result.runId });
   }
 
   steps.push({

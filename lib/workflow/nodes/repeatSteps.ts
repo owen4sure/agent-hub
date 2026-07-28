@@ -5,6 +5,8 @@ import { generateCustomCode, isPlaceholderCode } from "../codegen";
 import { scanSecretKeys } from "../secretScan";
 import { DATE_TOKENS, resolveValue } from "../../relativeDate";
 import { dryRunSkipKind, DRY_RUN_SKIPPED_WRITES_KEY, type DryRunSkippedWrite } from "../dryRun";
+import { MAX_REPEAT_STEPS_NESTING, nestingLimitMessage } from "../repeatNesting";
+import { getRepeatCheckpoints, itemFingerprint, saveRepeatCheckpoint } from "../repeatCheckpoint";
 // ⚠️ 不能在頂層 import registry：registry 的節點清單 import 這個檔案，形成循環——哪個先被載入，
 // 另一個就會拿到「初始化到一半」的模組(實測：直接載入本檔會 TDZ 炸掉)。getNodeDef 只在執行期用得到，
 // 改成 execute 裡動態 import，把循環徹底切斷。
@@ -20,9 +22,9 @@ import { dryRunSkipKind, DRY_RUN_SKIPPED_WRITES_KEY, type DryRunSkippedWrite } f
  * 不用另外維護一份。同一個瀏覽器分頁(ctx.session)、同一個中斷訊號(ctx.cancelSignal)貫穿所有迭代，
  * 跟這個節點外的其他步驟共用資源的方式完全一致。
  *
- * 已知取捨(接受作為 v1 範圍)：整個節點在外層引擎眼中是「一個節點」，重試時會從第 1 項重新跑
- * (不是從失敗的那項續跑)——多花一點時間，但正確性比效率重要，且跟系統其他地方「失敗就整個節點重來」
- * 的既有設計一致，不引入新的部分成功語意。
+ * 每一項都有本機加密的檢查點：外層節點重試或從失敗處續跑時，已完成的項目只沿用結果，
+ * 不會重演寄信、寫表格等外部副作用；失敗項目才會再試。這讓「批次第 37 項失敗」不再等於
+ * 「前 36 項全部重做」，同時保留既有節點級 retry/resume 的操作入口。
  */
 
 // 避免 registry.ts → 這個節點檔 → engine.ts → registry.ts 的循環 import，這兩個小函式在這裡各自留一份，
@@ -119,6 +121,14 @@ export const repeatStepsNode: NodeDefinition = {
   timeoutMs: 15 * 60 * 1000,
   async execute(ctx) {
     const { getNodeDef } = await import("../registry"); // 動態載入,切斷與 registry 的循環 import(見檔頭註解)
+    // 巢狀深度閘門——必須在任何副作用之前。這個節點會直接呼叫內嵌步驟型別自己的 execute()，而內嵌
+    // 步驟也可以是 repeat-steps，所以巢狀迴圈在執行期是真的會跑的：把 send-email 埋得夠深，就繞過了
+    // 只看得到淺層的 lint 與需求驗收(P0)。lintGraph 已經在 assertRunnableGraph(engine 執行入口)擋過
+    // 一次，這裡是舊資料／匯入／未來新增執行入口繞過建圖流程時的最後一道。
+    const repeatDepth = ctx.repeatDepth ?? 0;
+    if (repeatDepth >= MAX_REPEAT_STEPS_NESTING) {
+      throw new PermanentError(nestingLimitMessage(ctx.nodeId));
+    }
     const outputKey = String(ctx.config.outputKey || "results").trim() || "results";
     const itemVar = String(ctx.config.itemVar || "item").trim() || "item";
     const itemsRaw = String(ctx.config.items ?? "");
@@ -160,12 +170,22 @@ export const repeatStepsNode: NodeDefinition = {
     const now = new Date();
     const results: unknown[] = [];
     const dryRunSkippedWrites: DryRunSkippedWrite[] = [];
+    const checkpoints = getRepeatCheckpoints(ctx.runId, ctx.nodeId);
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       const itemLabel = item && typeof item === "object" && "label" in (item as object) ? String((item as Record<string, unknown>).label) : String(i + 1);
+      const fingerprint = itemFingerprint(item);
+      const checkpoint = checkpoints.get(i);
+      if (checkpoint?.status === "success" && checkpoint.itemFingerprint === fingerprint && checkpoint.output) {
+        results.push(checkpoint.output);
+        ctx.log(`── 第 ${i + 1}/${items.length} 項(${itemLabel})已完成，沿用檢查點，不重做 ──`);
+        continue;
+      }
       ctx.log(`── 第 ${i + 1}/${items.length} 項(${itemLabel})開始 ──`);
-      let stepInput: Record<string, unknown> = { ...ctx.input, [itemVar]: item };
-      for (let j = 0; j < steps.length; j++) {
+      saveRepeatCheckpoint({ runId: ctx.runId, nodeId: ctx.nodeId, itemIndex: i, itemFingerprint: fingerprint, status: "running" });
+      try {
+        let stepInput: Record<string, unknown> = { ...ctx.input, [itemVar]: item };
+        for (let j = 0; j < steps.length; j++) {
         const step = steps[j];
         const def = getNodeDef(step.type)!;
         const stepLabel = step.label || def.label;
@@ -261,6 +281,7 @@ export const repeatStepsNode: NodeDefinition = {
 
         const stepCtx: NodeContext = {
           ...ctx,
+          repeatDepth: repeatDepth + 1, // 內嵌步驟若本身也是 repeat-steps，靠這個知道自己在第幾層
           nodeId: `${ctx.nodeId}-i${i}-s${j}`, // 除錯截圖/紀錄要有獨立路徑，不能跟其他迭代/步驟共用同一個 nodeId
           input: stepInput,
           config: resolveDatesInConfig(withSchemaDefaults(step.config ?? {}, def.configSchema), now),
@@ -296,10 +317,16 @@ export const repeatStepsNode: NodeDefinition = {
           const fileNote = filePath ? `（這一輪處理的檔案：${filePath}）` : "";
           throw new Error(`第 ${i + 1} 項(${itemLabel})的「${stepLabel}」這步試了 ${maxAttempts} 次仍失敗：${msg}${fileNote}`);
         }
-        stepInput = { ...stepInput, ...result.output };
+          stepInput = { ...stepInput, ...result.output };
+        }
+        saveRepeatCheckpoint({ runId: ctx.runId, nodeId: ctx.nodeId, itemIndex: i, itemFingerprint: fingerprint, status: "success", output: stepInput });
+        results.push(stepInput);
+        ctx.log(`── 第 ${i + 1}/${items.length} 項(${itemLabel})完成，已保存檢查點 ──`);
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        saveRepeatCheckpoint({ runId: ctx.runId, nodeId: ctx.nodeId, itemIndex: i, itemFingerprint: fingerprint, status: "failed", error });
+        throw err;
       }
-      results.push(stepInput);
-      ctx.log(`── 第 ${i + 1}/${items.length} 項(${itemLabel})完成 ──`);
     }
 
     return {

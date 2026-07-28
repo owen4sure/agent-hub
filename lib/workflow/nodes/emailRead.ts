@@ -11,6 +11,7 @@ import {
   mailMatchesFilters,
   isImapAuthError,
 } from "../../mailClient";
+import { mailSourceEvidence } from "../runtimeEvidence";
 
 /**
  * 讀取信箱節點：用 IMAP 直接抓信(免開瀏覽器、免驗證碼)，取「最新一封」符合條件的信，
@@ -99,6 +100,11 @@ export const emailReadNode: NodeDefinition = {
           filePath,
           fileName,
           attachmentCount: full.attachments.length,
+          sourceEvidence: mailSourceEvidence(
+            `${folder}:${latest.uid}:${full.date}:${full.subject}`,
+            `IMAP 信箱（${folder}）`,
+            { attachmentCount: full.attachments.length, bodyChars: full.body.length },
+          ),
         },
       };
     } finally {

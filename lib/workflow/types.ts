@@ -33,6 +33,33 @@ export interface WorkflowEdge {
   fromPort?: string;
 }
 
+export type N8nMigrationFindingStatus = "mapped" | "review" | "unsupported";
+
+/**
+ * n8n 匯入後的安全遷移護照。只存可核對的摘要，不存原始 JSON、網址 query、憑證或程式碼。
+ */
+export interface N8nMigrationSummary {
+  sourceName: string;
+  sourceFingerprint: string;
+  sourceNodeCount: number;
+  sourceEdgeCount: number;
+  /** n8n 匯出中存在、但目前沒有安全一對一轉換的連線數；有值時必須人工重接/確認。 */
+  unmappedConnectionCount?: number;
+  mappedCount: number;
+  reviewCount: number;
+  unsupportedCount: number;
+  clearedCodeCount: number;
+  clearedCredentialCount: number;
+  importedAt: string;
+  originalNodes: {
+    agentHubNodeId: string;
+    label: string;
+    n8nType: string;
+    status: N8nMigrationFindingStatus;
+    suggestedType: string | null;
+  }[];
+}
+
 export interface Workflow {
   id: string;
   name: string;
@@ -49,6 +76,9 @@ export interface Workflow {
   group?: string;
   /** 外部檔案匯入後，第一次執行前必須由使用者明確確認其本機讀檔／外送能力。 */
   importedUntrusted?: boolean;
+  n8nMigration?: N8nMigrationSummary;
+  n8nMigrationAcknowledgedAt?: string;
+  n8nMigrationReviews?: Record<string, { decision: "acknowledged"; note?: string; reviewedAt: string }>;
   /**
    * 複製流程時保留的白話交接。不複製冗長聊天、帳密或瀏覽器登入；但使用者明確拿來定義
    * 流程的檔案／圖片會複製成副本自己的私有附件，讓副本的 AI 能接著理解而非叫人重傳。
@@ -73,6 +103,8 @@ export interface Workflow {
    * 沒有持久化位置、只能靠模型重讀聊天猜」這個最具體的痛點。
    */
   confirmedRules?: { text: string; confirmedAt: string }[];
+  /** 使用者親自提供的已知正確結果；綁定圖版本，圖改動後不得默默沿用。 */
+  acceptanceSpec?: { expectedAnswer: string; graphFingerprint: string; savedAt: string };
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
 }
@@ -107,8 +139,8 @@ export interface NodeContext {
   outputDir: string;
   debugDir: string;
   session: RunSession;
-  /** 只讀驗證模式:節點若會寫出/發送，看到這個是 true 就別真的做(引擎已在外層略過已知的寫出型節點，
-   * 這個旗標是給 custom-code 產碼等「自己可能會寫」的路徑當第二層保險用)。 */
+  /** 只讀驗證模式:節點若會寫出/發送，看到這個是 true 就別真的做(引擎已在外層略過已知的寫出型節點；
+   * custom-code 另會在受限 VM 執行，並以唯讀能力包住瀏覽器與檔案介面)。 */
   dryRun?: boolean;
   log: (msg: string) => void;
   /** 登記一個產出檔，讓它出現在 dashboard 的檔案清單/可下載 */
@@ -120,6 +152,12 @@ export interface NodeContext {
    * llm-decide/custom-code 產碼)請把它接進 fetch 的 signal 或 callAIWithRetry 的 opts.signal，
    * 停止才能立刻中斷正在進行的呼叫，而不是等它自然跑完才發現要停。 */
   cancelSignal: AbortSignal;
+  /** 情境安全重播可指定 wait-approval 要模擬哪個出口；只由伺服器在 dry-run 注入。 */
+  scenarioApprovalDecisions?: Record<string, "approved" | "rejected">;
+  /** 目前身處第幾層 repeat-steps 迴圈內：引擎直接執行的節點不帶(=0)，repeat-steps 執行內嵌步驟時
+   * 傳 +1 給那一步。repeat-steps 用它擋住超過 MAX_REPEAT_STEPS_NESTING 的巢狀——lintGraph 已經在
+   * 執行入口擋過一次，這裡是「舊資料/繞過建圖流程/未來新增執行入口」時的最後一道，在任何副作用之前。 */
+  repeatDepth?: number;
 }
 
 /** 節點輸出的 port（分支節點會回傳多個；一般節點回一個 "out"） */

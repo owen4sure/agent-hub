@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { beginRepairSession, endRepairSession, recoverCrashedRepairs } from "./repairSessions";
+import { beginRepairSession, endRepairSession, hasActiveRepairSession, recoverCrashedRepairs } from "./repairSessions";
 import { createWorkflow, deleteWorkflow, getWorkflow, saveWorkflow } from "./store";
 import { getDb } from "../db";
 
@@ -22,10 +22,20 @@ test("beginRepairSession／endRepairSession：正常結束會把自己的快照�
   }
 });
 
-// 真實已知但沒處理過的限制：busyLocks.ts 的 autorunActive 只是進程內記憶體，daemon(launchd 常駐)
-// + 使用者另外開的 dev instance 同時跑時，兩邊的記憶體鎖互相看不到對方，可能同時對同一條流程跑
-// 修復迴圈。beginRepairSession 現在會查 SQLite(跨進程共用)有沒有「owner_pid 還活著」的既有
-// session，有就拒絕開新的一輪。
+test("hasActiveRepairSession：修改入口能看見跨進程的活修復鎖，結束後解除", () => {
+  const workflow = createWorkflow(`test-repair-session-active-query-${Date.now()}`);
+  const id = beginRepairSession(workflow.id, "autofix", { nodes: workflow.nodes, edges: workflow.edges });
+  try {
+    assert.equal(hasActiveRepairSession(workflow.id), true);
+  } finally {
+    endRepairSession(id);
+    deleteWorkflow(workflow.id);
+  }
+  assert.equal(hasActiveRepairSession(workflow.id), false);
+});
+
+// 修復迴圈的正式鎖存在 SQLite；即使另一個進程看不到 busyLocks.ts 的 Set，仍會看到這筆活著的
+// session 而拒絕開新的一輪。修改／還原／觸發設定入口也共用 hasActiveRepairSession。
 test("beginRepairSession：同一條流程已有另一個活著的進程在修復時，要拒絕開新的一輪", () => {
   const workflow = createWorkflow(`test-repair-session-crossproc-${Date.now()}`);
   try {

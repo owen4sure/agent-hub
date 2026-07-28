@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { getWorkflow, saveWorkflow, isValidWorkflowId } from "@/lib/workflow/store";
 import { autorunActive } from "@/lib/workflow/busyLocks";
+import { hasActiveRepairSession } from "@/lib/workflow/repairSessions";
+import { automationReadinessResponse, getAutomationReadiness } from "@/lib/workflow/automationReadiness";
 
 /**
  * 觸發面板直接改 trigger 節點的觸發設定(資料夾監聽/收信/Telegram 訊息)。
@@ -20,7 +22,7 @@ const EDITABLE_KEYS = [
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   if (!isValidWorkflowId(id)) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
-  if (autorunActive.has(id)) {
+  if (autorunActive.has(id) || hasActiveRepairSession(id)) {
     return NextResponse.json({ error: "這條流程的自動測試/修復正在進行中，等它跑完再改設定" }, { status: 409 });
   }
   const body = (await req.json().catch(() => null)) as Partial<Record<(typeof EDITABLE_KEYS)[number], string>> | null;
@@ -31,6 +33,11 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   if (wf.builtin) return NextResponse.json({ error: "內建範例不能改設定，請先複製" }, { status: 400 });
   const trigger = wf.nodes.find((n) => n.type === "trigger");
   if (!trigger) return NextResponse.json({ error: "這條流程沒有「開始」節點" }, { status: 400 });
+  const enablingBackgroundTrigger = (typeof body.watchPath === "string" && body.watchPath.trim().length > 0) || body.mailWatch === "on" || body.telegramWatch === "on";
+  if (wf.status === "official" && enablingBackgroundTrigger) {
+    const readiness = getAutomationReadiness(wf, "trigger-config");
+    if (!readiness.ready) return NextResponse.json(automationReadinessResponse(readiness), { status: 409 });
+  }
 
   for (const key of EDITABLE_KEYS) {
     if (typeof body[key] === "string") trigger.config[key] = body[key].trim();

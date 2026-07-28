@@ -4,6 +4,7 @@ import type { NodeDefinition } from "../types";
 import { PermanentError } from "../types";
 import { cfgStr } from "../nodeHelpers";
 import { extractTextFromFile } from "../../textExtract";
+import { fileSourceEvidence } from "../runtimeEvidence";
 
 function guessMime(filename: string): string {
   const ext = path.extname(filename).toLowerCase();
@@ -97,6 +98,6 @@ export const readFileNode: NodeDefinition = {
     const truncated = text.length > maxChars;
     if (truncated) text = text.slice(0, maxChars);
     ctx.log(`讀取 ${name}：${text.length} 字${truncated ? "(已截斷)" : ""}`);
-    return { output: { fileText: text, fileName: name, fileSize: stat.size } };
+    return { output: { fileText: text, fileName: name, fileSize: stat.size, sourceEvidence: fileSourceEvidence(filePath, { textChars: text.length, truncated }) } };
   },
 };

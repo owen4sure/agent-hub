@@ -1,4 +1,9 @@
 import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
+import { walkGraphSteps, nestingLimitMessage, MAX_REPEAT_STEPS_NESTING, type VisitedStep, type StepWalkResult } from "./repeatNesting";
+import { nodeTypesWithSideEffect, type SideEffectTag } from "./sideEffects";
+import { dataChangePolicyFor } from "./dataChangePolicy";
+import { scanDirectDataChanges } from "./dataChangeScan";
+import { scanDelegatedWrites, type SubflowResolver } from "./subflowEffects";
 
 /**
  * 需求完整性驗收(確定性、零模型):lint 只能保證「圖是合法的」,這裡保證「需求有做到」。
@@ -14,6 +19,23 @@ export interface RequirementItem {
   met: boolean;
   /** 沒達成時,告訴模型「該補什麼」的具體指引 */
   hint: string;
+  /**
+   * true = 這一項要**使用者**動手，不是模型能改好的(目前只有「AI 建議這個 POST 是查詢，需要你確認
+   * 端點不會寫資料」這一種)。這種項目絕不能餵回修正迴圈：模型為了消除 unmet，只會把使用者真正需要
+   * 的查詢步驟刪掉。「圖不安全」跟「等使用者確認」是兩件事，要分開。
+   */
+  needsUser?: boolean;
+}
+
+export interface RequirementCheckOptions {
+  /**
+   * 解析 run-workflow 的 target → 那條子流程的圖。requirementCheck 刻意不 import store
+   * (不能碰檔案系統，也會把 registry 的初始化循環拉進來)，由呼叫端注入。
+   * **沒有提供時，只讀需求下的 run-workflow 一律 fail closed**——看不到就不能說它安全。
+   */
+  resolveSubflow?: SubflowResolver;
+  /** 已被**使用者**確認為唯讀的 http-request 節點 id(見 httpReadOnlyApproval.ts)。沒傳 = 全部未確認。 */
+  readOnlyApprovedNodeIds?: ReadonlySet<string>;
 }
 
 interface GraphLike {
@@ -35,7 +57,40 @@ export function isManualFileUploadRequested(text: string): boolean {
   // 「檔(?:案)?」而不是硬性要求「檔案」兩字：真實踩過的 bug——連系統自己在澄清句裡建議使用者
   // 回覆的措辭都是白話縮寫「選檔」(不是「選擇檔案」)，使用者照著系統的建議一字不差回覆，
   // 舊版正規表示式卻認不得「檔」單獨出現，導致使用者照做也還是被同一句話卡住問第二次。
-  return /(?:每次|執行時|手動)?[^。\n]{0,28}(?:上傳|選(?:擇)?|挑(?:選)?|拖曳|拖進)[^。\n]{0,28}(?:檔(?:案)?|附件|文件|csv|xlsx|excel|pdf)|(?:檔(?:案)?|附件|文件|csv|xlsx|excel|pdf)[^。\n]{0,28}(?:上傳|選(?:擇)?|挑(?:選)?|拖曳|拖進)/i.test(t);
+  if (/(?:每次|執行時|手動)?[^。\n]{0,28}(?:上傳|選(?:擇)?|挑(?:選)?|拖曳|拖進)[^。\n]{0,28}(?:檔(?:案)?|附件|文件|csv|xlsx|excel|pdf)|(?:檔(?:案)?|附件|文件|csv|xlsx|excel|pdf)[^。\n]{0,28}(?:上傳|選(?:擇)?|挑(?:選)?|拖曳|拖進)/i.test(t)) return true;
+  // 「執行時再提供檔案」「跑的時候我再給你檔案」「到時候再指定檔案」——同樣是「資料在執行期才會有」，
+  // 但完全沒有「上傳/選/挑/拖」這幾個動作字眼，上面那組一律配不到。真實踩過的阻塞：使用者回答
+  // 「每次執行時讓我選檔」以外的等義說法，系統就當他沒回答過資料來源、把同一句澄清再問一次。
+  return /(?:執行時|執行的時候|跑的時候|每次執行|到時候|屆時)[^。\n]{0,20}(?:提供|指定|給|帶)[^。\n]{0,12}(?:檔(?:案)?|附件|文件|csv|xlsx|excel|pdf)|(?:檔(?:案)?|附件|文件)[^。\n]{0,16}(?:執行時|執行的時候|跑的時候|到時候|屆時)[^。\n]{0,12}(?:再|才)(?:提供|給|指定|選|挑|上傳)/i.test(t);
+}
+
+/** 攤平後的節點檢視。內嵌步驟**真的沒有** id(它不是引擎眼中的獨立節點，也不會出現在 edges 裡)，
+ * 所以這裡刻意不替它捏造一個——要在錯誤訊息裡定位就用 `path`。 */
+export type FlatGraphNode = VisitedStep;
+
+/**
+ * repeat-steps 這種「config 裡包著其他節點 config」的容器，內嵌步驟在需求驗收眼中也是真正的步驟
+ * (AGENTS.md 容器型節點鐵則③：所有「walk 整張圖處理 config」的機制都要記得遞迴處理內嵌 steps，
+ * 漏一個就是盲區)。真實踩過的阻塞：使用者要「一份月份清單，每個月各自找信→下載附件→擷取數字」，
+ * 讀檔那一步理所當然被收進迴圈裡，只看頂層節點的 checkRequirements 判定「檔案不會被讀取」永遠
+ * unmet，兩輪需求修正燒完後 buildWorkflow 只能回「修正用盡」的 clarify。
+ *
+ * 走訪本身**不再由這個檔案自己實作**：以前這裡寫死 `depth >= 3` 停止、graphLint 只驗一層，兩套
+ * 各走各的，把副作用埋到第四層就同時繞過兩者(P0)。現在統一走 `repeatNesting.ts` 的 `walkGraphSteps`，
+ * 深度政策只有那一份。這個函式只回 `visited`；**需要 fail closed 的呼叫端請改用 `scanGraphNodes`**，
+ * 它會一併告訴你有沒有掃不到的區域。
+ */
+export function flattenGraphNodes(
+  nodes: { id?: string; type: string; config?: Record<string, unknown>; label?: string }[],
+): FlatGraphNode[] {
+  return walkGraphSteps(nodes).visited;
+}
+
+/** 走訪整張圖(含內嵌步驟)並保留「哪裡沒掃到」的資訊，給需要 fail closed 的安全檢查用。 */
+export function scanGraphNodes(
+  nodes: { id?: string; type: string; config?: Record<string, unknown>; label?: string }[],
+): StepWalkResult {
+  return walkGraphSteps(nodes);
 }
 
 /**
@@ -48,8 +103,8 @@ export function isManualFileUploadRequested(text: string): boolean {
  * 誤判成讀檔步驟；wireManualFileUpload(builder.ts) 用同一個判斷式，兩邊必須保持一致。
  */
 export function hasCustomCodeFileReader(nodes: { type: string; config?: Record<string, unknown> }[]): boolean {
-  return nodes.some(
-    (node) => node.type === "custom-code" && /上傳|附件|檔案|excel|csv|xlsx|pdf|filePath/i.test(String(node.config?.intent ?? "")),
+  return flattenGraphNodes(nodes).some(
+    (node) => node.type === "custom-code" && /上傳|附件|檔案|excel|csv|xlsx|pdf|filePath/i.test(String(node.config.intent ?? "")),
   );
 }
 
@@ -88,13 +143,39 @@ export function isScheduledExecutionRequested(text: string): boolean {
   return false;
 }
 
-export function checkRequirements(userText: string, graph: GraphLike): RequirementItem[] {
+export function checkRequirements(userText: string, graph: GraphLike, opts: RequirementCheckOptions = {}): RequirementItem[] {
   const t = userText;
-  const types = new Set(graph.nodes.map((n) => n.type));
+  // 節點型別/設定的比對一律用「攤平後」的清單(含 repeat-steps 內嵌步驟)——迴圈裡的步驟也是真的會執行的
+  // 步驟，只看頂層會把「讀檔/寫檔/通知被收進迴圈」的正確流程判成沒做到(見 flattenGraphNodes 的說明)。
+  // trigger 與 edges 仍只看頂層：觸發設定與分支連線本來就只存在於外層圖。
+  const scan = scanGraphNodes(graph.nodes);
+  const allNodes = scan.visited;
+  const types = new Set(allNodes.map((n) => n.type));
   const has = (...ts: string[]) => ts.some((x) => types.has(x));
   const trigger = graph.nodes.find((n) => n.type === "trigger");
   const items: RequirementItem[] = [];
-  const add = (key: string, label: string, met: boolean, hint: string) => items.push({ key, label, met, hint });
+  const add = (key: string, label: string, met: boolean, hint: string, needsUser = false) =>
+    items.push({ key, label, met, hint, ...(needsUser ? { needsUser: true } : {}) });
+
+  // ⚠️ fail closed：走訪碰到「巢狀超過政策上限」或「steps 讀不出來」時，這張圖有一整塊是我們**看不到**
+  // 的區域，底下每一條安全否決規則的「沒發現問題」都不成立(第四層埋一個 send-email，掃不到就等於
+  // 判綠——這正是 P0 的成因)。這時直接列一項未達成，需求驗收永遠不會通過，建圖也不會交付這張圖。
+  const hasBlindSpots = scan.overLimitPaths.length > 0 || scan.unreadablePaths.length > 0;
+  const blindSpotDetail = hasBlindSpots
+    ? `這些「重複執行」節點裡面有系統看不到的區域：${[
+      ...scan.overLimitPaths.map((path) => `${path}(巢狀超過 ${MAX_REPEAT_STEPS_NESTING} 層上限)`),
+      ...scan.unreadablePaths.map((path) => `${path}(steps 不是合法的 JSON 陣列，讀不出裡面有哪些步驟)`),
+    ].join("、")}`
+    : "";
+  if (hasBlindSpots) {
+    add(
+      "inspectableGraph",
+      "整張流程(含迴圈內的每一步)都檢查得到",
+      false,
+      `${blindSpotDetail}。看不到就無法保證裡面沒有未經授權的寄信／通知／寫檔，所以這張圖不能交付。` +
+        `${scan.overLimitPaths.length > 0 ? nestingLimitMessage(scan.overLimitPaths[0]) : ""}`,
+    );
+  }
 
   // 排程:只有使用者明確要求無人值守時才允許。不能把「每週手動上傳」誤建成排程。
   const scheduleRequested = isScheduledExecutionRequested(t);
@@ -153,7 +234,7 @@ export function checkRequirements(userText: string, graph: GraphLike): Requireme
       add(
         "downloadablePresentationFile",
         "產出可下載的 PowerPoint(.pptx)檔案",
-        graph.nodes.some((node) => node.type === "custom-code" && /pptx|powerpoint/i.test(String(node.config?.intent ?? ""))),
+        allNodes.some((node) => node.type === "custom-code" && /pptx|powerpoint/i.test(String(node.config.intent ?? ""))),
         "用 custom-code 搭配 pptxgenjs 之類的套件產生真正的 .pptx 檔案(intent 要明確寫出「輸出 pptx 檔案」)；使用者沒有提到 Google，不要用 google-slides-create 建立 Google 簡報充數。",
       );
     } else {
@@ -172,7 +253,7 @@ export function checkRequirements(userText: string, graph: GraphLike): Requireme
   const asksBusinessData = /業績|營收|銷售|開戶|庫存|KPI|數據|數字|報表/.test(t);
   const allowsSynthetic = /示範|假資料|模擬資料|測試資料|虛構/.test(t);
   if (asksBusinessData && !allowsSynthetic) {
-    const configs = JSON.stringify(graph.nodes.map((node) => node.config ?? {}));
+    const configs = JSON.stringify(allNodes.map((node) => node.config));
     const hasRealSource = has("google-sheet-read", "read-file", "excel-process", "pdf-read", "email-read", "find-email", "web-page", "rss-read") ||
       (graph.triggerParams ?? []).some((field) => /filePath|attachmentPath|inputFile|網址|url/i.test(`${field.key} ${field.label}`));
     const inventsData = /模擬|假資料|測試用|synthetic|mock|sample/i.test(configs);
@@ -189,7 +270,7 @@ export function checkRequirements(userText: string, graph: GraphLike): Requireme
     const hasUnit = params.some((p) => p.key === "periodUnit");
     const hasWhich = params.some((p) => p.key === "periodWhich");
     const derived = params.filter((p) => p.derived && /\{\{\s*period\./.test(String(p.default ?? "")));
-    const configs = JSON.stringify(graph.nodes.map((node) => node.config ?? {}));
+    const configs = JSON.stringify(allNodes.map((node) => node.config));
     const usedDerived = derived.some((p) => configs.includes(`{{${p.key}}}`));
     add(
       "periodSelection",
@@ -206,7 +287,7 @@ export function checkRequirements(userText: string, graph: GraphLike): Requireme
   // 伺服器絕對路徑；而且只長出選檔欄不夠，實際讀取節點必須真的引用 {{filePath}}。
   if (isManualFileUploadRequested(t)) {
     const params = graph.triggerParams ?? [];
-    const configText = JSON.stringify(graph.nodes.map((node) => node.config ?? {}));
+    const configText = JSON.stringify(allNodes.map((node) => node.config));
     // 不能硬性要求 key 字面等於 "filePath"：對帳／比對兩份資料這類天生需要一次上傳多個檔案的情境，
     // 自然會取名 orderFilePath/paymentFilePath 這種語意化名稱，不會只有一個叫 filePath 的欄位。
     // 只要是「非衍生欄位、且名稱像檔案」的觸發參數就算數——衍生欄位(如 period.* 算出來的日期)不算
@@ -229,8 +310,8 @@ export function checkRequirements(userText: string, graph: GraphLike): Requireme
   // 流程可靠，資料列一多、格式一變就可能靜默報錯數字；必須有 custom-code 用明確規則計算，
   // AI 最多用來理解模糊欄名或把已算好的結果說成人話。
   if (/加總|合計|總計|平均|相加|相減|扣除|比率|百分比/.test(t)) {
-    const hasDeterministicCalculation = graph.nodes.some((node) =>
-      node.type === "custom-code" && /加總|合計|總計|平均|相加|相減|扣除|比率|百分比|計算/.test(String(node.config?.intent ?? "")),
+    const hasDeterministicCalculation = allNodes.some((node) =>
+      node.type === "custom-code" && /加總|合計|總計|平均|相加|相減|扣除|比率|百分比|計算/.test(String(node.config.intent ?? "")),
     );
     add(
       "deterministicCalculation",
@@ -298,8 +379,8 @@ export function checkRequirements(userText: string, graph: GraphLike): Requireme
   // 「桌面通知我結果就好，不用寄信」是兩個子句，「不用」否定的是下一句的「寄信」，但反向規則
   // 「通知…{0,10}…不用」跨過逗號把「通知」配上了「不用」，整個桌面通知需求被判成使用者自己禁止，
   // 自我修正迴圈於是強迫模型把使用者明確要求的桌面通知節點拆掉(真實踩過：新手實測情境)。
-  const forbidsEmail = /(?:不要|不需|不用|不必|絕不|禁止|勿)[^。，,\n]{0,10}(?:寄(?:信|email|郵件|出)|email|郵件)|(?:寄(?:信|email|郵件|出)|email|郵件)[^。，,\n]{0,10}(?:不要|不需|不用|不必|絕不|禁止|勿)|別(?:再)?寄(?:信|email|郵件|出)?/i.test(t);
-  const forbidsNotification = /(?:不要|不需|不用|不必|絕不|禁止|勿)[^。，,\n]{0,10}(?:通知|告警|提醒|推播)|(?:通知|告警|提醒|推播)[^。，,\n]{0,10}(?:不要|不需|不用|不必|絕不|禁止|勿)|別(?:再)?(?:通知|告警|提醒|推播)/.test(t);
+  // 這兩個否定判斷跟契約建立、執行前閘門共用同一份(dataChangePolicy)——各寫一份必然漂移。
+  const { forbidsEmail, forbidsNotification } = dataChangePolicyFor(t);
   // 通知
   const wantsNotification = !forbidsNotification && /通知|告警|提醒|推播|敲我|傳給我|發給我|推到|傳到/.test(t);
   if (wantsNotification) {
@@ -313,40 +394,109 @@ export function checkRequirements(userText: string, graph: GraphLike): Requireme
   // 未授權副作用：模型不能為了「看起來完整」擅自加寄信或通知。桌面通知雖然不會離開
   // 電腦，對使用者而言仍是「通知」；尤其使用者明說「不要通知」時，不能把它偷換成
   // 桌面跳窗後宣稱符合需求。這次執行的結果本來就會顯示在執行紀錄／對話中。
-  const unrequestedOutbound = graph.nodes.filter((node) => {
-    if (node.type === "send-email") return !wantsEmail && !wantsNotification;
-    const isNotification = ["telegram-notify", "line-notify", "slack-notify", "desktop-notify"].includes(node.type);
-    if (!isNotification) return false;
+  //
+  // ⚠️ 安全否決規則一律掃 allNodes(含 repeat-steps 任意深度的內嵌步驟)：迴圈裡的 send-email 是真的
+  // 會寄出去的信，跟畫在外層完全一樣。舊版只掃 graph.nodes，等於「把寄信步驟收進迴圈」就能繞過整條
+  // 「不要寄信/不要通知」的禁令——使用者明確說了不要，需求核對卻連一項警告都不會出現，自我修正迴圈
+  // 也不會要求移除，圖直接以 ready 交付(P0：使用者明說禁止的外送動作被無聲放行)。
+  // 型別清單改由 sideEffects.ts 的分類推導：那份分類涵蓋 registry 的每一個型別、且有測試盯著，
+  // 新增會寄信/通知的節點時不會漏掉這條規則(以前這裡是手寫字串陣列，跟 dryRun 各寫一份會漸漸漂移)。
+  const emailTypes = nodeTypesWithSideEffect("email");
+  const notifyTypes = nodeTypesWithSideEffect("notify");
+  const unrequestedOutbound = allNodes.filter((node) => {
+    if (emailTypes.has(node.type)) return !wantsEmail && !wantsNotification;
+    if (!notifyTypes.has(node.type)) return false;
     // 「失敗要有備案」且錯誤分支確實接到本機桌面提醒，是一個清楚、零設定的備案；
     // 不把它當成模型無端塞進來的完成通知。但使用者明說不要通知時仍一律禁止。
-    const isDesktopFailurePlan = node.type === "desktop-notify" && graph.edges.some((edge) => edge.to === node.id && edge.fromPort === "error");
+    // 內嵌步驟(node.nested)永遠不適用這個豁免：它不在 edges 裡、接不到 error 分支，
+    // 拿它沒有的 id 去比對 edges 只會配到別人的線或全部落空，寬鬆的一邊必須是「不豁免」。
+    const isDesktopFailurePlan = !node.nested && node.type === "desktop-notify"
+      && graph.edges.some((edge) => edge.to === node.id && edge.fromPort === "error");
     return forbidsNotification || (!wantsNotification && !isDesktopFailurePlan);
   });
-  if (unrequestedOutbound.length > 0) {
+  // 有掃不到的區域時，這條規則的「沒發現問題」不成立——**必須自己也 unmet**，不能只靠上面
+  // inspectableGraph 那一項。使用者(或程式)如果只看 noUnrequestedOutbound 這個 key 判斷安不安全，
+  // 看到的必須是「不確定 = 不通過」，不是一個空陣列(P0 就是這樣被判綠的)。
+  if (unrequestedOutbound.length > 0 || hasBlindSpots) {
     add(
       "noUnrequestedOutbound",
       "不執行使用者沒要求的寄信或通知",
       false,
-      `移除未獲授權的動作：${unrequestedOutbound.map((node) => `${node.id}(${node.type})`).join("、")}。使用者若說「不要通知」，桌面通知也必須移除；執行結果會在平台內顯示`,
+      (unrequestedOutbound.length > 0
+        ? `移除未獲授權的動作：${unrequestedOutbound.map((node) => `${node.path}(${node.type})`).join("、")}。` +
+          `${unrequestedOutbound.some((node) => node.nested) ? "「n[步驟N]」是重複執行節點裡面的第 N 步(從 0 起算)，要改的是那個節點 config.steps 裡的那一步，收在迴圈裡一樣會真的送出去。" : ""}`
+        : "") +
+      (hasBlindSpots ? `${blindSpotDetail}，系統無法確認那些區域裡有沒有寄信／通知步驟，所以這一項不能算通過。` : "") +
+        `使用者若說「不要通知」，桌面通知也必須移除；執行結果會在平台內顯示`,
     );
   }
-  // 「只讀取／只計算／不要寫入」時，模型也不能為了讓圖看起來完整就擅自存一份本機檔。
-  // 本機寫檔雖不會外傳，仍是使用者沒有授權的副作用；需要交付檔案時，使用者會明確說存檔/報表檔。
-  const explicitlyWantsFileOutput = /存檔|存成|寫檔|產出檔|報告檔|紀錄檔/.test(t);
-  const readOnlyNoWrite = !explicitlyWantsFileOutput && /只讀|只(?:讀取|分析|計算)|(?:不要|不需|不用|不必|禁止|勿)[^。\n]{0,12}寫入/.test(t);
-  if (readOnlyNoWrite) {
-    const unrequestedWrites = graph.nodes.filter((node) => ["write-file", "excel-process"].includes(node.type));
-    if (unrequestedWrites.length > 0) {
+  // 「這次需求禁止哪些資料變更」的判斷抽到 dataChangePolicy.ts——建圖需求驗收、建立 workflow 層級
+  // 只讀契約、執行前跨流程重驗三個消費端共用同一份，各寫一份必然漂移(這一系列 P0 的共同成因)。
+  const { bannedEffects, forbidsAllChanges, forbidsFileOutput } = dataChangePolicyFor(t);
+  if (bannedEffects.size > 0) {
+    // 直接副作用的掃描走共用的 scanDirectDataChanges()——執行前的跨流程重驗用的是同一支，
+    // 不會出現「建圖時這樣算、執行前那樣算」的落差。收進迴圈的寫入步驟一樣會真的落地；
+    // 「AI 建議唯讀但使用者還沒確認」另外歸類(那是等使用者按確認，不是圖不安全，混在一起會讓
+    // 修正迴圈叫模型把使用者真正需要的查詢步驟刪掉)；判斷不出來的只在全面禁止時才 fail closed。
+    const direct = scanDirectDataChanges(graph.nodes, {
+      bannedEffects,
+      readOnlyApprovedNodeIds: opts.readOnlyApprovedNodeIds,
+      includeUndetermined: forbidsAllChanges,
+    });
+    const unrequestedWrites = direct.writes;
+    const awaitingConfirmation = direct.awaitingConfirmation;
+    const undetermined = direct.undetermined;
+    // run-workflow 會去跑另一條流程，那條流程想寫什麼就寫什麼。只看本流程的節點型別，它靜態上
+    // 「沒有副作用」——把寫入藏進子流程就能整個繞過只讀限制(P0)。遞迴分析被呼叫的流程；查不到、
+    // 重名、動態 target、循環、超過分析深度一律 fail closed(看不到就不能說它安全)。
+    // 外送(寄信/通知)也要納入被委派流程的禁止清單：使用者說「只讀取、不要修改」時，把寄信藏進
+    // 失敗備援流程一樣是未經授權的外送。本流程自己的外送由上面的 unrequestedOutbound 管，
+    // 這裡負責看不到的那一側。
+    const delegatedBanned = new Set<SideEffectTag>(bannedEffects);
+    if (!wantsEmail && !wantsNotification) delegatedBanned.add("email");
+    if (forbidsNotification || !wantsNotification) delegatedBanned.add("notify");
+    const delegated = scanDelegatedWrites(
+      { nodes: graph.nodes, onFailureWorkflow: graph.onFailureWorkflow },
+      { resolveSubflow: opts.resolveSubflow, bannedEffects: delegatedBanned },
+    );
+    // 全部歸在同一個 key。呼叫端(以及使用者)判斷「這張圖在寫入這件事上安不安全」時只需要看這一項，
+    // 不必知道問題出在本流程、迴圈深處、子流程鏈、還是等使用者確認——漏看任何一個 key 就是一個缺口。
+    const blocking = unrequestedWrites.length > 0 || undetermined.length > 0 || hasBlindSpots || delegated.length > 0;
+    if (blocking || awaitingConfirmation.length > 0) {
+      const describe = (node: FlatGraphNode) => `${node.path}(${node.type})`;
       add(
         "noUnrequestedWrite",
-        "不執行使用者沒要求的存檔或改檔",
+        "不執行使用者沒要求的存檔、改檔或遠端寫入(含子流程)",
         false,
-        `移除未獲授權的寫入步驟：${unrequestedWrites.map((node) => `${node.id}(${node.type})`).join("、")}。這次需求只讀取/計算；要產出檔案必須由使用者明確要求`,
+        (unrequestedWrites.length > 0
+          ? `移除未獲授權的寫入步驟：${unrequestedWrites.map(describe).join("、")}。` +
+            `${unrequestedWrites.some((node) => node.nested) ? "「n[步驟N]」是重複執行節點裡面的第 N 步(從 0 起算)，要改的是那個節點 config.steps 裡的那一步。" : ""}`
+          : "") +
+        (delegated.length > 0
+          ? `被委派出去執行的流程有問題：${delegated.map((f) => `${f.path}(${f.detail})`).join("；")}。` +
+            `路徑讀法：「呼叫端 → 被呼叫流程id.那條流程裡的節點」；開頭是 onFailureWorkflow 代表問題出在「這條流程失敗時要自動執行的備援流程」(它不是節點，是流程層級的設定，要到觸發面板改)。` +
+            `請把會寫入/外送的步驟從被委派的流程鏈上移除、改指向只讀的流程，或把需要的讀取步驟直接放進本流程；` +
+            `${delegated.some((f) => !f.confirmed) ? "「無法確認」的情況也不能放行——系統看不到就不能保證它不寫入。" : ""}`
+          : "") +
+        (undetermined.length > 0
+          ? `這些步驟現在還看不出來會不會寫入(程式碼要等執行時才產生)：${undetermined.map(describe).join("、")}——請把它改成明確、看得出來只做讀取/計算的步驟，或在 intent 寫清楚它只讀不寫。`
+          : "") +
+        (hasBlindSpots ? `${blindSpotDetail}，系統無法確認那些區域裡有沒有寫入步驟，所以這一項不能算通過。` : "") +
+        (awaitingConfirmation.length > 0
+          ? `另外這些「打 API」步驟，AI 判斷只是查詢、不會改動對方資料，但**需要使用者本人確認**：${awaitingConfirmation.map(describe).join("、")}。` +
+            `請使用者到該節點按「我確認這個呼叫只是查詢」；在確認之前安全試跑會略過這一步。` +
+            `**這部分不是要 AI 修改流程**——不要為了消除這個提醒就把使用者需要的查詢步驟刪掉，也不要改成 GET 或換個網址來規避。`
+          : "") +
+          `這次需求只讀取/計算；要產出檔案或更新外部資料必須由使用者明確要求`,
+        // 只有「純粹在等使用者按確認、沒有任何真的違規」時才算 needsUser：模型對這種情況無事可做，
+        // 餵回修正迴圈只會逼它刪掉使用者需要的步驟。有真違規時一律照常要求模型修。
+        !blocking,
       );
     }
   }
-  // 產出檔案
-  if (/存檔|存成|寫檔|產出檔|存下來|報告檔|紀錄檔/.test(t)) {
+  // 產出檔案——同樣要先排除否定句：「不要產出檔案」含有「產出檔」三個字，沒有這個 guard 的話
+  // 使用者明說不要，需求核對卻列出「產出檔案」並要求模型補一個 write-file。
+  if (!forbidsFileOutput && /存檔|存成|寫檔|產出檔|存下來|報告檔|紀錄檔/.test(t)) {
     add("output", "產出檔案", has("write-file", "excel-process"), "要放 write-file(或 excel-process)把結果存成檔案");
   }
   // 明確說「抓／讀一份資料表或報表」時，圖上必須有真實資料來源；只有一顆 custom-code
@@ -357,7 +507,7 @@ export function checkRequirements(userText: string, graph: GraphLike): Requireme
   // 有這顆節點卻網址是空的，等於還沒真正接上任何資料來源，執行第一次必定失敗或讀到空表，
   // 舊版只看「有沒有這個節點型別」會誤判成需求已滿足(踩過)。
   if (/(抓|讀|取得|下載).{0,10}(資料表|報表)|(資料表|報表).{0,10}(抓|讀|取得|下載)/.test(t)) {
-    const sourceNodes = graph.nodes.filter((node) =>
+    const sourceNodes = allNodes.filter((node) =>
       ["excel-process", "google-sheet-read", "web-page", "read-file", "email-read", "find-email", "download-attachment", "http-request"].includes(node.type),
     );
     // 用 .every() 專門盯著 google-sheet-read：只要圖上還有任何一個 sheetUrl 沒填的
@@ -365,7 +515,7 @@ export function checkRequirements(userText: string, graph: GraphLike): Requireme
     // web-page)就把這顆沒接上的 sheet-read 蓋過去(踩過的邏輯漏洞：.some() 對整個清單求值時，
     // 任何一個不相干的已配置節點都能讓沒配置的 google-sheet-read 被判定「已滿足」)。
     const unconfiguredSheetReads = sourceNodes.filter(
-      (node) => node.type === "google-sheet-read" && !String(node.config?.sheetUrl ?? "").trim(),
+      (node) => node.type === "google-sheet-read" && !String(node.config.sheetUrl ?? "").trim(),
     );
     add(
       "dataSource",
@@ -374,9 +524,16 @@ export function checkRequirements(userText: string, graph: GraphLike): Requireme
       "先用 read-file/google-sheet-read/web-page/email-read 等節點取得真實資料，再交給 AI 或 custom-code 彙總；google-sheet-read 一定要填 sheetUrl(真實試算表網址)，不能留空",
     );
   }
-  // 逐項迴圈
-  if (/每一(筆|項|個)|逐(筆|項|個)|清單裡的每/.test(t)) {
-    add("loop", "清單逐項處理", has("repeat-steps"), "同一組步驟跑清單每一項要用 repeat-steps 節點");
+  // 逐項迴圈——「給我一份月份清單，每個月都要去找那個月的信、下載附件」這種最自然的批次說法，
+  // 舊規則(只認「每一筆/逐項/清單裡的每」)完全配不到。PROJECT_GOAL 已把「對清單批次重複同一組步驟…
+  // 不能為了『每個月一份』而複製貼上一大串幾乎一樣的節點」列為優先驗收情境，卻沒有任何確定性檢查在守
+  // 它，模型愛畫 N 組重複節點就畫、或乾脆繼續反問。加一組「清單類名詞 + 每個X都/各」的組合訊號。
+  // **一定要有清單類名詞才算**：只看「每個月都要」的話，「每天都要寄報表給我」這種單純的排程頻率
+  // 會被誤判成迴圈需求，逼模型硬塞一個沒有清單可跑的 repeat-steps。
+  const mentionsItemList = /清單|列表|名單|一覽/.test(t);
+  const repeatsPerItem = /每個?[一二三四五六七八九十\d]{0,3}(?:月|週|周|天|日|季|年|筆|項|個|人|家|檔|份|封)(?:都|各)/.test(t);
+  if (/每一(筆|項|個)|逐(筆|項|個)|清單裡的每/.test(t) || (mentionsItemList && repeatsPerItem)) {
+    add("loop", "清單逐項處理", has("repeat-steps"), "同一組步驟跑清單每一項要用 repeat-steps 節點(items 引用上游那份清單，steps 裡用 {{item}}／{{item.欄位}} 取當次項目)，不要把同一段步驟複製好幾遍");
   }
   // 試算表——「不要用/不用/改成/換成 試算表」是使用者中途撤回舊說法，不是需求：對話裡整段歷史
   // 都會拿來檢查，使用者常常先提過一個方案、後來改變主意換成別的做法(例如原本想接 Google 試算表，
@@ -410,7 +567,9 @@ export function checkRequirements(userText: string, graph: GraphLike): Requireme
 
 /** 沒達成的項目組成「餵回模型」的修正指示(空字串=全過) */
 export function unmetFeedback(items: RequirementItem[]): string {
-  const unmet = items.filter((i) => !i.met);
+  // needsUser 的項目刻意不餵回模型：那是等使用者按確認，模型「修」它的唯一辦法就是把使用者
+  // 真正需要的步驟刪掉(踩過的設計陷阱：把「等確認」跟「圖不安全」混為一談)。
+  const unmet = items.filter((i) => !i.met && !i.needsUser);
   if (unmet.length === 0) return "";
   return (
     "需求完整性檢查:使用者的需求裡有這些事,但圖上找不到對應的步驟——請補上(其他已正確的部分不要動):\n" +
@@ -421,5 +580,10 @@ export function unmetFeedback(items: RequirementItem[]): string {
 /** 附在 ready 訊息給使用者看的 ✓/✗ 清單(沒有任何檢查項就回空字串) */
 export function checklistText(items: RequirementItem[]): string {
   if (items.length === 0) return "";
-  return "\n\n需求核對:\n" + items.map((i) => `${i.met ? "✅" : "⚠️"} ${i.label}${i.met ? "" : "(這項我沒做到,請再說一次細節)"}`).join("\n");
+  return "\n\n需求核對:\n" + items.map((i) => {
+    if (i.met) return `✅ ${i.label}`;
+    // 等使用者確認的項目要講清楚「這是等你，不是我做不到」，不然使用者會以為 AI 做壞了
+    if (i.needsUser) return `🔒 ${i.label}(需要你在該步驟按一下確認，我不會替你決定)`;
+    return `⚠️ ${i.label}(這項我沒做到,請再說一次細節)`;
+  }).join("\n");
 }
