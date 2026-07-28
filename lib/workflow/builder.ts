@@ -611,7 +611,13 @@ function normalizeIfConditionPorts(nodes: WorkflowNode[], edges: WorkflowEdge[])
  * 判斷原則反過來：**預設讓模型看到全部**，只有整張圖的程式碼真的大到會拖垮提示時才開始截，
  * 而且先截「跟這次需求最無關、體積最大」的那幾個，跟需求相關的節點永遠不截。
  */
-const CODE_BUDGET_CHARS = 40_000;
+// 80,000 字 ≈ 20,000 token，約佔現代模型視窗的一成。這個值是照**這台機器上真實流程的實際大小**
+// 訂的：目前最大的一條有 71,642 字程式碼(31 個節點)，訂在 80,000 才能讓現有每一條流程都完整
+// 被看到，不必依賴「哪些節點跟需求相關」那套字面比對——那套比對本來就會失手(真實踩過：使用者
+// 要改產出檔名，真正算出檔名的節點因為名稱/程式碼裡沒有他講的字而被判定不相關、程式碼被截掉，
+// 模型只好整段盲寫然後逾時)。與其把正確性押在啟發式上，不如直接把東西給它看。
+// 只有超過這個量的超大流程才會啟動截斷，那時相關性比對仍是最後一道保護。
+const CODE_BUDGET_CHARS = 80_000;
 
 function truncateCode(cfg: Record<string, unknown>, exactKeep: string[] = [], fuzzyKeep: string[] = [], label = ""): Record<string, unknown> {
   if (typeof cfg.code === "string" && cfg.code.length > 120) {

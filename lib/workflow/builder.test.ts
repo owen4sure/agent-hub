@@ -679,7 +679,8 @@ test("建圖提示：超過預算時先截「跟需求無關、體積最大」�
   const bulkMarker = "__BULK_SHOULD_BE_TRUNCATED__";
   // 相關節點：label 含使用者講的裸字代碼字根(agg)；體積大的無關節點負責把總量推過預算
   const relevantCode = `const agg1 = 1; // ${relevantMarker}\n` + "// r\n".repeat(50);
-  const bulkCode = `const z = 0; // ${bulkMarker}\n` + "// bulk filler line\n".repeat(2500);
+    // 要真的推過 CODE_BUDGET_CHARS 才會觸發截斷；用行數把它撐到 8 萬字以上
+  const bulkCode = `const z = 0; // ${bulkMarker}\n` + "// bulk filler line\n".repeat(5000);
   await buildWorkflow(
     client, "test-builder-model",
     [{ role: "user", parts: [{ kind: "text", text: "要抓的代碼改成：agg1~agg6、agg19" }] }],
