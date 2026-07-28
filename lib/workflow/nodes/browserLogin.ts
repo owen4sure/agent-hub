@@ -5,7 +5,21 @@ import type { NodeDefinition, NodeContext } from "../types";
 import { PermanentError } from "../types";
 import { cfgStr, solveCaptchaFromLocator } from "../nodeHelpers";
 
-const MAX_CAPTCHA_ATTEMPTS = 3;
+/**
+ * 驗證碼重試的預算。
+ *
+ * 為什麼從「寫死 3 次」改成時間預算：使用者實測回報「登入失敗大部分是因為錯三次」——不是帳密
+ * 有問題，是驗證碼辨識連錯三張就放棄。每次失敗本來就會換一張全新的驗證碼重讀，所以次數直接
+ * 決定成功率：若單張辨識率是四成，三次只有 78%、十次就到 99.4%。用三這個數字，等於把將近
+ * 四分之一的登入白白丟掉。
+ *
+ * 不改成「寫死 10 次」的理由：每一次嘗試的耗時差很多(頁面載入、視覺模型主力+備援、送出等待)，
+ * 固定次數在慢站會撞上節點逾時、在快站又浪費得起的預算沒用到。改成「還有時間就繼續換一張試」，
+ * 並把節點逾時放寬到容納得下這段預算。上限只是防失控的保險，不是正常會碰到的值。
+ */
+const CAPTCHA_RETRY_BUDGET_MS = 4 * 60_000;
+const CAPTCHA_ATTEMPT_HARD_CAP = 15;
+const LOGIN_NODE_TIMEOUT_MS = 6 * 60_000;
 
 /**
  * Mail2000 的重新登入頁會把上次帳號預填後設成 disabled，只要使用者重填密碼。
@@ -81,9 +95,11 @@ export const browserLoginNode: NodeDefinition = {
     return fields;
   },
   retryable: true,
-  // 這個節點內部已會針對 3 張新驗證碼重試。引擎若再重試 3 次會變成最多 9 次登入，
-  // 外部視覺服務故障時更會把逾時放大成數分鐘，所以整體只跑一次。
+  // 這個節點內部已經會在時間預算內不斷換新驗證碼重試。引擎若再重試會把整段預算乘上倍數，
+  // 外部視覺服務故障時更會把逾時放大到十幾分鐘，所以整體只跑一次。
   maxAttempts: 1,
+  // 內部重試需要空間：預設的 3 分鐘容納不下驗證碼的重試預算，會在還有機會時就被外層砍掉。
+  timeoutMs: LOGIN_NODE_TIMEOUT_MS,
   async execute(ctx) {
     const url = cfgStr(ctx, "url");
     const account = ctx.secrets[cfgStr(ctx, "accountSecret", "webmailAccount")];
@@ -104,7 +120,10 @@ export const browserLoginNode: NodeDefinition = {
 
     const page = await ctx.session.getPage();
 
-    for (let attempt = 1; attempt <= MAX_CAPTCHA_ATTEMPTS; attempt++) {
+    const captchaDeadline = Date.now() + CAPTCHA_RETRY_BUDGET_MS;
+    let attempt = 0;
+    while (attempt < CAPTCHA_ATTEMPT_HARD_CAP && Date.now() < captchaDeadline) {
+      attempt++;
       ctx.log(`開啟登入頁：${url}${attempt > 1 ? `(第 ${attempt} 次)` : ""}`);
       await page.goto(url);
       // 導頁後先存一份頁面(截圖+HTML)，這樣即使選擇器找不到，AI 修復時也有實際 DOM 可讀
@@ -176,7 +195,9 @@ export const browserLoginNode: NodeDefinition = {
       ctx.log(`第 ${attempt} 次未成功(${looksLikeCaptcha ? "驗證碼判讀錯" : "原因不明，先當驗證碼錯"})，換一張驗證碼重試`);
     }
     await saveDebug(ctx, "99-captcha-failed");
-    // 重試多次都沒過：多半是驗證碼一直判讀錯，但也可能帳密不對 → 訊息兩種都提，交給人/AI 判斷
-    throw new Error(`登入試了 ${MAX_CAPTCHA_ATTEMPTS} 次都沒成功，多半是驗證碼一直判讀錯；若確定驗證碼沒問題，請到設定頁確認帳號密碼是否正確`);
+    // 重試多次都沒過：多半是驗證碼一直判讀錯，但也可能帳密不對 → 訊息兩種都提，交給人/AI 判斷。
+    // 把「實際試了幾次」講出來：這個數字是判斷「辨識率低」還是「根本登不進去」的唯一依據，
+    // 少了它，之後看紀錄完全分不出是該再加預算還是該改帳密。
+    throw new Error(`登入連續換了 ${attempt} 張驗證碼都沒成功(共花 ${Math.round((Date.now() - (captchaDeadline - CAPTCHA_RETRY_BUDGET_MS)) / 1000)} 秒)，多半是驗證碼一直判讀錯；若確定驗證碼沒問題，請到設定頁確認帳號密碼是否正確`);
   },
 };
