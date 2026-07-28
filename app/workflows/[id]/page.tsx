@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
   ReactFlow,
@@ -37,7 +37,7 @@ import { nodeTypes } from "./nodeVisuals";
 import { edgeTypes } from "./WFEdge";
 import { AddNodePanel } from "./AddNodePanel";
 import { nodeSummary } from "@/lib/workflow/nodeSummary";
-import { plainChatMessage, plainLanguage } from "@/lib/workflow/plainLanguage";
+import { plainChatMessage, plainLanguage, userWordsToPreserve } from "@/lib/workflow/plainLanguage";
 import { latestLiveRunDetail, type PublicRunLog } from "@/lib/workflow/liveProgress";
 import { directGoogleSlidesRefreshUrls } from "@/lib/workflow/directGoogleLinks";
 import { RunForm } from "./RunForm";
@@ -165,6 +165,14 @@ export default function WorkflowPage() {
     chat, thinking, pendingGraph, autoTest, reloadToken, editToast, verifying, pendingExecution,
     pendingInput, activeExecution, pendingApproval, pendingTrust,
   } = useWFChat(id);
+  // 使用者自己在這段對話裡打過的英數字詞。顯示層是**第二次**白話化(伺服器存訊息前已經帶著
+  // 保留名單做過一次)，不把名單帶進來的話，伺服器好不容易保住的品牌名/專案名會在畫面上再被
+  // 翻譯掉一次——真實踩過：使用者說「檔名改成 某品牌A,某品牌B」，存下來的訊息是對的，畫面上
+  // 卻顯示成「前面步驟提供的「某品牌A」資料,某品牌B」，使用者完全無法核對 AI 做了什麼。
+  const chatUserWords = useMemo(
+    () => userWordsToPreserve(chat.filter((m) => m.role === "user").flatMap((m) => m.parts).map((p) => (p.kind === "text" ? p.text : "")).join("\n")),
+    [chat],
+  );
   const [approvalNote, setApprovalNote] = useState("");
   useEffect(() => { void recoverChatRuntime(id); }, [id]);
   const [toast, setToast] = useState<{ text: string; token: number } | null>(null);
@@ -2485,7 +2493,7 @@ export default function WorkflowPage() {
                       p.kind === "text" ? (
                         // overflow-wrap:anywhere(不是 break-word)——只有 anywhere 會同時「縮小 min-content
                         // 尺寸」,長網址才真的斷得掉、氣泡才縮得下去。break-word 不影響 min-content 所以治不了。
-                        <p key={j} className="whitespace-pre-wrap [overflow-wrap:anywhere] text-sm">{m.role === "assistant" ? plainChatMessage(p.text) : p.text}</p>
+                        <p key={j} className="whitespace-pre-wrap [overflow-wrap:anywhere] text-sm">{m.role === "assistant" ? plainChatMessage(p.text, chatUserWords) : p.text}</p>
                       ) : p.kind === "image" && p.b64 ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img key={j} src={`data:${p.mime || "image/png"};base64,${p.b64}`} alt={p.name ?? "已附上的圖片"} className="rounded-lg max-h-32 border" />

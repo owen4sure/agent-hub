@@ -323,7 +323,13 @@ export function plainLanguage(value: string, paramLabels: Record<string, string>
 }
 
 /** 對話顯示層也處理舊版已存下來的 key=value 結果，讓升級後不用清除舊對話才看得到白話。 */
-export function plainChatMessage(value: string): string {
+/**
+ * 對話顯示層的白話化。preserve 是「使用者自己在這段對話裡打過的字」——顯示層是**第二次**
+ * 白話化(伺服器存訊息前已經做過一次，而且那次有帶保留名單)，沒有這個參數的話，伺服器好不容易
+ * 保住的品牌名/專案名會在畫面上再被翻譯掉一次(真實踩過：使用者說「檔名改成 某品牌A,某品牌B」，
+ * 存下來的訊息是對的，畫面上卻顯示成「前面步驟提供的「某品牌A」資料,某品牌B」)。
+ */
+export function plainChatMessage(value: string, preserve?: ReadonlySet<string>): string {
   // 使用不同標記，避免內層 plainLanguage 的還原器把外層暫存片段誤當成自己的索引而刪掉。
   const protectedValue = protectLiteralPieces(String(value ?? ""), "", "");
   const humanizedPairs = protectedValue.text.replace(
@@ -336,5 +342,5 @@ export function plainChatMessage(value: string): string {
       return humanizePreviewPair(key, parsed);
     },
   );
-  return protectedValue.restore(plainLanguage(humanizedPairs));
+  return protectedValue.restore(plainLanguage(humanizedPairs, {}, preserve));
 }

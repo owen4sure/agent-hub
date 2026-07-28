@@ -1594,7 +1594,16 @@ export async function buildWorkflow(
           || e.codeReplace !== undefined
           || editedKeys.some((key) => {
             if (isTruncationMarkerEcho(e.config[key])) return false;  // 標記回聲＝「這欄我沒要改」
-            if (typeof e.stepIndex === "number") return true;         // 內嵌步驟的現況在 steps JSON 裡，交給套用階段比對
+            // 內嵌步驟的現況藏在 steps JSON 字串裡，要解出來比對。以前這裡直接 return true
+            // 「交給套用階段比對」，但套用階段那條分支根本沒有這道檢查——兩邊都以為對方會擋，
+            // 結果是一筆什麼都沒改的內嵌修改一路通過，使用者收到「✅ 已實際套用」卻什麼都沒變。
+            if (typeof e.stepIndex === "number") {
+              try {
+                const steps = JSON.parse(String(node!.config.steps ?? "[]")) as { config?: Record<string, unknown> }[];
+                const current = Array.isArray(steps) ? steps[e.stepIndex]?.config?.[key] : undefined;
+                return JSON.stringify(e.config[key]) !== JSON.stringify(current);
+              } catch { return true; }  // 解不出來就別在這裡擋，讓套用階段報那個更精確的 JSON 錯誤
+            }
             return JSON.stringify(e.config[key]) !== JSON.stringify(node!.config[key]);
           });
         if (!changesSomething) {

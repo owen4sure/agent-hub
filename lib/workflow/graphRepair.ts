@@ -239,6 +239,18 @@ export function applyNodeConfigEdits(
         ? e.label.trim()
         : undefined;
       const newSteps = steps.map((s, i) => (i === e.stepIndex ? { ...s, config: newStepConfig, ...(renamedStepLabel ? { label: renamedStepLabel } : {}) } : s));
+      // 內嵌步驟也要有「等於沒改」的守門。頂層節點早就有這道檢查，這條分支卻沒有——結果是模型
+      // 送一筆跟現況完全相同的內嵌修改，照樣被當成套用成功、把一模一樣的 JSON 寫回去，使用者收到
+      // 「✅ 已實際套用到步驟」卻什麼都沒變(真實踩過：AI 宣稱已改掉某一步的名稱，磁碟上的
+      // 名稱原封不動)。假成功比失敗更糟：使用者不會再回來檢查。
+      if (JSON.stringify(newSteps) === JSON.stringify(steps)) {
+        skipped.push({
+          nodeId: node.id,
+          reason: `「${node.label}」第 ${e.stepIndex} 步的修改跟目前完全一樣，等於沒改。`
+            + `要改這一步的名稱請在同一筆 edits 帶 "label"；要改程式碼請帶 codeReplace 或完整 code。`,
+        });
+        continue;
+      }
       const newConfig = { ...node.config, steps: JSON.stringify(newSteps) };
       const describeStep = (label: string | undefined) => `${node!.label}(第${e.stepIndex! + 1}步:${label ?? step.type})`;
       const stepEditLabel = describeStep(renamedStepLabel ?? step.label);

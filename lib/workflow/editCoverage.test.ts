@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { findCoverageGaps, coverageWarning, requestedLiterals } from "./editCoverage";
-import { plainLanguage, userWordsToPreserve } from "./plainLanguage";
+import { plainChatMessage, plainLanguage, userWordsToPreserve } from "./plainLanguage";
 
 /**
  * 這批測試對應的實測結果：同一句白話需求連跑多次，會在「完全做對／停下來問／**宣告成功但只做
@@ -67,4 +67,14 @@ test("白話化：使用者自己打過的品牌名要原樣保留，不能被�
 test("白話化：使用者沒講過的內部欄位名照舊白話化，保留名單不能變成全面停用", () => {
   const result = plainLanguage("這一步會輸出 someInternalField 給下一步", {}, userWordsToPreserve("檔名改成 BrandAlpha"));
   assert.ok(!result.includes("someInternalField") || result.includes("前面步驟提供的"), `使用者沒提過的欄位仍要處理：${result}`);
+});
+
+test("顯示層白話化：使用者自己講過的字，第二次白話化也不能翻譯掉", () => {
+  // 真實踩過：伺服器存訊息前已帶保留名單處理過(存下來的內容是對的)，但畫面渲染又跑一次
+  // plainChatMessage 而且沒帶名單，使用者看到的仍是被翻譯過的版本，完全無法核對 AI 做了什麼。
+  const userSaid = "最後產出檔案的名稱改成：BrandAlpha,BrandBeta（第二季結算）";
+  const serverMessage = "輸出檔名已就位：格式為 BrandAlpha,BrandBeta（quarterLabel結算）";
+  const shown = plainChatMessage(serverMessage, userWordsToPreserve(userSaid));
+  assert.match(shown, /BrandAlpha,BrandBeta/, `使用者自己講的名字不能被翻譯：${shown}`);
+  assert.ok(shown.includes("前面步驟提供的「quarterLabel」"), "使用者沒講過的內部欄位仍要白話化");
 });

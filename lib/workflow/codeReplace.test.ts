@@ -248,3 +248,27 @@ test("套用 edits：沒帶 label 就不要動內嵌步驟的名稱(小改動不
     deleteWorkflow(workflow.id);
   }
 });
+
+test("套用 edits：內嵌步驟送來跟現況一模一樣的修改，要當成沒改擋下來，不能回報成功", () => {
+  // 真實踩過的假成功：AI 回覆「✅ 已實際套用到步驟，標籤已改為…」，磁碟上的 md5 卻完全沒變。
+  // 頂層節點早就有「等於沒改」的守門，這條內嵌分支卻沒有，兩邊都以為對方會擋。
+  const workflow = createWorkflow(`test-step-noop-${Date.now()}`);
+  try {
+    const steps = [{ type: "custom-code", label: "擷取資料", config: { intent: "抓資料", code: "return { ...ctx.input };" } }];
+    saveWorkflow({
+      ...workflow,
+      nodes: [{ id: "loop1", type: "repeat-steps", label: "每月重複", config: { items: "[]", itemVar: "item", outputKey: "results", steps: JSON.stringify(steps) }, position: { x: 0, y: 0 } }],
+      edges: [],
+    });
+    const before = JSON.stringify(getWorkflow(workflow.id)?.nodes[0]?.config.steps);
+    const result = applyNodeConfigEdits(workflow.id, [
+      { nodeId: "loop1", stepIndex: 0, config: { intent: "抓資料" } },  // 跟現況完全相同
+    ]);
+    assert.equal(result.edits.length, 0, "沒有實際變動就不能算成一筆套用成功");
+    assert.equal(result.skipped.length, 1);
+    assert.match(result.skipped[0].reason, /等於沒改/);
+    assert.equal(JSON.stringify(getWorkflow(workflow.id)?.nodes[0]?.config.steps), before);
+  } finally {
+    deleteWorkflow(workflow.id);
+  }
+});
