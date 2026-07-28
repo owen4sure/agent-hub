@@ -41,11 +41,20 @@ export interface ChatMessage {
   isControl?: boolean;
 }
 
+/** 對話修改要套用的一筆節點修改。套用層(applyNodeConfigEdits)與 builder 共用同一個形狀。 */
+export interface BuilderEdit {
+  nodeId: string;
+  stepIndex?: number;
+  config: Record<string, unknown>;
+  label?: string;
+  codeReplace?: CodeReplacement[];
+}
+
 export type BuildResult =
   | { phase: "clarify"; message: string }
   | { phase: "answer"; message: string }
   | { phase: "ready"; message: string; nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[]; schedule?: SuggestedSchedule; autoWebhook?: boolean; onFailureWorkflow?: string }
-  | { phase: "edits"; message: string; edits: { nodeId: string; stepIndex?: number; config: Record<string, unknown>; label?: string; codeReplace?: CodeReplacement[] }[]; triggerParams?: ParamField[]; structure?: GraphStructureEdits; schedule?: SuggestedSchedule };
+  | { phase: "edits"; message: string; edits: BuilderEdit[]; triggerParams?: ParamField[]; structure?: GraphStructureEdits; schedule?: SuggestedSchedule };
 
 export interface SuggestedSchedule {
   cron: string;
@@ -1225,6 +1234,9 @@ export async function buildWorkflow(
   /** 這次建圖的絕對截止時間(來自 buildControl.beginBuild)。傳給本機 Claude Code 當預算，
    * 讓「模型跑太久沒收尾」由它自己先報出具體原因，而不是被外層通用逾時蓋掉(真實踩過)。 */
   deadlineAt?: number,
+  /** 用套用層乾跑一次這包修改，回傳它會拒絕的理由(空陣列=收得下)。由呼叫端注入，builder 因此
+   * 不必自己碰檔案系統，也不用把套用層的每一種拒絕理由在這裡重寫一份(重寫必然漂移)。 */
+  validateEdits?: (edits: BuilderEdit[], triggerParams?: ParamField[]) => string[],
 ): Promise<BuildResult> {
   const requestedModel = model;
   model = builderModelForHistory(model, history);
@@ -1679,6 +1691,16 @@ export async function buildWorkflow(
         if (unused.length > 0) {
           problems.push(`新增的執行選項 ${unused.map((field) => `「${field.label}」(${field.key})`).join("、")} 沒有被任何節點設定或程式引用。不能只長出表單；請把真正使用這些值的節點一併改好。`);
         }
+      }
+      // ── 最後一道：真的拿套用層試套一次(不寫入)，把它會拒絕的理由當燃料餵回迴圈 ──
+      // 這是整個對話修改最結構性的缺口：套用層有十幾種拒絕理由，但只有少數幾種在上面被重寫成
+      // builder 自己的檢查，其餘全部要等到迴圈結束、送進套用階段才被擋下——那時已經沒有重試機會，
+      // 只能回頭問使用者。而使用者看不到節點內部，那些理由對他完全無解(真實踩過好幾輪)。
+      // 改成在迴圈內就問套用層「這包你收不收」：模型當場拿到具體理由再改一次，而不是把
+      // 平台自己解得了的問題丟回給人。新增任何拒絕理由都自動享有這條回路，不用再逐一補檢查。
+      if (problems.length === 0 && validateEdits && (rawEdits.length > 0 || editedTriggerParams !== undefined)) {
+        const applyProblems = validateEdits(rawEdits, editedTriggerParams);
+        if (applyProblems.length > 0) problems.push(...applyProblems);
       }
       if (problems.length === 0) {
         return { phase: "edits", message: plainLanguage(String(obj.message ?? "已調整流程設定"), {}, userWordsToPreserve(requirementText)), edits: rawEdits, triggerParams: editedTriggerParams, structure, schedule: editedSchedule };

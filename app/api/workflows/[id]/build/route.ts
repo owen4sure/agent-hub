@@ -533,6 +533,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         runtimeContext, build.signal,
         (stage) => setBuildStage(id, stage, build.token),
         build.deadlineAt,
+        // 讓建圖迴圈在「還能重試」的時候就知道套用層收不收這包修改。沒有這條回路的話，
+        // 套用層十幾種拒絕理由裡只有少數在 builder 那邊被重寫成自己的檢查，其餘都要等到
+        // 迴圈結束才被擋下，然後變成一句使用者無法處理的 clarify——他看不到節點內部，
+        // 那些理由對他等於無解。乾跑(apply:false)不會寫入任何東西。
+        (edits, triggerParams) => {
+          try {
+            return applyNodeConfigEdits(id, edits, { apply: false, triggerParams }).skipped.map((item) => item.reason);
+          } catch {
+            return [];  // 乾跑本身失敗(例如流程剛被刪)不該把合法修改擋掉，交給後面真正的套用階段報錯
+          }
+        },
       );
     } finally {
       finishBuild(id, build.token);

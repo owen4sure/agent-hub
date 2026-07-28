@@ -1198,3 +1198,43 @@ test("builder 失敗備援繞過：只讀需求下 onFailureWorkflow 指向看�
   if (result.phase !== "ready") return;
   assert.equal(result.phase === "ready" ? result.onFailureWorkflow : undefined, undefined, "最終交付的圖不得留下無法確認的失敗備援");
 });
+
+// 結構性缺口：套用層有十幾種拒絕理由，過去只有少數幾種在 builder 這邊被重寫成自己的檢查，
+// 其餘都要等到迴圈結束、送進套用階段才被擋下——那時已經沒有重試機會，只能回頭問使用者，
+// 而使用者看不到節點內部，那些理由對他等於無解。現在建圖迴圈內就會拿套用層乾跑一次，
+// 把它的拒絕理由當燃料餵回模型。新增任何拒絕理由都自動享有這條回路，不用再逐一補檢查。
+test("建圖迴圈：套用層會拒絕的修改要在迴圈內就餵回模型重試，不能丟給使用者", async () => {
+  const responses = [
+    JSON.stringify({ phase: "edits", message: "先這樣改", edits: [{ nodeId: "n1", config: { value: "1" } }] }),
+    JSON.stringify({ phase: "edits", message: "改成真的可行的版本", edits: [{ nodeId: "n1", config: { value: "2" } }] }),
+  ];
+  let calls = 0;
+  let lastPrompt = "";
+  const client = {
+    chat: { completions: { create: async (params: { messages: { role: string; content: string }[] }) => {
+      calls++;
+      lastPrompt = params.messages.map((m) => m.content).join("\n");
+      return { choices: [{ message: { content: responses.shift() ?? "" }, finish_reason: "stop" }] };
+    } } },
+  } as never;
+  let asked = 0;
+  const result = await buildWorkflow(
+    client, "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "把那個值改掉" }] }],
+    {
+      nodes: [
+        { id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
+        { id: "n1", type: "set-variable", label: "設變數", config: { name: "x", value: "0" }, position: { x: 300, y: 0 } },
+      ],
+      edges: [{ from: "trigger", to: "n1" }],
+    },
+    undefined, undefined, undefined, undefined,
+    // 第一次乾跑回報「套用層不收」，第二次收下——模擬套用層才知道的那些拒絕理由
+    () => (++asked === 1 ? ["套用層拒絕的具體理由：這一步的設定跟現況相同"] : []),
+  );
+  assert.equal(asked, 2, "每一輪都要問過套用層");
+  assert.equal(calls, 2, "套用層拒絕時要餵回模型再試一次，不是直接放棄");
+  assert.match(lastPrompt, /套用層拒絕的具體理由/, "拒絕理由要真的進到下一輪提示裡");
+  assert.equal(result.phase, "edits");
+  assert.equal(result.phase === "edits" ? result.edits[0]?.config.value : "MISSING", "2", "最後採用的是通過套用層檢查的那一版");
+});
