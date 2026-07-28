@@ -667,21 +667,20 @@ test("建圖提示：整張圖的程式碼沒超過預算時，全部原文都�
   assert.match(lastPrompt, new RegExp(marker), "沒超過預算就不該截——看不到原文正是模型只能瞎猜的根因");
 });
 
-test("建圖提示：超過預算時先截「跟需求無關、體積最大」的，跟需求相關的永遠留完整原文", async () => {
+test("建圖提示：真的超過上限而截掉程式碼時，一定要在回覆裡告訴使用者哪幾步沒被看到", async () => {
   let lastPrompt = "";
   const client = {
     chat: { completions: { create: async (params: { messages: { role: string; content: string }[] }) => {
       lastPrompt = params.messages.map((m) => m.content).join("\n");
-      return { choices: [{ message: { content: JSON.stringify({ phase: "answer", message: "看過了" }) }, finish_reason: "stop" }] };
+      return { choices: [{ message: { content: JSON.stringify({ phase: "edits", message: "已改好", edits: [{ nodeId: "small", config: { intent: "換個說明" } }] }) }, finish_reason: "stop" }] };
     } } },
   } as never;
   const relevantMarker = "__RELEVANT_MUST_SURVIVE__";
   const bulkMarker = "__BULK_SHOULD_BE_TRUNCATED__";
-  // 相關節點：label 含使用者講的裸字代碼字根(agg)；體積大的無關節點負責把總量推過預算
   const relevantCode = `const agg1 = 1; // ${relevantMarker}\n` + "// r\n".repeat(50);
-    // 要真的推過 CODE_BUDGET_CHARS 才會觸發截斷；用行數把它撐到 8 萬字以上
-  const bulkCode = `const z = 0; // ${bulkMarker}\n` + "// bulk filler line\n".repeat(5000);
-  await buildWorkflow(
+  // 要真的推過 CODE_CEILING_CHARS(20 萬字)才會觸發截斷——現實流程不會到，這裡是刻意製造
+  const bulkCode = `const z = 0; // ${bulkMarker}\n` + "// bulk filler line\n".repeat(11000);
+  const result = await buildWorkflow(
     client, "test-builder-model",
     [{ role: "user", parts: [{ kind: "text", text: "要抓的代碼改成：agg1~agg6、agg19" }] }],
     {
@@ -693,8 +692,11 @@ test("建圖提示：超過預算時先截「跟需求無關、體積最大」�
       edges: [{ from: "trigger", to: "small" }, { from: "small", to: "bulk" }],
     },
   );
-  assert.match(lastPrompt, new RegExp(relevantMarker), "跟需求相關的節點永遠不能被截");
-  assert.doesNotMatch(lastPrompt, new RegExp(bulkMarker), "超過預算時，無關又最大的那個要先被截掉");
+  assert.match(lastPrompt, new RegExp(relevantMarker), "跟需求相關的節點永遠最後才被犧牲");
+  assert.doesNotMatch(lastPrompt, new RegExp(bulkMarker), "超過上限時，無關又最大的先被截掉");
+  const message = result.phase === "edits" ? result.message : "";
+  assert.match(message, /沒有看到/, `截掉東西一定要講出來，不能無聲進行：${message}`);
+  assert.match(message, /無關的大節點/, "要指名是哪一步沒被看到，使用者才知道哪裡的判斷不可信");
 });
 
 test("builder 附檔手動流程：模型誤把上傳檔案當資料夾監聽時，系統要求直接建立選檔流程", async () => {

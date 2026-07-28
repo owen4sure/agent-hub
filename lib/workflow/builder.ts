@@ -611,13 +611,19 @@ function normalizeIfConditionPorts(nodes: WorkflowNode[], edges: WorkflowEdge[])
  * 判斷原則反過來：**預設讓模型看到全部**，只有整張圖的程式碼真的大到會拖垮提示時才開始截，
  * 而且先截「跟這次需求最無關、體積最大」的那幾個，跟需求相關的節點永遠不截。
  */
-// 80,000 字 ≈ 20,000 token，約佔現代模型視窗的一成。這個值是照**這台機器上真實流程的實際大小**
-// 訂的：目前最大的一條有 71,642 字程式碼(31 個節點)，訂在 80,000 才能讓現有每一條流程都完整
-// 被看到，不必依賴「哪些節點跟需求相關」那套字面比對——那套比對本來就會失手(真實踩過：使用者
-// 要改產出檔名，真正算出檔名的節點因為名稱/程式碼裡沒有他講的字而被判定不相關、程式碼被截掉，
-// 模型只好整段盲寫然後逾時)。與其把正確性押在啟發式上，不如直接把東西給它看。
-// 只有超過這個量的超大流程才會啟動截斷，那時相關性比對仍是最後一道保護。
-const CODE_BUDGET_CHARS = 80_000;
+/**
+ * 程式碼「完全不截」的上限。這不是省提示用的預算，而是**防爆的最後一道**。
+ *
+ * 訂這個值的原則是使用者拍板的：「就是要全部看得到啊，這對他來說都不是很長的上下文吧」。
+ * 換算一下他說得對——這台機器上最大的一條流程有 71,642 字程式碼(31 個節點)，約 18,000 token，
+ * 佔現代模型 200,000 token 視窗不到一成。訂一個剛好卡在現況上方的數字，只是把同一個坑留給
+ * 未來節點更多的自己：流程一長大就又開始有東西看不到，而且看不到的當下毫無徵兆。
+ *
+ * 所以這個值訂在 200,000 字(約 50,000 token，約視窗的四分之一)，遠高於任何實際流程；
+ * 而且**萬一真的超過，不再無聲截斷**——會把「有哪些步驟的程式碼沒被看到」一起回報給使用者。
+ * 無聲截斷正是這一整批問題的共同成因：模型看不到原文卻沒有人知道，只能瞎猜然後逾時。
+ */
+const CODE_CEILING_CHARS = 200_000;
 
 function truncateCode(cfg: Record<string, unknown>, exactKeep: string[] = [], fuzzyKeep: string[] = [], label = ""): Record<string, unknown> {
   if (typeof cfg.code === "string" && cfg.code.length > 120) {
@@ -686,7 +692,27 @@ function isRelevantCode(cfg: Record<string, unknown>, exactKeep: string[], fuzzy
  * repeat-steps 的程式碼不在頂層 config.code，而是包在 config.steps 這包 JSON 字串裡每一步自己的
  * config.code，所以預算計算與截斷都必須遞迴進去(漏掉的話迴圈裡那幾千字會完全逃過計算)。
  */
-function compactGraphJson(graph: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }, exactKeep: string[] = [], fuzzyKeep: string[] = []): string {
+export interface CompactGraph {
+  text: string;
+  /** 因為超過上限而沒被完整放進提示的步驟。空陣列＝模型看到了全部原文。
+   * 一定要往上傳到使用者看得到的地方：無聲截斷就是這一整批問題的共同成因。 */
+  hiddenCode: string[];
+}
+
+/**
+ * 真的有步驟的程式碼沒進提示時，一定要講出來。這是整批問題的共同教訓：模型看不到原文卻
+ * 沒有任何人知道，於是它只能瞎猜，而使用者拿到一個看起來很有自信、實際上瞎編的答案。
+ * 寧可讓使用者知道「這次我沒看到全部」，也不要讓他以為 AI 掌握了整條流程。
+ */
+export function hiddenCodeWarning(hiddenCode: string[]): string {
+  if (hiddenCode.length === 0) return "";
+  const list = hiddenCode.slice(0, 5).map((name) => `「${name}」`).join("、");
+  const more = hiddenCode.length > 5 ? `等 ${hiddenCode.length} 個步驟` : "";
+  return `\n\n⚠️ 這條流程太大，我這次沒有看到 ${list}${more} 的完整程式碼，`
+    + `所以跟那幾步有關的判斷可能不準。要改那幾步的話，請直接點名是哪一步，我會針對它重新看過。`;
+}
+
+function compactGraphJson(graph: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }, exactKeep: string[] = [], fuzzyKeep: string[] = []): CompactGraph {
   const parseSteps = (cfg: Record<string, unknown>): { type: string; label?: string; config: Record<string, unknown> }[] | null => {
     if (typeof cfg.steps !== "string") return null;
     try {
@@ -716,10 +742,12 @@ function compactGraphJson(graph: { nodes: WorkflowNode[]; edges: WorkflowEdge[] 
   // ② 只有超過預算才截，而且「無關的、大的」先截；相關的永遠留完整
   const truncateKeys = new Set<string>();
   let total = holders.reduce((sum, holder) => sum + holder.size, 0);
-  if (total > CODE_BUDGET_CHARS) {
-    const candidates = holders.filter((holder) => !holder.relevant).sort((a, b) => b.size - a.size);
+  if (total > CODE_CEILING_CHARS) {
+    // 先砍無關的、大的；真的還是超過就連相關的也得砍(否則提示會直接爆掉)，
+    // 但兩種情況都會被列進 hiddenCode 讓使用者知道模型沒看到什麼。
+    const candidates = [...holders].sort((a, b) => (a.relevant === b.relevant ? b.size - a.size : a.relevant ? 1 : -1));
     for (const candidate of candidates) {
-      if (total <= CODE_BUDGET_CHARS) break;
+      if (total <= CODE_CEILING_CHARS) break;
       truncateKeys.add(candidate.key);
       total -= candidate.size;
     }
@@ -738,7 +766,15 @@ function compactGraphJson(graph: { nodes: WorkflowNode[]; edges: WorkflowEdge[] 
     }
     return { id: n.id, type: n.type, label: n.label, config: cfg };
   });
-  return JSON.stringify({ nodes, edges: graph.edges });
+  const labelOf = (key: string): string => {
+    const [nodeId, stepIndex] = key.split("#");
+    const node = graph.nodes.find((n) => n.id === nodeId);
+    if (!node) return key;
+    if (stepIndex === undefined) return node.label || node.id;
+    const steps = parseSteps(node.config);
+    return `${node.label || node.id} 第 ${Number(stepIndex) + 1} 步：${steps?.[Number(stepIndex)]?.label ?? "(未命名)"}`;
+  };
+  return { text: JSON.stringify({ nodes, edges: graph.edges }), hiddenCode: [...truncateKeys].map(labelOf) };
 }
 
 /**
@@ -1320,7 +1356,8 @@ export async function buildWorkflow(
   // 做針對性修改時看得到內文；其餘節點照常截斷控制提示大小)
   const lastUserMsg = [...history].reverse().find((m) => m.role === "user");
   const lastUserPlainText = (lastUserMsg?.parts ?? []).map((p) => (p.kind === "text" ? p.text : "")).join("\n");
-  const graphStr = compactGraphJson(currentGraph, quotedStrings(lastUserPlainText), bareTechnicalTokens(lastUserPlainText));
+  const compacted = compactGraphJson(currentGraph, quotedStrings(lastUserPlainText), bareTechnicalTokens(lastUserPlainText));
+  const graphStr = compacted.text;
   const fullHistory = history;
   const latestUserText = lastUserMsg ? userRequirementText([lastUserMsg]) : "";
   // 對話歷史是「理解脈絡」用，不是把所有舊命令永久疊加成不能推翻的契約。
@@ -1779,7 +1816,7 @@ export async function buildWorkflow(
         if (applyProblems.length > 0) problems.push(...applyProblems);
       }
       if (problems.length === 0) {
-        return { phase: "edits", message: plainLanguage(String(obj.message ?? "已調整流程設定"), {}, userWordsToPreserve(requirementText)), edits: rawEdits, triggerParams: editedTriggerParams, structure, schedule: editedSchedule };
+        return { phase: "edits", message: plainLanguage(String(obj.message ?? "已調整流程設定"), {}, userWordsToPreserve(requirementText)) + hiddenCodeWarning(compacted.hiddenCode), edits: rawEdits, triggerParams: editedTriggerParams, structure, schedule: editedSchedule };
       }
       lastProblems = problems;
     }
