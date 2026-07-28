@@ -15,13 +15,14 @@ import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../cla
 import { communityRefsSection } from "../communityIndex";
 import { checkRequirements, unmetFeedback, checklistText, isManualFileUploadRequested, hasCustomCodeFileReader } from "./requirementCheck";
 import { getSharedSecrets } from "../settingsStore";
-import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
+import type { Workflow, WorkflowNode, WorkflowEdge, ParamField } from "./types";
 import { materializeChatAttachment } from "../chatAttachments";
 import { KNOWN_WORKING_MODELS, MODELS, VISION_MODELS, supportsVision } from "../models";
-import { plainLanguage } from "./plainLanguage";
+import { userWordsToPreserve, plainLanguage } from "./plainLanguage";
 import { parseCron } from "../cron";
 import { hasStructureChanges, planGraphStructureEdits, type GraphStructureEdits } from "./graphStructure";
 import { applyCodeReplacements, isCodeReplacementList, isTruncationMarkerEcho, type CodeReplacement } from "./codeReplace";
+import { buildWorkflowDataFlow } from "./dataFlow";
 import { storeSubflowResolver } from "./subflowResolver";
 
 export type MessagePart =
@@ -44,7 +45,7 @@ export type BuildResult =
   | { phase: "clarify"; message: string }
   | { phase: "answer"; message: string }
   | { phase: "ready"; message: string; nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[]; schedule?: SuggestedSchedule; autoWebhook?: boolean; onFailureWorkflow?: string }
-  | { phase: "edits"; message: string; edits: { nodeId: string; stepIndex?: number; config: Record<string, unknown>; label?: string }[]; triggerParams?: ParamField[]; structure?: GraphStructureEdits; schedule?: SuggestedSchedule };
+  | { phase: "edits"; message: string; edits: { nodeId: string; stepIndex?: number; config: Record<string, unknown>; label?: string; codeReplace?: CodeReplacement[] }[]; triggerParams?: ParamField[]; structure?: GraphStructureEdits; schedule?: SuggestedSchedule };
 
 export interface SuggestedSchedule {
   cron: string;
@@ -784,6 +785,36 @@ function orderedStepsSection(nodes: WorkflowNode[], edges: WorkflowEdge[]): stri
 ${lines.join("\n")}`;
 }
 
+/**
+ * 「這個欄位是哪個節點產生的」對照表。
+ *
+ * 真實踩過(這條流程的四種說法實測 2/4 失敗)：使用者用白話說「產出的檔名改成 X」，模型就去改
+ * **名字裡看得到那個舊名稱的節點**——但那個節點只是接收端(`ctx.input.outputFileName`)，真正算出
+ * 檔名的是上游另一個節點。模型看不到這層關係的原因是雙重的：兩個節點的程式碼在提示裡都被截短了，
+ * 而節點標籤剛好把它導向錯的那個。結果是一筆「等於沒改」的修改，白跑好幾分鐘還要回頭問使用者
+ * ——而使用者根本不可能知道欄位是誰算的，這種問題丟回去等於無解。
+ *
+ * dataFlow 是純靜態分析(不執行程式碼、不讀帳密)，對 custom-code 會從 return 的形狀抽出宣告欄位，
+ * 所以「誰產生 outputFileName」這種問題它答得出來。把它放進提示，白話需求才找得到正確的節點。
+ */
+function dataFlowSection(graph?: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }, triggerParams?: ParamField[]): string {
+  if (!graph?.nodes.length) return "";
+  let flow;
+  try {
+    flow = buildWorkflowDataFlow({ nodes: graph.nodes, edges: graph.edges, triggerParams } as Workflow);
+  } catch { return ""; }  // 分析失敗只是少一段輔助資訊，不能讓整個對話掛掉
+  const produced = flow.nodes
+    .filter((node) => node.outputs.length > 0)
+    .map((node) => `- ${node.id}（${node.label}）產生：${node.outputs.map((o) => o.name).join("、")}`);
+  if (produced.length === 0) return "";
+  return `
+
+【哪個節點產生哪個欄位】
+${produced.join("\n")}
+- 要改某個「值」(檔名、日期、範圍、代碼清單)時，先在上面找出**產生那個欄位的節點**再改它。值常常是上游算好、用 {{欄位}} 一路傳下去的，改在接收端(只是引用它的那個節點)完全沒有效果，會變成一筆什麼都沒改的修改。
+- 節點名稱不代表它產生那個值：名稱裡出現某個字樣，往往只是因為它在使用那個值。以這張表為準。`;
+}
+
 /** 這條流程「執行前會問使用者」的參數清單——對話 AI 一定要看得到，才知道節點設定可以引用
  * {{filterStart}} 這類會跟著使用者選的期間走的參數。看不到的話，使用者要「跟著我選的期間跑」，
  * AI 只會把具體日期寫死進節點(實測踩過：篩選日期被寫死成第一季，執行前選什麼期間都無效)。 */
@@ -868,6 +899,7 @@ ${defs
 目前的節點圖(可能是空的或已有內容)：
 ${currentGraph}
 ${graph ? orderedStepsSection(graph.nodes, graph.edges) : ""}
+${dataFlowSection(graph, triggerParams)}
 ${triggerParamsSection(triggerParams)}
 ${runtimeSection(rc)}
 
@@ -1551,12 +1583,19 @@ export async function buildWorkflow(
         // 平台等於把自己解得了的問題丟回給他。真實踩過：使用者要改產出檔名，模型盯上名稱裡有產品名
         // 的那個彙整節點(其實檔名是上游算好傳進來的)，把整包 config 照抄回來、程式碼欄位還是截斷標記，
         // 結果是一筆什麼都沒改的修改。餵回去講明「這筆等於沒改」，它才有機會去找真正決定那個值的節點。
+        // 比對必須跟套用階段用同一個口徑：先照該節點型別的 schema 濾掉不存在的欄位，再比值。
+        // 沒濾就比的話，模型自己發明一個欄位名(例如把檔名寫成 config.fileName，但 custom-code 根本
+        // 沒有這個設定)看起來「跟現況不同」而被判成有改，套用時卻整個被濾掉變成沒改——這道回饋
+        // 就永遠不會觸發(實測踩過：連續兩種白話說法都是這樣掉出迴圈、回頭去問使用者)。
+        const editedKeys = typeof e.stepIndex === "number"
+          ? Object.keys(e.config)
+          : Object.keys(e.config).filter((key) => (getNodeDef(node!.type)?.configSchema ?? []).some((f) => f.key === key));
         const changesSomething = (e.label !== undefined && e.label !== node.label)
           || e.codeReplace !== undefined
-          || Object.entries(e.config).some(([key, value]) => {
-            if (isTruncationMarkerEcho(value)) return false;  // 標記回聲＝「這欄我沒要改」
-            const current = typeof e.stepIndex === "number" ? undefined : node!.config[key];
-            return typeof e.stepIndex === "number" || JSON.stringify(value) !== JSON.stringify(current);
+          || editedKeys.some((key) => {
+            if (isTruncationMarkerEcho(e.config[key])) return false;  // 標記回聲＝「這欄我沒要改」
+            if (typeof e.stepIndex === "number") return true;         // 內嵌步驟的現況在 steps JSON 裡，交給套用階段比對
+            return JSON.stringify(e.config[key]) !== JSON.stringify(node!.config[key]);
           });
         if (!changesSomething) {
           problems.push(`"${e.nodeId}"(${node.label}) 這筆修改跟目前的設定完全一樣，等於沒改。請找出真正決定這個值的節點——值常常是上游算好、用 {{欄位}} 傳進來的，改在接收端沒有用；可以從各節點的 intent 描述判斷誰產生了那個欄位。`);
@@ -1630,7 +1669,7 @@ export async function buildWorkflow(
         }
       }
       if (problems.length === 0) {
-        return { phase: "edits", message: plainLanguage(String(obj.message ?? "已調整流程設定")), edits: rawEdits, triggerParams: editedTriggerParams, structure, schedule: editedSchedule };
+        return { phase: "edits", message: plainLanguage(String(obj.message ?? "已調整流程設定"), {}, userWordsToPreserve(requirementText)), edits: rawEdits, triggerParams: editedTriggerParams, structure, schedule: editedSchedule };
       }
       lastProblems = problems;
     }

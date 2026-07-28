@@ -24,7 +24,8 @@ import { formatWorkflowPreview, previewInputFromChatHistory, runWorkflowPreview 
 import { CLAUDE_CODE_MODEL, isClaudeCodeAvailable, isClaudeCodeModel } from "@/lib/claudeCodeClient";
 import { DEFAULT_MODEL } from "@/lib/models";
 import { getNodeDef } from "@/lib/workflow/registry";
-import { plainLanguage, shortFieldLabel, humanizeTemplates } from "@/lib/workflow/plainLanguage";
+import { userWordsToPreserve, plainLanguage, shortFieldLabel, humanizeTemplates } from "@/lib/workflow/plainLanguage";
+import { findCoverageGaps, coverageWarning } from "@/lib/workflow/editCoverage";
 import { extractAppsScriptExecUrl, putSheetUrlIntoAllWriteNodes } from "@/lib/sheetWriteUrlMigration";
 import { probeSheetScript } from "@/lib/workflow/nodes/googleSheet";
 import { sheetWriteNodesNeedingSetup } from "@/lib/googleSheetScriptTemplate";
@@ -602,6 +603,19 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         ...(structurePreflight && !structurePreflight.ok ? structurePreflight.problems : []),
       ];
       if (preflightProblems.length > 0) {
+        // 模型送了什麼、為什麼被擋，一定要留下紀錄。少了這行就只知道「使用者收到 clarify」，
+        // 完全無法判斷是模型指錯節點、欄位名發明的、還是驗證太嚴——實際除錯時這是最關鍵的一份證據。
+        console.warn("[workflow-build] preflight-rejected", {
+          diagnosticId,
+          workflowId: id,
+          problems: preflightProblems.slice(0, 5),
+          proposed: result.edits.slice(0, 6).map((edit) => ({
+            nodeId: edit.nodeId,
+            stepIndex: edit.stepIndex,
+            keys: Object.keys(edit.config ?? {}),
+            hasCodeReplace: Array.isArray(edit.codeReplace) ? edit.codeReplace.length : 0,
+          })),
+        });
         return NextResponse.json({
           phase: "clarify",
           message: `我已先檢查這次修改，但其中有一部分不能安全套用，所以整次沒有改動：\n${preflightProblems.map((problem) => `- ${problem}`).join("\n")}`,
@@ -799,9 +813,21 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       const effectivePrefix = rolledBackAfterFailedTest
         ? "已嘗試套用修改，但只讀測試沒有通過，已自動還原成修改前的版本，目前流程沒有被改動。"
         : appliedPrefix;
+      // 完成度核對：使用者點名的目標值有沒有真的落進這次的改動裡。實測發現同一句白話需求會在
+      // 「做對／停下來問／宣告成功但只做一半」三種結果之間跳，第三種最傷——使用者以為做完了，
+      // 要等下次執行拿到錯的產出才發現。比對的是**真正寫進磁碟的內容**，不是模型的說明文字
+      // (拿說明來比對＝讓它自己批改自己，它說有做就算有做，這層防護等於不存在)。
+      const appliedText = rolledBackAfterFailedTest
+        ? ""
+        : JSON.stringify((getWorkflow(id)?.nodes ?? []).map((node) => node.config));
+      const coverageGaps = rolledBackAfterFailedTest ? [] : findCoverageGaps(rawLastUserCommandText, appliedText);
+      if (coverageGaps.length > 0) {
+        console.warn("[workflow-build] coverage-gap", { diagnosticId, workflowId: id, missing: coverageGaps.map((gap) => gap.literal) });
+      }
       return NextResponse.json({
         phase: "edits",
-        message: plainLanguage(`${effectivePrefix}\n\n${truthfulMessage}${skippedNote}${previewMessage}`),
+        message: plainLanguage(`${effectivePrefix}\n\n${truthfulMessage}${skippedNote}${previewMessage}`, {}, userWordsToPreserve(rawLastUserCommandText))
+          + coverageWarning(coverageGaps),
         changes,
         preview,
         ...(sheetSetupLabels.length ? { sheetSetupLabels } : {}),

@@ -210,7 +210,13 @@ export function formatPlannedWriteLines(items: { nodeLabel: string; destination:
   });
 }
 
-function glossToken(token: string, paramLabels: Record<string, string>): string {
+function glossToken(token: string, paramLabels: Record<string, string>, preserve?: ReadonlySet<string>): string {
+  // 使用者自己在需求裡打過的字一律原樣保留。真實踩過：使用者說「檔名改成 某品牌A,某品牌B」，
+  // AI 的回覆照著寫了這個名字，下面的 camelCase 抓漏規則卻把它當成未知程式欄位，翻成
+  // 「前面步驟提供的「某品牌A」資料,某品牌B」——使用者看到的是自己剛講過的品牌名被改寫成
+  // 一句看不懂的話，完全無法核對 AI 到底做了什麼。品牌名/專案名本來就常長得像識別字，
+  // 靠字形永遠分不出來；「這個字是使用者自己講的」才是可靠的判準。
+  if (preserve?.has(token) || preserve?.has(token.toLowerCase())) return token;
   const known = paramLabels[token] ?? TOKEN_GLOSS[token];
   if (known) return known;
   // 真實踩過的 bug：不認得的欄位名一律丟成同一句「前面步驟提供的資料」，同一則訊息裡若同時出現
@@ -222,9 +228,9 @@ function glossToken(token: string, paramLabels: Record<string, string>): string 
   return `前面步驟提供的「${token}」資料`;
 }
 
-function makeHumanizer(paramLabels: Record<string, string>) {
+function makeHumanizer(paramLabels: Record<string, string>, preserve?: ReadonlySet<string>) {
   return (value: string): string =>
-    value.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, tok: string) => glossToken(tok, paramLabels));
+    value.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, tok: string) => glossToken(tok, paramLabels, preserve));
 }
 
 /** 只把 {{資料欄位}} 換成白話，供完整 workflow 說明的各節點格式化共用。 */
@@ -232,11 +238,11 @@ export function humanizeTemplates(paramLabels: Record<string, string>): (value: 
   return makeHumanizer(paramLabels);
 }
 
-function hideTechnicalContracts(value: string, paramLabels: Record<string, string>): string {
+function hideTechnicalContracts(value: string, paramLabels: Record<string, string>, preserve?: ReadonlySet<string>): string {
   let out = value;
   out = out.replace(/(?:輸出|產出)\s+((?:[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*[,，、]?\s*){1,12})(?=給|供|，|。|$)/g, (_m, group: string) => {
     const labels = [...group.matchAll(/[A-Za-z_$][\w$]*/g)]
-      .map((m) => glossToken(m[0], paramLabels))
+      .map((m) => glossToken(m[0], paramLabels, preserve))
       .filter((v, i, all) => all.indexOf(v) === i);
     return labels.length ? `整理出${labels.join("、")}` : "整理出後續需要的資料";
   });
@@ -245,13 +251,26 @@ function hideTechnicalContracts(value: string, paramLabels: Record<string, strin
     .replace(/\b(?:ctx\.(?:input|config|secrets)|JSON\.stringify|JSON\.parse)\b/gi, "背後資料")
     .replace(/\b(?:exceljs|playwright|adm-zip|pdf-parse|xlsx)\b/gi, "內建工具")
     .replace(/\b(?:const|let|var|await|async|return|import|require)\b/gi, "")
-    .replace(/\b[A-Za-z_$][A-Za-z0-9_$]*(?:_[A-Za-z0-9_$]+|[a-z0-9][A-Z][A-Za-z0-9_$]*)+\b/g, (id) => glossToken(id, paramLabels))
+    .replace(/\b[A-Za-z_$][A-Za-z0-9_$]*(?:_[A-Za-z0-9_$]+|[a-z0-9][A-Z][A-Za-z0-9_$]*)+\b/g, (id) => glossToken(id, paramLabels, preserve))
     .replace(/\{[^{}\n]{0,500}\}/g, "整理好的資料")
     .replace(/\s{2,}/g, " ");
 }
 
 /** 說明面板的最後一道白話過濾：模型寫的說明不能漏出程式碼或協定術語。 */
-export function plainLanguage(value: string, paramLabels: Record<string, string> = {}): string {
+/**
+ * 抽出「使用者自己打過的英數字詞」，交給 glossToken 當保留名單。長度 >= 3 才收：
+ * 太短的詞(a、id)當保留名單會誤放真正該翻譯的技術欄位。
+ */
+export function userWordsToPreserve(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const match of String(text ?? "").matchAll(/[A-Za-z_$][A-Za-z0-9_$]{2,}/g)) {
+    out.add(match[0]);
+    out.add(match[0].toLowerCase());
+  }
+  return out;
+}
+
+export function plainLanguage(value: string, paramLabels: Record<string, string> = {}, preserve?: ReadonlySet<string>): string {
   // 真實踩過的 bug(從真實使用者對話紀錄挖出來)：AI 說明改了哪個節點時，習慣在中文標籤後面
   // 用括號附上節點自己的內部 id 當對照，例如「計算週增量、月累計與年累計」(extractNumbers)。
   // 這個 id 不是「上游步驟傳來的資料欄位」，是這一步自己的名字，但下面 hideTechnicalContracts
@@ -260,7 +279,7 @@ export function plainLanguage(value: string, paramLabels: Record<string, string>
   // 資料)」。使用者根本不需要看到內部 id——中文標籤本身就已經講清楚是哪一步，這種緊接在引號
   // 標籤後面、括號裡只有純英數識別字的內容，整段拿掉即可，不必費工把它「翻譯」成什麼。
   const withoutNodeIdRefs = String(value ?? "").replace(/([」』])[（(][A-Za-z_$][A-Za-z0-9_$]*[）)]/g, "$1");
-  const h = makeHumanizer(paramLabels);
+  const h = makeHumanizer(paramLabels, preserve);
   const protectedValue = protectLiteralPieces(withoutNodeIdRefs);
   const humanized = h(protectedValue.text);
   // glossToken 現在的 fallback 會自己產生「」引號包住的欄位名(如「lineChannelToken」)——這是
@@ -273,7 +292,7 @@ export function plainLanguage(value: string, paramLabels: Record<string, string>
   // .replace() 鏈的最後才還原(跟外層 protectedValue 同一種活法)，不能提早還原，不然後面其他規則
   // 一樣有機會誤傷剛產生的引號內容。
   const reprotected = protectLiteralPieces(humanized, "", "");
-  const result = hideTechnicalContracts(reprotected.text, paramLabels)
+  const result = hideTechnicalContracts(reprotected.text, paramLabels, preserve)
     .replace(/```[\s\S]*?```/g, "(背後的技術細節已隱藏)")
     .replace(/`([^`]+)`/g, "「$1」")
     .replace(/\bWebhook\b/gi, "專屬接收網址")
