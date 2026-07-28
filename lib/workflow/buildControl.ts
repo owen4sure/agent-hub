@@ -35,7 +35,7 @@ function dispose(item: ActiveBuild): void {
  * 避免模型持續吐心跳卻永遠不完成。瀏覽器 disconnect 不一定會被 Next.js 即時轉成 req.signal，
  * 所以前端停止鈕另走 stop-build API，兩條路共用這個 controller。
  */
-export function beginBuild(workflowId: string, requestSignal?: AbortSignal): { token: string; signal: AbortSignal } {
+export function beginBuild(workflowId: string, requestSignal?: AbortSignal): { token: string; signal: AbortSignal; deadlineAt: number } {
   cancelBuild(workflowId, "新的對話請求已取代上一個尚未完成的請求");
   const token = randomUUID();
   const controller = new AbortController();
@@ -48,7 +48,9 @@ export function beginBuild(workflowId: string, requestSignal?: AbortSignal): { t
   if (requestSignal?.aborted) onRequestAbort();
   else requestSignal?.addEventListener("abort", onRequestAbort, { once: true });
   activeBuilds.set(workflowId, { token, controller, timer, requestSignal, onRequestAbort });
-  return { token, signal: controller.signal };
+  // deadlineAt 要傳給底下真正在等的模型呼叫(見 claudeCodeClient 的 budgetMs)：不告訴它「我只剩多久」，
+  // 它自己的守門值(20 分鐘)就永遠比這裡的上限晚到，具體原因永遠生不出來，只剩這句通用的逾時訊息。
+  return { token, signal: controller.signal, deadlineAt: Date.now() + limit };
 }
 
 export function finishBuild(workflowId: string, token: string): boolean {

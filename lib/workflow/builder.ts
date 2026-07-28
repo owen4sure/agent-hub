@@ -21,6 +21,7 @@ import { KNOWN_WORKING_MODELS, MODELS, VISION_MODELS, supportsVision } from "../
 import { plainLanguage } from "./plainLanguage";
 import { parseCron } from "../cron";
 import { hasStructureChanges, planGraphStructureEdits, type GraphStructureEdits } from "./graphStructure";
+import { isCodeReplacementList, type CodeReplacement } from "./codeReplace";
 import { storeSubflowResolver } from "./subflowResolver";
 
 export type MessagePart =
@@ -1056,6 +1057,7 @@ ${runtimeSection(rc)}
   - 要「刪節點／加節點／改接線」時用 structure：removeNodeIds 刪節點（相關線會一起移除）；addNodes 的 id 必須是新的簡短英數 id；removeEdges/addEdges 用現有 id。需要把 n1→n2 中間插一個步驟時，移除 n1→n2，再加 n1→新節點、 新節點→n2。不要刪 trigger。
   - structure 是增量修改，不准輸出整包 nodes/edges；只列這次真的要變動的部分。單純結構修改時 edits 放 []。若同一需求又要改某個既有節點設定又要改接線，可以同時帶 edits 和 structure，系統會先完整驗證再存。
   - custom-code 節點可直接改 config.code(一段 async 函式主體，用 ...ctx.input 把上游資料往下傳；要用套件就 await import("exceljs"))。但**已有程式碼的節點不能用空字串/空殼覆蓋**：不需改程式就省略 code；需要改才輸出完整且可執行的新 code。
+  - **只改一小部分(換個代碼、換個檔名、改個範圍)時改用定點取代，不要整段重吐**：那個 edits 元素帶 "codeReplace":[{"from":"目前程式碼裡剛好出現一次的一小段","to":"換成什麼"}]，不要同時帶 config.code。程式碼顯示成「(已有程式碼約 N 字…)」時也照樣用這條路——錨點可以從該節點的 intent 描述推出來。
   - **要改的是 repeat-steps(重複執行)節點「裡面的某一步」時，一定用定點修改**：edits 元素帶 "stepIndex"(第幾步，從 0 起，對照上面「步驟編號對照」裡的 stepIndex)，config 只放「那一步」改好後的設定——**絕對不要整包重寫外層的 steps JSON**(幾千字的 JSON 重新輸出幾乎必錯，複述時很容易弄壞其他步驟)。例如：{"nodeId":"repeat-steps節點id","stepIndex":1,"config":{ 那一步改好後的 config }}
 - 建全新流程/大改結構：{"phase":"ready","message":"一句話說明這個流程","nodes":[{"id","type","label","config"}],"edges":[{"from","to","fromPort"}],"triggerParams":[可省略，見上面週期性資料的規則],"schedule":{"cron":"需求有指定自動時間時才填","params":{}},"onFailureWorkflow":"使用者說失敗要跑哪條流程時才填(流程名稱)"}
   - node.id 用簡短英數(如 n1,n2)；第一個節點通常是 type:"trigger"。
@@ -1098,7 +1100,10 @@ ${definitions}
 - 改既有設定（分頁、網址、文字、篩選條件、程式碼）回 phase:"edits" 的 edits。nodeId 要用上面圖裡的 id；config 只放實際變動欄位。
 - 刪一個步驟、加一個步驟、或重接線時，回 phase:"edits" 的 structure。structure 只列本次變動：removeNodeIds / addNodes / removeEdges / addEdges。不能刪 trigger；新增節點 id 必須是新的短英數；不准輸出整包 nodes/edges。
 - 有失敗現場時先看實際 input 和執行紀錄：字面 {{欄位}} 或缺欄位代表真正問題在上游產生資料的步驟，不要只改報錯下游。
-- custom-code 若已有 code，不需改程式就不要帶 code；真的要改時必須給完整可執行的新 code，保留 ...ctx.input，不能清成空殼。上游已讀到 rows/headers/sheetText 時直接解析資料，不能退化為操作瀏覽器。
+- **custom-code 只改一小部分時，一律用 codeReplace 定點取代，不要整段重吐**：edits 元素帶 "codeReplace":[{"from":"目前程式碼裡真實存在的一小段","to":"換成什麼"}]，可以多組，不要同時帶 config.code。from 必須在該節點目前的程式碼裡**剛好出現一次**(出現 0 次或多次都會被退回)，需要時多帶前後文讓它唯一。
+  - **程式碼顯示成「(已有程式碼約 N 字…)」時特別要用這條路**：那代表原文沒放進提示，但你仍可以從節點的 intent 描述推出錨點(例如 intent 寫「格式為 'ABC('+quarterLabel+'結算)'」，你就能用 from:"ABC" 精準改掉它)。不要因為看不到原文就整段盲寫——盲寫既慢又會弄壞已經調好的邏輯。
+  - 只有「整個演算法換掉」這種真的要重寫時才給完整 code：必須完整可執行、保留 ...ctx.input、不能清成空殼。不需改程式就完全不要帶 code。上游已讀到 rows/headers/sheetText 時直接解析資料，不能退化為操作瀏覽器。
+  - 改了程式碼行為時，**同一個 edits 元素的 config 要一併把 intent 改成新的描述**(intent 是這個節點的規格，未來重新產碼會照它走；只改 code 不改 intent，下次重產就會退回舊行為)。
 - 使用者說「執行時上傳／選一份檔案」時，這是手動選檔，不是資料夾監聽：完整 triggerParams 要有 filePath(text、非 derived)，實際讀檔步驟要引用 {{filePath}}，不要填 watchPath 或追問資料夾路徑。執行頁會自動顯示選檔按鈕。
 - 新增執行前選項時，帶完整 triggerParams，且所有新增欄位都必須真的被節點設定引用。
 - 使用者說「改成每天／每週幾點自動跑」時，這不是新增節點，也不要叫他去排程頁設定。回 phase:"edits"，在根層帶 schedule:{"cron":"五欄 cron","params":{}}；系統會把這條流程原本唯一的自動時間直接換掉。只有目前本來就有多個不同自動時間、而使用者沒有說要改哪一個時，才 clarify。
@@ -1108,6 +1113,10 @@ ${definitions}
 
 【回覆】只回一個 JSON：
 {"phase":"edits","message":"一句白話說明已改什麼","edits":[{"nodeId":"n1","config":{}}],"structure":{"removeNodeIds":["n2"],"addNodes":[{"id":"nNew","type":"template-text","label":"白話名稱","config":{}}],"removeEdges":[{"from":"n1","to":"n2"}],"addEdges":[{"from":"n1","to":"nNew"},{"from":"nNew","to":"n3"}]},"schedule":{"cron":"需求有改自動時間才帶","params":{}}}
+改既有程式碼的一小部分時，那個 edits 元素用 codeReplace 而不是 config.code：
+{"nodeId":"n2","config":{},"codeReplace":[{"from":"目前程式碼裡剛好出現一次的一小段","to":"換成什麼"}]}
+改 repeat-steps 裡某一步的程式碼時一樣可以用，只要多帶 stepIndex：
+{"nodeId":"loop1","stepIndex":2,"config":{},"codeReplace":[{"from":"for (let n = 1; n <= 9; n++)","to":"for (const n of [2,4,6])"}]}
 單純結構修改 edits 放 []；單純設定修改 structure 省略。`;
 }
 
@@ -1115,7 +1124,7 @@ ${definitions}
  * 走本機 Claude Code 時，不用 OpenAI 那種多模態 messages[] 陣列——Claude Code 是能讀檔案的 agent，
  * 把對話攤平成一段文字(標明「使用者:」/「AI:」)，圖片先存成暫存檔給它路徑用 Read 工具讀，比較符合它的操作方式。
  */
-async function callViaClaudeCode(system: string, history: ChatMessage[], signal?: AbortSignal): Promise<string> {
+async function callViaClaudeCode(system: string, history: ChatMessage[], signal?: AbortSignal, deadlineAt?: number): Promise<string> {
   const tmpDir = path.join(os.tmpdir(), `agenthub-cc-${randomUUID()}`);
   const imagePaths: string[] = [];
   const readPaths: string[] = [];
@@ -1162,6 +1171,7 @@ async function callViaClaudeCode(system: string, history: ChatMessage[], signal?
       // 使用者可在設定頁調整推理力度(預設 high)：確定性檢查只攔得住寫進規則裡的情況，
       // 攔不住的情境還是要靠模型自己想清楚，不能靠寫死低推理力度換速度。
       effort: getBuilderEffort(),
+      budgetMs: deadlineAt ? deadlineAt - Date.now() : undefined,
     });
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -1177,6 +1187,9 @@ export async function buildWorkflow(
   signal?: AbortSignal,
   /** 建圖進度回報(理解需求→畫圖→驗證→修正第N輪)——前端輪詢顯示,使用者才知道慢在哪一步 */
   onStage?: (stage: string) => void,
+  /** 這次建圖的絕對截止時間(來自 buildControl.beginBuild)。傳給本機 Claude Code 當預算，
+   * 讓「模型跑太久沒收尾」由它自己先報出具體原因，而不是被外層通用逾時蓋掉(真實踩過)。 */
+  deadlineAt?: number,
 ): Promise<BuildResult> {
   const requestedModel = model;
   model = builderModelForHistory(model, history);
@@ -1305,7 +1318,7 @@ export async function buildWorkflow(
   let preferredRouteForThisBuild: "backup-model" | "claude-code" | null = null;
   const callOnce = async (extra: OpenAI.Chat.ChatCompletionMessageParam[], extraCC: ChatMessage[]): Promise<string> => {
     const claudeCodeFallback = () =>
-      callViaClaudeCode(fullSystemPrompt, [...history, ...extraCC], signal);
+      callViaClaudeCode(fullSystemPrompt, [...history, ...extraCC], signal, deadlineAt);
     if (isClaudeCodeModel(model)) return callAIWithRetry(claudeCodeFallback, { label: "建立流程圖(Claude Code)", signal, maxAttempts: 2 });
     const claudeAvailable = await isClaudeCodeAvailable();
     const callGatewayModel = (targetModel: string) =>
@@ -1448,13 +1461,23 @@ export async function buildWorkflow(
         editObj.triggerParams = triggerParams;
         editObj.structure = Object.keys(structureRest).length > 0 ? structureRest : undefined;
       }
+      // codeReplace(定點文字取代)讓「改一小段既有程式碼」不必整段重吐——形狀不對時不是靜默丟掉，
+      // 而是在下面的逐筆檢查裡回報具體問題，否則模型永遠不知道自己格式寫錯(見 codeReplace.ts)。
       const rawEdits = ((editObj.edits as unknown[]) ?? []).filter(
-        (e): e is { nodeId: string; stepIndex?: number; config: Record<string, unknown>; label?: string } =>
+        (e): e is { nodeId: string; stepIndex?: number; config: Record<string, unknown>; label?: string; codeReplace?: CodeReplacement[] } =>
           !!e && typeof e === "object" && typeof (e as Record<string, unknown>).nodeId === "string" && typeof (e as Record<string, unknown>).config === "object" &&
           ((e as Record<string, unknown>).stepIndex === undefined || typeof (e as Record<string, unknown>).stepIndex === "number") &&
-          ((e as Record<string, unknown>).label === undefined || typeof (e as Record<string, unknown>).label === "string"),
+          ((e as Record<string, unknown>).label === undefined || typeof (e as Record<string, unknown>).label === "string") &&
+          ((e as Record<string, unknown>).codeReplace === undefined || isCodeReplacementList((e as Record<string, unknown>).codeReplace)),
+      );
+      const malformedCodeReplace = ((editObj.edits as unknown[]) ?? []).filter(
+        (e) => !!e && typeof e === "object" && (e as Record<string, unknown>).codeReplace !== undefined
+          && !isCodeReplacementList((e as Record<string, unknown>).codeReplace),
       );
       const problems: string[] = [];
+      if (malformedCodeReplace.length > 0) {
+        problems.push(`codeReplace 必須是 [{"from":"目前程式碼裡真實存在的一小段","to":"要換成的新內容"}] 這種陣列，每個元素的 from/to 都是字串`);
+      }
       let editedTriggerParams: ParamField[] | undefined;
       if (editObj.triggerParams !== undefined) {
         const normalized = normalizeBuilderGraphObject({ triggerParams: editObj.triggerParams });

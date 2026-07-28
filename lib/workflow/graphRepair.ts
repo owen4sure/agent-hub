@@ -15,6 +15,7 @@ import { DEFAULT_MODEL, VISION_MODELS, supportsVision } from "../models";
 import { findLatestScreenshotPath, findLatestHtml, extractFormElements, getNodeInput, getRunLogsSummary, getFileDumpForNode } from "./repairContext";
 import { buildSelectorProbeReport, extractSelectorsFromCode, splitSelectorList, probeSelectorsInHtml, tokenNeighborhood } from "./selectorProbe";
 import { syncLabelForDestinationChange, type ReplacePair } from "./textReplace";
+import { applyCodeReplacements, type CodeReplacement } from "./codeReplace";
 import { applyGraphStructureEdits, hasStructureChanges, planGraphStructureEdits, type GraphStructureEdits, type StructureChange } from "./graphStructure";
 import { probeSlidesPresentationPages } from "../googleSlidesApi";
 import { resolvePresentationId } from "./nodes/googleSlidesRefresh";
@@ -153,7 +154,7 @@ export function validateCustomCodeEdit(
  */
 export function applyNodeConfigEdits(
   workflowId: string,
-  rawEdits: { nodeId: string; stepIndex?: number; config: Record<string, unknown>; label?: string }[],
+  rawEdits: { nodeId: string; stepIndex?: number; config: Record<string, unknown>; label?: string; codeReplace?: CodeReplacement[] }[],
   opts: { apply?: boolean; triggerParams?: ParamField[] } = {},
 ): ApplyEditsResult {
   const fresh = getWorkflow(workflowId);
@@ -197,7 +198,18 @@ export function applyNodeConfigEdits(
         continue;
       }
       const stepDef = getNodeDef(step.type);
-      let newStepConfig: Record<string, unknown> = { ...(step.config ?? {}), ...e.config };
+      // 定點文字取代：改一小段程式碼不必整段重吐(見 codeReplace.ts 的根因說明)。
+      // 對照的一律是「這一步目前磁碟上的 code」，不是模型送來的 config——模型可能連 code 都沒帶。
+      const stepReplaced = e.codeReplace ? applyCodeReplacements(step.config?.code, e.codeReplace) : null;
+      if (stepReplaced && !stepReplaced.ok) {
+        skipped.push({ nodeId: node.id, reason: `「${node.label}」第 ${e.stepIndex} 步的程式碼定點取代未套用：${stepReplaced.reason}` });
+        continue;
+      }
+      if (stepReplaced?.ok && typeof e.config.code === "string") {
+        skipped.push({ nodeId: node.id, reason: `「${node.label}」第 ${e.stepIndex} 步同時給了 codeReplace 和完整 code，無法判斷以哪個為準；請只給其中一種` });
+        continue;
+      }
+      let newStepConfig: Record<string, unknown> = { ...(step.config ?? {}), ...e.config, ...(stepReplaced?.ok ? { code: stepReplaced.code } : {}) };
       // 定點修改也可能把截斷標記抄回 code——語意是「這段沒要改」，還原成該步目前的程式碼
       if (typeof newStepConfig.code === "string" && CODE_TRUNCATION_MARKER.test(newStepConfig.code.trim()) && typeof step.config?.code === "string" && step.config.code.trim()) {
         newStepConfig.code = step.config.code;
@@ -226,7 +238,18 @@ export function applyNodeConfigEdits(
       continue;
     }
 
-    let newConfig: Record<string, unknown> = restoreEchoedCodeMarkers(node, { ...node.config, ...e.config });
+    // 頂層 custom-code 的定點取代。這條路徑的價值比內嵌步驟更大：長程式碼在提示裡被截成標記，
+    // 模型看不到原文，本來只能整段盲寫；有了錨點取代，它可以只靠 intent 的描述精準改一行。
+    const replaced = e.codeReplace ? applyCodeReplacements(node.config.code, e.codeReplace) : null;
+    if (replaced && !replaced.ok) {
+      skipped.push({ nodeId: node.id, reason: `「${node.label}」的程式碼定點取代未套用：${replaced.reason}` });
+      continue;
+    }
+    if (replaced?.ok && typeof e.config.code === "string") {
+      skipped.push({ nodeId: node.id, reason: `「${node.label}」同時給了 codeReplace 和完整 code，無法判斷以哪個為準；請只給其中一種` });
+      continue;
+    }
+    let newConfig: Record<string, unknown> = restoreEchoedCodeMarkers(node, { ...node.config, ...e.config, ...(replaced?.ok ? { code: replaced.code } : {}) });
     const allowedKeys = new Set(def.configSchema.map((f) => f.key));
     if (allowedKeys.size > 0) {
       newConfig = Object.fromEntries(Object.entries(newConfig).filter(([k]) => allowedKeys.has(k)));

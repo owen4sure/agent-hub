@@ -93,7 +93,15 @@ export function claudeCodeArgs(opts: { hasReadPaths: boolean; effort?: ClaudeCod
 // 而非讓修復按鈕看起來在跑、實際沒有任何工作證據。持續有心跳的長任務完全不受這個值限制。
 const IDLE_MS = 45_000;
 // 絕對上限只是防「一直吐東西卻永遠不結束」的失控行程,正常路徑永遠碰不到——真正的守門是上面的閒置心跳。
+//
+// ⚠️ 但這個值必須小於呼叫方自己的總預算，否則這道守門永遠不會先觸發。真實踩過(wf-0d10f38d 家族)：
+// 建圖總預算是 10 分鐘、這裡是 20 分鐘，於是「Claude Code 一直吐串流思考卻不收尾」時，先到期的
+// 永遠是外層建圖預算——使用者收到的是最沒有資訊量的那句「已停止這次建立流程」，而真正的診斷
+// (「本機模型跑太久沒完成」)永遠不會被產生出來，連 log 裡都查不到，同一個問題連續失敗 16 次。
+// 呼叫方要傳 budgetMs(自己還剩多少時間)，這裡取「較小者再留一點餘裕」讓具體原因來得及浮出去。
 const ABSOLUTE_MAX_MS = 20 * 60_000;
+/** 留給呼叫方把錯誤包裝、回寫、回應使用者的餘裕；預算全部用光才失敗的話訊息一樣傳不出去。 */
+const BUDGET_HEADROOM_MS = 20_000;
 
 /**
  * 呼叫本機 Claude Code(無互動 print 模式)。
@@ -103,7 +111,7 @@ const ABSOLUTE_MAX_MS = 20 * 60_000;
  *   會污染建流程的回應)。圖片改用 --add-dir 明確授權它讀那幾個目錄。
  * - 錯誤訊息一定截短：execFile/spawn 失敗時的原始訊息可能內嵌整段 prompt(幾百KB)，不截短會炸到 UI。
  */
-export function callClaudeCode(opts: { prompt: string; imagePaths?: string[]; readPaths?: string[]; signal?: AbortSignal; effort?: ClaudeCodeEffort }): Promise<string> {
+export function callClaudeCode(opts: { prompt: string; imagePaths?: string[]; readPaths?: string[]; signal?: AbortSignal; effort?: ClaudeCodeEffort; budgetMs?: number }): Promise<string> {
   const allReadPaths = [...new Set([...(opts.readPaths ?? []), ...(opts.imagePaths ?? [])])];
   const promptText = allReadPaths.length
     ? `${opts.prompt}\n\n【附件工作區】\n請先用 Read 讀取下列主要檔案；若是壓縮專案，請用 Glob/Grep 搜尋同目錄並只深入與需求有關的檔案，不要盲目逐一讀完無關或二進位內容。\n${allReadPaths.map((p) => `- ${p}`).join("\n")}`
@@ -138,18 +146,26 @@ export function callClaudeCode(opts: { prompt: string; imagePaths?: string[]; re
     let lastActivity = startedAt;
     const cleanupAbortListener = () => opts.signal?.removeEventListener("abort", onAbort);
     const finish = (fn: () => void) => { if (settled) return; settled = true; clearInterval(watchdog); cleanupAbortListener(); fn(); };
-    const fail = (msg: string) => finish(() => { child.kill("SIGTERM"); reject(new Error(msg)); });
+    // 失敗一定要留下 log。以前 fail() 只 reject 不記錄，於是「呼叫沒完成」在 log 裡只表現為
+    // 「有 start 沒有 complete」，要靠人比對才看得出來——診斷成本高到實際上等於沒有紀錄。
+    const fail = (msg: string) => finish(() => {
+      child.kill("SIGTERM");
+      console.warn("[claude-code] failed", { elapsedMs: Date.now() - startedAt, reason: msg.slice(0, 200) });
+      reject(new Error(msg));
+    });
     const ok = (v: string) => finish(() => {
       child.kill("SIGTERM");
       console.info("[claude-code] complete", { elapsedMs: Date.now() - startedAt, outputChars: v.length });
       resolve(v);
     });
+    // 取「自己的絕對上限」與「呼叫方剩餘預算扣掉餘裕」較小者：呼叫方沒給就照舊用絕對上限。
+    const maxMs = Math.max(30_000, Math.min(ABSOLUTE_MAX_MS, opts.budgetMs ? opts.budgetMs - BUDGET_HEADROOM_MS : ABSOLUTE_MAX_MS));
     const watchdog = setInterval(() => {
       const now = Date.now();
       if (now - lastActivity > IDLE_MS) {
         fail(`Claude Code 沒有回應(超過 ${IDLE_MS / 60_000} 分鐘完全沒有輸出，可能卡住了)${rateLimitNote}`);
-      } else if (now - startedAt > ABSOLUTE_MAX_MS) {
-        fail(`Claude Code 呼叫超過 ${ABSOLUTE_MAX_MS / 60_000} 分鐘仍未結束${rateLimitNote}`);
+      } else if (now - startedAt > maxMs) {
+        fail(`本機 Claude Code 一直在跑但 ${Math.round(maxMs / 60_000)} 分鐘內沒有給出完整答案，已經停止等待。這通常代表這次要它產生的內容太長(例如被要求整段重寫一大塊程式碼)；把需求拆小、或改用定點修改會快很多。${rateLimitNote}`);
       }
     }, 5000);
 

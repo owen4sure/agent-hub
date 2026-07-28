@@ -531,6 +531,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         },
         runtimeContext, build.signal,
         (stage) => setBuildStage(id, stage, build.token),
+        build.deadlineAt,
       );
     } finally {
       finishBuild(id, build.token);
