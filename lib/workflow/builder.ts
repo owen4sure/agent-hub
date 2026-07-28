@@ -407,8 +407,22 @@ export function wireManualFileUpload(
   nodes: WorkflowNode[],
   triggerParams: ParamField[] | undefined,
   requirementText: string,
-): { nodes: WorkflowNode[]; triggerParams: ParamField[] | undefined } {
-  if (!isManualFileUploadRequested(requirementText)) return { nodes, triggerParams };
+): { nodes: WorkflowNode[]; triggerParams: ParamField[] | undefined; removed: string[] } {
+  if (!isManualFileUploadRequested(requirementText)) return { nodes, triggerParams, removed: [] };
+  const removed: string[] = [];
+  // 使用者要的是「執行時我自己選檔」，模型卻順手把觸發做成資料夾監聽——這是實測次數第三多的
+  // 驗收失敗(17 次)。前面補了選檔欄位、也把讀檔節點接上 {{filePath}}，但驗收要的是三個條件
+  // 同時成立，第三個「不能有 watchPath」從來沒被自動處理，所以每次都還是要多花一輪模型去請它
+  // 拿掉——而那一輪要 1～4 分鐘，正是建圖逾時的來源之一。
+  // 清掉它是確定性且安全的：使用者已經明確說了要手動選檔，資料夾監聽本來就不該存在。
+  nodes = nodes.map((node) => {
+    if (node.type !== "trigger") return node;
+    const watchPath = String(node.config.watchPath ?? "").trim();
+    if (!watchPath) return node;
+    removed.push("移除了資料夾監聽：你說的是執行時自己選檔，執行前會直接跳出選檔案的畫面");
+    const { watchPath: _dropped, watchPattern: _pattern, ...rest } = node.config as Record<string, unknown>;
+    return { ...node, config: rest };
+  });
   const withFilePathParam = (): ParamField[] => {
     const current = triggerParams ?? [];
     const hasFilePath = current.some((field) => field.key === "filePath");
@@ -428,7 +442,7 @@ export function wireManualFileUpload(
     const wiredNodes = nodes.map((node) =>
       node.id === reader.id ? { ...node, config: { ...node.config, [pathKey]: "{{filePath}}" } } : node,
     );
-    return { nodes: wiredNodes, triggerParams: withFilePathParam() };
+    return { nodes: wiredNodes, triggerParams: withFilePathParam(), removed };
   }
   // custom-code 也常被用來讀上傳檔案(內建節點做不到的複雜驗證邏輯，如同時檢查多項業務規則)；
   // 它沒有固定的「路徑」設定欄位可以塞 {{filePath}}——讀取邏輯是 codegen 依 intent 產生的程式碼，
@@ -439,7 +453,7 @@ export function wireManualFileUpload(
   // 步驟一起看(見 flattenGraphNodes)——「每個月各自下載附件再讀取」這種需求，讀檔步驟本來就該收在
   // 迴圈裡。上面那段「直接把 {{filePath}} 塞進 config」刻意只處理頂層內建節點：迴圈內嵌步驟讀的是
   // 每一輪自己抓到的那份檔案，硬塞使用者這次選的路徑會把整個迴圈改成重複讀同一個檔。
-  if (!hasCustomCodeFileReader(nodes)) return { nodes, triggerParams };
+  if (!hasCustomCodeFileReader(nodes)) return { nodes, triggerParams, removed };
   // 對帳/比對兩份資料這類天生需要一次上傳多個檔案的情境，AI 自己回傳的 JSON 常常已經正確宣告好
   // 語意化的檔案參數(如 orderFile/bankFile)，custom-code 的 intent 也已經引用這些名稱。這種情況
   // 不能再無條件塞一個沒有任何節點會用到的通用「filePath」——那只會在執行表單多長出一個使用者
@@ -447,8 +461,8 @@ export function wireManualFileUpload(
   const alreadyHasFileParam = (triggerParams ?? []).some(
     (field) => !field.derived && /file|path|檔|附件/i.test(`${field.key} ${field.label}`),
   );
-  if (alreadyHasFileParam) return { nodes, triggerParams };
-  return { nodes, triggerParams: withFilePathParam() };
+  if (alreadyHasFileParam) return { nodes, triggerParams, removed };
+  return { nodes, triggerParams: withFilePathParam(), removed };
 }
 
 /**
@@ -1857,6 +1871,7 @@ export async function buildWorkflow(
             requirementText,
           );
           let nodes = manualFileWiring.nodes;
+          autoRemovedNotes.push(...manualFileWiring.removed);
           const triggerParams = manualFileWiring.triggerParams;
           let schedule = validated.data.schedule as SuggestedSchedule | undefined;
           const onFailureWorkflow = typeof validated.data.onFailureWorkflow === "string" && validated.data.onFailureWorkflow.trim()

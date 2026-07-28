@@ -61,3 +61,31 @@ test("修剪說明：沒有東西被拿掉就不要多印一段廢話", () => {
   assert.equal(trimSummary([]), "");
   assert.match(trimSummary(["移除了自動排程"]), /你沒有要求/);
 });
+
+// ── 手動選檔：三個條件裡漏掉的那一個 ──
+// 驗收要「有選檔欄位 + 讀檔節點真的引用它 + 沒有資料夾監聽」三者同時成立。前兩個早就會自動補，
+// 第三個(watchPath)從來沒被處理，所以每次都還是要多花一輪模型去請它拿掉——實測 17 次都卡在這裡。
+test("手動選檔：使用者說執行時自己選檔時，模型設的資料夾監聽要直接清掉", async () => {
+  const { wireManualFileUpload } = await import("./builder");
+  const nodes: WorkflowNode[] = [
+    { id: "trigger", type: "trigger", label: "開始", config: { watchPath: "/Users/me/收件匣", watchPattern: "*.xlsx" }, position: { x: 0, y: 0 } },
+    { id: "read", type: "excel-process", label: "讀 Excel", config: { inputPath: "" }, position: { x: 200, y: 0 } },
+  ];
+  const result = wireManualFileUpload(nodes, undefined, "每次執行時讓我選一份 Excel 檔");
+  const trigger = result.nodes.find((n) => n.id === "trigger")!;
+  assert.equal(trigger.config.watchPath, undefined, "資料夾監聽要被清掉，否則驗收永遠不過");
+  assert.equal(trigger.config.watchPattern, undefined);
+  assert.equal(result.nodes.find((n) => n.id === "read")!.config.inputPath, "{{filePath}}", "讀檔節點要接上選檔欄位");
+  assert.ok(result.triggerParams?.some((p) => p.key === "filePath"), "要補上選檔欄位");
+  assert.match(result.removed.join(""), /資料夾監聽/, "清掉了什麼要講出來");
+});
+
+test("手動選檔：使用者沒說要選檔時，資料夾監聽要原封不動", async () => {
+  const { wireManualFileUpload } = await import("./builder");
+  const nodes: WorkflowNode[] = [
+    { id: "trigger", type: "trigger", label: "開始", config: { watchPath: "/Users/me/收件匣" }, position: { x: 0, y: 0 } },
+  ];
+  const result = wireManualFileUpload(nodes, undefined, "監聽這個資料夾，有新檔案就處理");
+  assert.equal(result.nodes[0].config.watchPath, "/Users/me/收件匣");
+  assert.deepEqual(result.removed, []);
+});
