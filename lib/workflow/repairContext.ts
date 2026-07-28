@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { clipped } from "./contextBudget";
 import path from "node:path";
 import { getDb } from "../db";
 import { fetchWithUrlGuard } from "../urlGuard";
@@ -364,7 +365,7 @@ export async function getLatestSuccessContext(
     if (node?.type !== "google-sheet-read" || !row.output_json) continue;
     try {
       const output = JSON.parse(row.output_json) as { rowCount?: unknown; headers?: unknown; sheetText?: unknown };
-      const sheetText = typeof output.sheetText === "string" ? output.sheetText.slice(0, 6_000) : "";
+      const sheetText = typeof output.sheetText === "string" ? clipped(output.sheetText, 6_000, "這張表的內容") : "";
       if (!sheetText) continue;
       const sheetName = String(node.config.sheetName ?? "").trim();
       const score = (sheetName && requestText.includes(sheetName) ? 4 : 0) + (requestText.includes(node.label) ? 2 : 0);
@@ -400,7 +401,7 @@ export async function getLatestSuccessContext(
       break;
     }
   }
-  const evidence = pieces.join("\n\n").slice(0, maxChars);
+  const evidence = clipped(pieces.join("\n\n"), maxChars, "上次執行的檔案與表格證據");
   if (!evidence) return null;
   return { runId: run.id, startedAt: run.started_at, evidence, hasFileEvidence };
 }

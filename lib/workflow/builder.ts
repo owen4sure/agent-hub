@@ -23,6 +23,7 @@ import { parseCron } from "../cron";
 import { hasStructureChanges, planGraphStructureEdits, type GraphStructureEdits } from "./graphStructure";
 import { applyCodeReplacements, isCodeReplacementList, isTruncationMarkerEcho, type CodeReplacement } from "./codeReplace";
 import { autoTrimUnrequested, trimSummary } from "./autoTrim";
+import { clipped } from "./contextBudget";
 import { buildWorkflowDataFlow } from "./dataFlow";
 import { storeSubflowResolver } from "./subflowResolver";
 
@@ -192,10 +193,10 @@ export function userRequirementText(history: ChatMessage[]): string {
     const files = message.parts.filter((part): part is Extract<MessagePart, { kind: "file" }> => part.kind === "file");
     const fileIsTheRequest = !text || /(?:照(?:著|這份)?|依(?:照)?|根據|參考).{0,8}(?:附件|文件|需求|規格|sop|流程)|(?:這份|附件(?:裡|中)?的?)(?:需求|規格|sop|流程|文件)|(?:需求|規格|sop|流程)文件/i.test(text);
     if (fileIsTheRequest) {
-      for (const file of files) chunks.push(`【附件 ${file.name}】\n${file.content.slice(0, 40_000)}`);
+      for (const file of files) chunks.push(`【附件 ${file.name}】\n${clipped(file.content, 40_000, `附件「${file.name}」的內容`)}`);
     }
   }
-  return chunks.join("\n\n").slice(0, 120_000);
+  return clipped(chunks.join("\n\n"), 120_000, "這次需求與附件的完整內容");
 }
 
 /** 白話角色線索的實際判斷規則，供 inferAttachmentRoleHint 對「全段文字」或「單一檔名附近的窗口」共用。 */
@@ -856,7 +857,7 @@ ${rc.trace}
 【這條流程最近一次成功執行的真實資料——不是範例，也不是模型猜測】
 - 執行編號：${rc.runId}
 - 執行時間：${rc.startedAt}
-${rc.evidence.slice(0, 24_000)}
+${clipped(rc.evidence, 24_000, "上次執行實際讀到的檔案／表格內容")}
 
 使用者若叫你「先去檔案／試算表看、找欄位、對照儲存格」，上面的內容就是系統已替你實際讀到的現場。
 請直接依欄名、列名與 A1 儲存格位址判斷並完成修改；禁止再回答「我無法打開檔案／只能依你描述」、
@@ -866,8 +867,8 @@ ${rc.evidence.slice(0, 24_000)}
       : "";
     return `${traceSection}${evidenceSection}`;
   }
-  const inputStr = rc.actualInput ? JSON.stringify(rc.actualInput, null, 2).slice(0, 800) : "(沒有記錄到)";
-  const html = rc.htmlElements ? `\n這一步失敗當下頁面實際的元素(濃縮)：\n${rc.htmlElements.slice(0, 1000)}` : "";
+  const inputStr = rc.actualInput ? clipped(JSON.stringify(rc.actualInput, null, 2), 800, "那一步實際收到的資料") : "(沒有記錄到)";
+  const html = rc.htmlElements ? `\n這一步失敗當下頁面實際的元素(濃縮)：\n${clipped(rc.htmlElements, 1000, "失敗當下的頁面元素")}` : "";
   return `${traceSection}
 
 【這條流程上次執行的失敗現場——修問題請以這個為準，不要憑空猜】
