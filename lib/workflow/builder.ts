@@ -1242,6 +1242,7 @@ export function existingGraphEditSystemPrompt(
 【目前圖】
 ${currentGraph}
 ${graph ? orderedStepsSection(graph.nodes, graph.edges) : ""}
+${dataFlowSection(graph, triggerParams)}
 ${triggerParamsSection(triggerParams)}
 ${runtimeSection(rc)}
 

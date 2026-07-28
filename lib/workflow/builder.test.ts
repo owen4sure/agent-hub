@@ -1256,3 +1256,28 @@ test("建圖迴圈：套用層會拒絕的修改要在迴圈內就餵回模型�
   assert.equal(result.phase, "edits");
   assert.equal(result.phase === "edits" ? result.edits[0]?.config.value : "MISSING", "2", "最後採用的是通過套用層檢查的那一版");
 });
+
+// 機械式一致性檢查。真實踩過兩次同一種錯：把新能力／新資訊加進「從零建圖」那份提示，
+// 卻忘了實際在跑的是「既有流程修改」那一份，於是模型永遠讀不到——使用者的症狀是
+// 「這個功能明明做了卻沒作用」，而且從外面完全看不出原因。用測試把兩份提示釘在一起。
+test("兩份提示一致性：既有流程修改看得到的東西不能比從零建圖少", () => {
+  const graph = {
+    nodes: [
+      { id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
+      { id: "n1", type: "custom-code", label: "算出檔名", config: { intent: "算檔名", code: "return { outputFileName: 'x' };" }, position: { x: 200, y: 0 } },
+      { id: "n2", type: "custom-code", label: "用檔名存檔", config: { intent: "存檔", code: "return { ...ctx.input };" }, position: { x: 400, y: 0 } },
+    ] as WorkflowNode[],
+    edges: [{ from: "trigger", to: "n1" }, { from: "n1", to: "n2" }],
+  };
+  const editPrompt = existingGraphEditSystemPrompt("{}", undefined, [], graph);
+  const mustHave: [string, string][] = [
+    ["哪個節點產生哪個欄位", "沒有這張表，模型會去改「名字看起來像」的節點，而不是真正算出那個值的上游節點"],
+    ["outputFileName", "欄位對照要真的列出實際欄位名，不能只有標題"],
+    ["stepIndex", "改迴圈裡某一步的方法"],
+    ["label", "改步驟名稱的方法"],
+    ["codeReplace", "定點改程式碼的方法"],
+  ];
+  for (const [needle, why] of mustHave) {
+    assert.ok(editPrompt.includes(needle), `既有流程修改的提示缺少「${needle}」——${why}`);
+  }
+});
