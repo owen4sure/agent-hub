@@ -600,6 +600,19 @@ function normalizeIfConditionPorts(nodes: WorkflowNode[], edges: WorkflowEdge[])
  * 整段截斷成「約N字」的標記，模型被迫從零盲寫一份近 6000 字的 Excel 擷取邏輯，本機 Claude Code
  * 跑滿 5 分鐘都生不出來，使用者只收到「已停止」)。只保留「真的相關」的那幾個節點，其他節點照常
  * 截斷，提示不會因此全面膨脹。 */
+/**
+ * 整張圖能放進提示的程式碼總量。超過才截，而且是「大的先截」。
+ *
+ * 為什麼從「超過 120 字就截」改成預算制：截短原本是為了控制提示大小，但實測這張圖的完整程式碼
+ * 只有 15,030 字，全部放進去提示也才從約 29,300 字變成約 41,000 字——而同一台機器跑過 36,995 字
+ * 的提示、183 秒就完成。也就是說截短幾乎沒省到時間，卻直接造成一整批「模型看不到原文只能猜」的
+ * 失敗：猜錯錨點、改錯節點、被迫整段盲寫近 6000 字的擷取邏輯然後逾時。
+ *
+ * 判斷原則反過來：**預設讓模型看到全部**，只有整張圖的程式碼真的大到會拖垮提示時才開始截，
+ * 而且先截「跟這次需求最無關、體積最大」的那幾個，跟需求相關的節點永遠不截。
+ */
+const CODE_BUDGET_CHARS = 40_000;
+
 function truncateCode(cfg: Record<string, unknown>, exactKeep: string[] = [], fuzzyKeep: string[] = [], label = ""): Record<string, unknown> {
   if (typeof cfg.code === "string" && cfg.code.length > 120) {
     const preciseHaystack = `${label}\n${String(cfg.intent ?? "")}\n${cfg.code}`;
@@ -638,27 +651,84 @@ export function bareTechnicalTokens(text: string): string[] {
   return [...out];
 }
 
+/** 一段「身上帶著程式碼」的位置：頂層節點，或 repeat-steps 裡的某一步。 */
+interface CodeHolder {
+  key: string;              // 唯一識別，nested 用 `${nodeId}#${stepIndex}`
+  size: number;
+  relevant: boolean;        // 跟這次需求相關(命中 exactKeep/fuzzyKeep)——永遠不截
+}
+
+function isRelevantCode(cfg: Record<string, unknown>, exactKeep: string[], fuzzyKeep: string[], label: string): boolean {
+  const code = typeof cfg.code === "string" ? cfg.code : "";
+  const preciseHaystack = `${label}\n${String(cfg.intent ?? "")}\n${code}`;
+  const fuzzyHaystack = `${label}\n${code}`;
+  return exactKeep.some((s) => preciseHaystack.includes(s)) || fuzzyKeep.some((s) => fuzzyHaystack.includes(s));
+}
+
 /**
- * 把整張圖濃縮成給模型看的字串，並「大幅截短 custom-code 的 code 欄位」。
- * 為什麼：這種節點的 code 常常上千字(自動產生的擷取程式碼)，但建圖/改圖時模型**不需要逐字讀既有程式碼**——
- * 要改就照 intent 整段重寫。整張圖含 code 可以到近 2 萬字，會把本機 Claude 的提示灌爆、處理超過 120 秒逾時
- * 再重試，變成「跑好幾分鐘跑不出結果」(踩過的真實回歸)。只留「有沒有程式碼」的標記就夠了。
+ * 把整張圖變成給模型看的字串。
  *
- * repeat-steps 節點的 code 不在頂層 config.code，而是包在 config.steps 這包 JSON 字串裡每個 step
- * 自己的 config.code——沒特別處理的話，這條截斷邏輯完全看不到它，整段擷取程式碼(實測近 5500 字)
- * 原封不動塞進每一輪對話的提示，包括自我修正的每一次重試，是「單純問一句『改個名字』也跑好幾分鐘」的
- * 真實根因(踩過)。
+ * **預設讓模型看到全部程式碼**，只有整張圖的程式碼總量超過預算時才開始截，而且是
+ * 「跟需求無關、體積最大」的先截，相關節點永遠保留完整原文。
+ *
+ * 為什麼要這樣改：舊版是「超過 120 字就截成一句標記」，理由是控制提示大小。但實測一張真實流程的
+ * 完整程式碼只有 15,030 字，全放進去提示也才從約 29,300 變成約 41,000 字，而同機器跑過 36,995 字
+ * 的提示、183 秒完成——截短幾乎沒省到時間，卻直接製造了一整批「模型看不到原文只能猜」的失敗：
+ * 錨點連猜三輪都對不上、改到只是引用該值的下游節點、被迫整段盲寫近 6000 字擷取邏輯然後逾時。
+ * 使用者的原話是「讓他該看的東西都看得到就可以了啊」——這就是那件事。
+ *
+ * repeat-steps 的程式碼不在頂層 config.code，而是包在 config.steps 這包 JSON 字串裡每一步自己的
+ * config.code，所以預算計算與截斷都必須遞迴進去(漏掉的話迴圈裡那幾千字會完全逃過計算)。
  */
 function compactGraphJson(graph: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }, exactKeep: string[] = [], fuzzyKeep: string[] = []): string {
+  const parseSteps = (cfg: Record<string, unknown>): { type: string; label?: string; config: Record<string, unknown> }[] | null => {
+    if (typeof cfg.steps !== "string") return null;
+    try {
+      const parsed = JSON.parse(cfg.steps);
+      return Array.isArray(parsed) ? parsed : null;
+    } catch { return null; }
+  };
+
+  // ① 先盤點整張圖(含迴圈內嵌步驟)有哪些程式碼、各多大、哪些跟這次需求相關
+  const holders: CodeHolder[] = [];
+  for (const node of graph.nodes) {
+    const code = typeof node.config.code === "string" ? node.config.code : "";
+    if (code) holders.push({ key: node.id, size: code.length, relevant: isRelevantCode(node.config, exactKeep, fuzzyKeep, node.label) });
+    const steps = node.type === "repeat-steps" ? parseSteps(node.config) : null;
+    steps?.forEach((step, index) => {
+      const stepCode = typeof step.config?.code === "string" ? step.config.code : "";
+      if (stepCode) {
+        holders.push({
+          key: `${node.id}#${index}`,
+          size: stepCode.length,
+          relevant: isRelevantCode(step.config ?? {}, exactKeep, fuzzyKeep, step.label ?? ""),
+        });
+      }
+    });
+  }
+
+  // ② 只有超過預算才截，而且「無關的、大的」先截；相關的永遠留完整
+  const truncateKeys = new Set<string>();
+  let total = holders.reduce((sum, holder) => sum + holder.size, 0);
+  if (total > CODE_BUDGET_CHARS) {
+    const candidates = holders.filter((holder) => !holder.relevant).sort((a, b) => b.size - a.size);
+    for (const candidate of candidates) {
+      if (total <= CODE_BUDGET_CHARS) break;
+      truncateKeys.add(candidate.key);
+      total -= candidate.size;
+    }
+  }
+
+  const shrink = (cfg: Record<string, unknown>, key: string): Record<string, unknown> =>
+    truncateKeys.has(key) && typeof cfg.code === "string"
+      ? { ...cfg, code: `(已有程式碼約 ${cfg.code.length} 字，要改就整段重寫，不用貼原文)` }
+      : cfg;
+
   const nodes = graph.nodes.map((n) => {
-    let cfg: Record<string, unknown> = truncateCode({ ...n.config }, exactKeep, fuzzyKeep, n.label);
-    if (n.type === "repeat-steps" && typeof cfg.steps === "string") {
-      try {
-        const steps = JSON.parse(cfg.steps) as { type: string; label?: string; config: Record<string, unknown> }[];
-        if (Array.isArray(steps)) {
-          cfg = { ...cfg, steps: JSON.stringify(steps.map((s) => ({ ...s, config: truncateCode(s.config ?? {}, exactKeep, fuzzyKeep, s.label ?? "") }))) };
-        }
-      } catch { /* steps 不是合法 JSON 就原樣送(模型自己會在後續驗證/修正迴圈看到具體錯誤) */ }
+    let cfg: Record<string, unknown> = shrink({ ...n.config }, n.id);
+    const steps = n.type === "repeat-steps" ? parseSteps(cfg) : null;
+    if (steps) {
+      cfg = { ...cfg, steps: JSON.stringify(steps.map((s, index) => ({ ...s, config: shrink(s.config ?? {}, `${n.id}#${index}`) }))) };
     }
     return { id: n.id, type: n.type, label: n.label, config: cfg };
   });

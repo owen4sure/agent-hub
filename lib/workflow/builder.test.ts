@@ -638,47 +638,62 @@ test("builder 既有流程修改：裸字代碼(沒加引號，如「改成agg1�
 // 格式長怎樣，這個節點本身不需要改)，也會被誤判成相關節點，把它自己動輒 8000+ 字的程式碼一起保留，
 // 讓提示從該有的約 6500 字暴增到 18513 字——原本想解決「盲寫」卻意外造成「提示灌爆」，兩者都會讓
 // 本機 Claude Code 在時限內回不了應。修法是裸字比對只看 label／code，不看 intent。
-test("builder 既有流程修改：裸字代碼比對不能誤觸發到只在 intent 裡舉例提到、本身不相關的節點", async () => {
+// 這個測試原本斷言「不相關節點的程式碼不能出現在提示裡」，理由是怕提示暴增拖慢回應。
+// 實測推翻了那個假設：一張真實流程的完整程式碼只有 15,030 字，全放進提示也才從約 29,300 變成
+// 約 41,000 字，而同機器跑過 36,995 字的提示、183 秒完成——截短幾乎沒省到時間，卻直接造成
+// 一整批「模型看不到原文只能猜」的失敗。政策因此反過來：預設全部給看，只有真的超過預算才截，
+// 而且先截「跟需求無關、體積最大」的，相關的永遠留完整。這裡改成驗證新政策本身。
+test("建圖提示：整張圖的程式碼沒超過預算時，全部原文都要讓模型看到", async () => {
   let lastPrompt = "";
   const client = {
-    chat: {
-      completions: {
-        create: async (params: { messages: { role: string; content: string }[] }) => {
-          lastPrompt = params.messages.map((m) => m.content).join("\n");
-          return { choices: [{ message: { content: JSON.stringify({
-            phase: "edits",
-            message: "已更新",
-            edits: [{ nodeId: "loop1", stepIndex: 0, config: { code: "return { ...ctx.input };" } }],
-          }) }, finish_reason: "stop" }] };
-        },
-      },
-    },
+    chat: { completions: { create: async (params: { messages: { role: string; content: string }[] }) => {
+      lastPrompt = params.messages.map((m) => m.content).join("\n");
+      return { choices: [{ message: { content: JSON.stringify({ phase: "answer", message: "看過了" }) }, finish_reason: "stop" }] };
+    } } },
   } as never;
-  const irrelevantMarker = "__UNIQUE_MARKER_UNRELATED_EXCEL_FORMAT_LOGIC__";
-  const irrelevantCode = `const y = 2; // ${irrelevantMarker}\n` + "// filler\n".repeat(20);
+  const marker = "__UNRELATED_BUT_SHOULD_STILL_BE_VISIBLE__";
   await buildWorkflow(
-    client,
-    "test-builder-model",
+    client, "test-builder-model",
     [{ role: "user", parts: [{ kind: "text", text: "要抓的代碼改成：agg1~agg6、agg19" }] }],
     {
       nodes: [
         { id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
-        {
-          id: "loop1", type: "repeat-steps", label: "對每個月重複", position: { x: 300, y: 0 },
-          config: {
-            items: "{{monthItems}}", itemVar: "item",
-            steps: JSON.stringify([{ type: "custom-code", label: "擷取代碼資料", config: { intent: "擷取邏輯", code: "return {};" } }]),
-          },
-        },
-        {
-          id: "n13", type: "custom-code", label: "彙整成結算表並存桌面", position: { x: 500, y: 0 },
-          config: { intent: "D欄=該筆代碼(如agg8)，其餘欄位依序填入", code: irrelevantCode },
-        },
+        { id: "n13", type: "custom-code", label: "彙整成結算表", position: { x: 500, y: 0 },
+          config: { intent: "彙整", code: `const y = 2; // ${marker}\n` + "// filler\n".repeat(20) } },
       ],
-      edges: [{ from: "trigger", to: "loop1" }, { from: "loop1", to: "n13" }],
+      edges: [{ from: "trigger", to: "n13" }],
     },
   );
-  assert.doesNotMatch(lastPrompt, new RegExp(irrelevantMarker), "n13 的 intent 只是舉例提到「agg8」，本身跟這次要改的代碼無關，不該把它的程式碼也保留下來灌爆提示");
+  assert.match(lastPrompt, new RegExp(marker), "沒超過預算就不該截——看不到原文正是模型只能瞎猜的根因");
+});
+
+test("建圖提示：超過預算時先截「跟需求無關、體積最大」的，跟需求相關的永遠留完整原文", async () => {
+  let lastPrompt = "";
+  const client = {
+    chat: { completions: { create: async (params: { messages: { role: string; content: string }[] }) => {
+      lastPrompt = params.messages.map((m) => m.content).join("\n");
+      return { choices: [{ message: { content: JSON.stringify({ phase: "answer", message: "看過了" }) }, finish_reason: "stop" }] };
+    } } },
+  } as never;
+  const relevantMarker = "__RELEVANT_MUST_SURVIVE__";
+  const bulkMarker = "__BULK_SHOULD_BE_TRUNCATED__";
+  // 相關節點：label 含使用者講的裸字代碼字根(agg)；體積大的無關節點負責把總量推過預算
+  const relevantCode = `const agg1 = 1; // ${relevantMarker}\n` + "// r\n".repeat(50);
+  const bulkCode = `const z = 0; // ${bulkMarker}\n` + "// bulk filler line\n".repeat(2500);
+  await buildWorkflow(
+    client, "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "要抓的代碼改成：agg1~agg6、agg19" }] }],
+    {
+      nodes: [
+        { id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
+        { id: "small", type: "custom-code", label: "擷取agg資料", config: { intent: "擷取", code: relevantCode }, position: { x: 300, y: 0 } },
+        { id: "bulk", type: "custom-code", label: "無關的大節點", config: { intent: "其他", code: bulkCode }, position: { x: 500, y: 0 } },
+      ],
+      edges: [{ from: "trigger", to: "small" }, { from: "small", to: "bulk" }],
+    },
+  );
+  assert.match(lastPrompt, new RegExp(relevantMarker), "跟需求相關的節點永遠不能被截");
+  assert.doesNotMatch(lastPrompt, new RegExp(bulkMarker), "超過預算時，無關又最大的那個要先被截掉");
 });
 
 test("builder 附檔手動流程：模型誤把上傳檔案當資料夾監聽時，系統要求直接建立選檔流程", async () => {
