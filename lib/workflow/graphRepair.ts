@@ -246,8 +246,12 @@ export function applyNodeConfigEdits(
       if (JSON.stringify(newSteps) === JSON.stringify(steps)) {
         skipped.push({
           nodeId: node.id,
-          reason: `「${node.label}」第 ${e.stepIndex} 步的修改跟目前完全一樣，等於沒改。`
-            + `要改這一步的名稱請在同一筆 edits 帶 "label"；要改程式碼請帶 codeReplace 或完整 code。`,
+          // 這句話會同時餵回模型、也會顯示給使用者，所以不能寫成只有模型看得懂的欄位名指令
+          // (真實踩過：使用者畫面上出現「請在同一筆 edits 帶 "label"」這種內部術語，他完全
+          //  不知道那是在跟誰講話、也不知道自己該做什麼)。改成人看得懂的因果 + 下一步。
+          reason: `「${node.label}」第 ${(e.stepIndex ?? 0) + 1} 步：這次送出的內容跟現在完全一樣，所以沒有任何東西被改動。`
+            + `如果你要改的是這一步的「名稱」，請直接說「把第 ${(e.stepIndex ?? 0) + 1} 步改名為○○○」；`
+            + `如果要改的是它的做法，請說清楚要改成什麼。`,
         });
         continue;
       }

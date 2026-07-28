@@ -1130,6 +1130,9 @@ ${definitions}
 【怎麼判斷】
 - 使用者只是問目前怎麼做、為何失敗、能否做到時，回 {"phase":"answer","message":"根據現場直接回答"}，不修改。
 - 改既有設定（分頁、網址、文字、篩選條件、程式碼）回 phase:"edits" 的 edits。nodeId 要用上面圖裡的 id；config 只放實際變動欄位。
+- **改 repeat-steps(重複執行)裡面某一步時，一定要帶 "stepIndex"**(第幾步，從 0 起，對照上面「步驟編號對照」)，config 只放那一步改好後的設定，絕對不要整包重寫外層的 steps JSON。
+- **要改那一步的名稱就在同一筆 edits 帶 "label"**：這一步的用途或處理範圍變了、原本名稱會誤導人時一定要改(例如名稱寫著抓某一組代碼、實際已換成另一組)。只送 config 是改不到名稱的。
+- **每一筆 edits 都必須真的有變動**。送一筆跟現況完全相同的設定會被整包退回；如果檢查後發現該做的其實早就做好了、只剩名稱不對，那就只送一筆帶 "label" 的 edits，不要附上沒有變動的 config。
 - 刪一個步驟、加一個步驟、或重接線時，回 phase:"edits" 的 structure。structure 只列本次變動：removeNodeIds / addNodes / removeEdges / addEdges。不能刪 trigger；新增節點 id 必須是新的短英數；不准輸出整包 nodes/edges。
 - 有失敗現場時先看實際 input 和執行紀錄：字面 {{欄位}} 或缺欄位代表真正問題在上游產生資料的步驟，不要只改報錯下游。
 - **custom-code 只改一小部分時，一律用 codeReplace 定點取代，不要整段重吐**：edits 元素帶 "codeReplace":[{"from":"目前程式碼裡真實存在的一小段","to":"換成什麼"}]，可以多組，不要同時帶 config.code。from 必須在該節點目前的程式碼裡**剛好出現一次**(出現 0 次或多次都會被退回)，需要時多帶前後文讓它唯一。

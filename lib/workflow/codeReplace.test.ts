@@ -266,7 +266,8 @@ test("套用 edits：內嵌步驟送來跟現況一模一樣的修改，要當�
     ]);
     assert.equal(result.edits.length, 0, "沒有實際變動就不能算成一筆套用成功");
     assert.equal(result.skipped.length, 1);
-    assert.match(result.skipped[0].reason, /等於沒改/);
+    assert.match(result.skipped[0].reason, /完全一樣/);
+    assert.ok(!result.skipped[0].reason.includes("edits"), `錯誤訊息會顯示給使用者，不能出現內部欄位名：${result.skipped[0].reason}`);
     assert.equal(JSON.stringify(getWorkflow(workflow.id)?.nodes[0]?.config.steps), before);
   } finally {
     deleteWorkflow(workflow.id);
