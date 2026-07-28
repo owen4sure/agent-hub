@@ -1551,12 +1551,12 @@ export async function buildWorkflow(
       if (text && looksLikeBrokenStructuredOutput(text)) {
         return { phase: "clarify", message: "這次 AI 回覆的格式有問題，沒能正確產生流程圖(不是你的需求有問題)。請再說一次或直接重送上一句，通常重試一次就會正常。" };
       }
-      return { phase: "clarify", message: plainLanguage(text || "我需要更多資訊，可以再描述一下嗎？") };
+      return { phase: "clarify", message: plainLanguage(text || "我需要更多資訊，可以再描述一下嗎？", {}, userWordsToPreserve(requirementText)) };
     }
     const phase = String(obj.phase ?? "").trim().toLowerCase(); // 弱模型偶爾大小寫/空白不乾淨，正規化後再判斷
 
     if (phase === "answer") {
-      return { phase: "answer", message: plainLanguage(String(obj.message ?? "目前沒有足夠資訊回答這個問題")) };
+      return { phase: "answer", message: plainLanguage(String(obj.message ?? "目前沒有足夠資訊回答這個問題"), {}, userWordsToPreserve(requirementText)) };
     }
 
     // ── 修現有節點(edits)──先確定性驗證 nodeId 與型別，錯了餵回去修，不能靜默吞。
@@ -1887,7 +1887,7 @@ export async function buildWorkflow(
           "使用者的需求已經具體，但你只回了沒有指出任何缺口的罐頭反問。不要把資料格式、欄位位置或技術設定丟回給使用者；請用合理預設直接產出 phase:ready 的可安全試跑流程。若需要假設，寫在 message 讓使用者核對，不要回 phase:clarify。",
         ];
       } else {
-        return { phase: "clarify", message: plainLanguage(clarifyMessage) };
+        return { phase: "clarify", message: plainLanguage(clarifyMessage, {}, userWordsToPreserve(requirementText)) };
       }
     }
 

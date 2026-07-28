@@ -584,7 +584,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       if (explicitEditRefusal) {
         return NextResponse.json({
           phase: "answer",
-          message: plainLanguage(`${result.message}\n\n你說先不要改，所以以上只是說明，沒有真的套用到流程上——確定要套用的話，再明確跟我說一次即可。`),
+          message: plainLanguage(`${result.message}\n\n你說先不要改，所以以上只是說明，沒有真的套用到流程上——確定要套用的話，再明確跟我說一次即可。`, {}, userWordsToPreserve(rawLastUserCommandText)),
           ...(shouldAttachMissingSecrets(result.message) ? { missingSecrets: missingSecretsPayload } : {}),
         });
       }
