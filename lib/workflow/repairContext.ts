@@ -94,6 +94,14 @@ export async function dumpFileExcerpt(p: string, maxChars = 7000, sheetHint = ""
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.readFile(p);
     const lines: string[] = [];
+    // 先把「這個檔案到底有哪些分頁」完整列出來，再進細節。
+    // 真實踩過：模型猜了一個不存在的分頁名，執行時才報「找不到分頁X。這個檔案實際的分頁有：…」——
+    // 那份清單執行期印得出來，建圖當下卻沒給模型看。而下面的細節節錄一旦命中它自己猜的名字就 break，
+    // 等於永遠不會讓它知道還有哪些分頁存在，猜錯了也沒有任何線索可以自我修正。
+    // 這一行只花幾十個字，卻直接消滅「分頁名用猜的」這整類失敗。
+    if (wb.worksheets.length > 0) {
+      lines.push(`這個檔案實際有這些分頁(只能用這裡面的名稱，不要自己造)：${wb.worksheets.map((ws) => `「${ws.name}」`).join("、")}`);
+    }
     // 提示文字裡點名的分頁優先(它才是這一步實際要處理的)，其餘分頁排後面
     const sheets = [...wb.worksheets].sort((a, b) => {
       const aHit = sheetHint.includes(a.name) ? 0 : 1;
