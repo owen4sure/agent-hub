@@ -891,7 +891,22 @@ export function classifyFailure(error: string): { reason: string; resolution: "a
   // 能解，AI 改設定或重試都沒用。真實踩過的漏網之魚：一開始只寫了 invalid_grant 這條規則，
   // invalid_client 沒被歸類到，就掉到預設的 ai-fixable，讓修復迴圈對著「憑證本身就貼錯」這種
   // 只有使用者能修的事一直空轉重試，使用者也永遠不會被主動提醒去檢查 Client ID/Secret。
-  if (/Google OAuth 憑證已失效|invalid_grant|Google OAuth 用戶端 ID.*不正確|invalid_client/i.test(e)) {
+  // invalid_grant 還要再講一件事：**為什麼上禮拜還好好的**。Google 的 OAuth 同意畫面只要還停在
+  // 「測試中」，發出去的 refresh token 一律 7 天後失效——症狀就是「明明確認過可以，隔一週又壞」。
+  // 只叫使用者「重走一次流程」等於叫他每週手動修一次；把根因跟一次性解法一起講出來才是真的修好。
+  // (真實踩過：同一條流程上次成功到這次失敗剛好整整 7 天。)
+  if (/invalid_grant|Google OAuth 憑證已失效/i.test(e)) {
+    return {
+      reason: `${e}｜需人工：Google 的授權(refresh token)已經失效，AI 沒辦法自己生成。`
+        + `如果這條流程「上次確認可以、隔幾天又壞」，幾乎都是同一個原因：OAuth 同意畫面還停在「測試中」，`
+        + `Google 會讓測試模式發出的授權 7 天後自動失效。`
+        + `一勞永逸的做法是先到 Google Cloud Console →「OAuth 同意畫面」把發布狀態改成「正式版」，`
+        + `再到 OAuth Playground 重新走一次授權拿新的 refresh token，貼回設定頁的 googleOAuthRefreshToken。`
+        + `只換 token 不改發布狀態的話，7 天後會再壞一次。`,
+      resolution: "needs-human", category: "credentials", transient: false,
+    };
+  }
+  if (/Google OAuth 用戶端 ID.*不正確|invalid_client/i.test(e)) {
     return { reason: `${e}｜需人工：這是 Google OAuth 憑證問題，需要你本人到 Google Cloud Console 或 OAuth Playground 重新核對/走一次流程，AI 沒辦法自己生成或修好。`, resolution: "needs-human", category: "credentials", transient: false };
   }
   // ExcelJS/JSZip 對 CSV、HTML 錯誤頁或損毀下載檔會丟非常技術性的「central directory」錯誤。

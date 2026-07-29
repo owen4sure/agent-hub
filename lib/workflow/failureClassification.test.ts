@@ -72,6 +72,18 @@ describe("classifyFailure", () => {
     assert.equal(result.resolution, "needs-human");
   });
 
+  // 真實案例：這條流程上次成功到這次失敗剛好整整 7 天，而錯誤是自己寫 token 交換的 custom-code
+  // 直接丟出來的原始 JSON。只說「請重新走一次流程」等於叫使用者每週手動修一次——要講出根因
+  // (同意畫面停在「測試中」→ Google 讓授權 7 天失效)跟一次性解法，他才修得完。
+  it("invalid_grant 的說明要指出「測試中會 7 天失效」與一次性解法，不能只叫人重走流程", () => {
+    const result = classifyFailure("換 access token 失敗：{\"error\":\"invalid_grant\",\"error_description\":\"Token has been expired or revoked.\"}");
+    assert.equal(result.category, "credentials");
+    assert.equal(result.resolution, "needs-human");
+    assert.match(result.reason, /7 天/);
+    assert.match(result.reason, /正式版/);
+    assert.match(result.reason, /googleOAuthRefreshToken/);
+  });
+
   it("Google OAuth 用戶端 ID/密鑰貼錯(invalid_client)也要歸帳密類——這是 invalid_grant 的漏網之魚，真實跑過才發現只顧到一種 OAuth 錯誤", () => {
     const message = "Google OAuth 用戶端 ID(Client ID)或密鑰不正確(invalid_client)。請重新確認 Google Cloud Console 的 OAuth 2.0 用戶端 ID／密鑰是否貼對，到設定頁重新填入。";
     const result = classifyFailure(message);
