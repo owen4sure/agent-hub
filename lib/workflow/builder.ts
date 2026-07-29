@@ -1033,6 +1033,24 @@ function inheritedContextSection(inheritedContext?: string, confirmedRules?: { t
   return background + rules;
 }
 
+/**
+ * 寄信配方：兩份提示(從零建圖／既有流程修改)共用。
+ * 抽成常數不是為了少打字——這個 repo 已經踩過兩次「把新規則只加進其中一份，模型永遠讀不到」，
+ * 症狀是「這個功能明明做了卻沒作用」，而且從外面完全看不出原因。
+ */
+const MAIL_RECIPE = `【寄信：兩個節點，別選錯，也別把運算塞進寄信那一步】
+- **send-email**(走 SMTP)：寄給任何人、不需要開瀏覽器。要先在設定頁填 SMTP 帳密。
+- **webmail-send**(用網頁信箱寄)：操作使用者**本人已登入**的網頁信箱。寄件人是他自己、寄件備份匣有紀錄、
+  信箱裡設定好的簽名檔用得到。公司內部信箱沒有 SMTP 或被擋時，這是唯一的路。前面要有登入步驟
+  (browser-login，或使用者已用「手動登入一次」登入過)。使用者說「用我的公司信箱寄」「從我的信箱寄出去」
+  「要留在寄件備份」「要帶公司簽名檔」→ 選這個。
+- **內文要運算時，一律拆成兩步：先一個 custom-code 算出內文欄位，寄信節點的 body 只填 {{那個欄位}}。**
+  不要把「比較上週」「算成長率」「組表格」這種事寫進寄信節點的 body——寄信節點只會做字串代換，不會運算。
+  拆開的三個好處要記得：①安全排練時使用者看得到**算完的**內文長什麼樣 ②數字錯改上游、文案錯改寄信節點，
+  AI 修復不用猜是哪一種 ③同一段內容可以同時拿去寄信、發通知、寫進試算表。
+- 版型留在寄信節點、數字放上游：body 寫成「各位好，\\n\\n以下是 {{periodLabel}} 的成績：\\n{{channelTable}}」
+  這種樣子——招呼語和段落順序使用者自己看得懂也改得動，不用碰程式碼。`;
+
 export function systemPrompt(currentGraph: string, rc?: RuntimeContext, triggerParams?: ParamField[], graph?: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }, inheritedContext?: string, confirmedRules?: { text: string; confirmedAt: string }[]): string {
   const defs = listNodeDefsForAI();
   return `你是一個自動化流程(workflow)建構助理。使用者只會用白話描述需求，不懂程式。你的工作是把需求變成一張「節點圖」。${inheritedContextSection(inheritedContext, confirmedRules)}
@@ -1173,7 +1191,7 @@ ${runtimeSection(rc)}
 - 使用者說「收到某種 email 就自動處理」：在 trigger 節點的 config 設 mailWatch:"on"，要篩選就填 mailSubjectFilter(主旨包含)/mailFromFilter(寄件人包含)。下游用 {{from}}/{{subject}}/{{date}}/{{body}} 拿信的欄位，信有附件時 {{filePath}}/{{fileName}} 是第一個附件(read-file/excel-process/pdf-read 都吃 {{filePath}})、{{attachmentCount}} 是附件數。記得在 message 提醒「設為正式後才會開始收信；IMAP 帳密要在設定頁填(有測試連線)」。注意：「收到信就跑」用收信觸發；「流程中途去信箱抓某封信」用 email-read 節點；「寄信出去」用 send-email——三件事別搞混。
 - 使用者說「我傳 Telegram 訊息給機器人就跑」：在 trigger 節點的 config 設 telegramWatch:"on"，只想讓特定訊息觸發就填 telegramKeyword(訊息包含)。下游用 {{message}} 拿訊息文字、{{fromName}}/{{chatId}}/{{messageId}} 拿來源。安全設計：只接受設定頁綁定的 Chat ID。記得在 message 提醒「設為正式後才會開始接收；Telegram Bot Token/Chat ID 在設定頁通知串接填」。「跑完發 Telegram 通知我」是 telegram-notify 節點，不是這個觸發。
 - 使用者說「傳 LINE 給官方帳號就跑」：在 trigger 節點的 config 設 lineWatch:"on"。系統會在套用時**自動啟用並把 webhook 網址顯示給使用者**;下游用 {{message}}/{{userId}}/{{replyToken}}。記得在 message 老實提醒「LINE 平台只能打公網 HTTPS——要先用 cloudflared/ngrok 等隧道把網址開出去(面板有教學)，並在設定頁填 LINE Channel Secret」。「跑完發 LINE 通知我」是 line-notify 節點，不是這個觸發。
-【通知與記錄管道的選擇——使用者沒指名時，一律選「零設定」的】
+${MAIL_RECIPE}【通知與記錄管道的選擇——使用者沒指名時，一律選「零設定」的】
 - **「我每週會上傳」「每個月我會丟一份」這種話是使用頻率，不是要你建排程**：使用者在講他多久做一次這件事，不是要系統自己定時跑。只有明確講「自動」「排程」「每天幾點自己跑」才填 schedule。判斷錯會做出一個沒有人選檔、永遠拿不到資料的排程。
 - 「跳出來提醒/彈出/在電腦上通知我/提醒我一聲」＝desktop-notify(零設定、不用任何 Token)。只有使用者明確講 Telegram/LINE/Email/Slack 才用對應節點——那些都要先設定金鑰，每多一個要設定的外部服務，新手就多一個放棄點。
 - 「記下來/存起來/默默記著」沒指名 Google 試算表時＝存**本機檔案**(桌面的 Excel/CSV，零設定)。只有明確講 Google 試算表/雲端才用 google-sheet-*(那要多一次 Apps Script 部署教學)。
@@ -1300,6 +1318,7 @@ ${definitions}
 - 使用者說「改成每天／每週幾點自動跑」時，這不是新增節點，也不要叫他去排程頁設定。回 phase:"edits"，在根層帶 schedule:{"cron":"五欄 cron","params":{}}；系統會把這條流程原本唯一的自動時間直接換掉。只有目前本來就有多個不同自動時間、而使用者沒有說要改哪一個時，才 clarify。
 - 不確定且會改錯業務邏輯時才 clarify，問題要具體；可從圖和現場判斷的事不要問使用者。
 
+${MAIL_RECIPE}
 【message 排版(真實踩過的使用者回饋：對話訊息「很亂」，讀不出重點)】message 若同時講到「目前狀態(已改好/不用再按套用)」「真正原因/診斷」「使用者接下來要做什麼」，這幾件事之間要空一行分開(用 \n\n)，不要黏成一段連續文字逼使用者從頭讀到尾才找得到重點。
 
 【回覆】只回一個 JSON：

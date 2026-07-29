@@ -60,6 +60,9 @@ export interface NodeSideEffectSpec {
 export const NODE_SIDE_EFFECTS: Readonly<Record<string, NodeSideEffectSpec>> = {
   // ── 外送訊息：引擎整步略過 ──
   "send-email": { effects: ["email"], dryRun: "skip" },
+  // 自己守門而不是整步略過：安全排練時要把「已經換好值的完整內文」印出來給使用者確認，
+  // 引擎整步跳過的話他就看不到寄出去會長什麼樣(見 webmailSend 的 describeOutgoingMail)。
+  "webmail-send": { effects: ["email"], dryRun: "self-guard" },
   "telegram-notify": { effects: ["notify"], dryRun: "skip" },
   "line-notify": { effects: ["notify"], dryRun: "skip" },
   "slack-notify": { effects: ["notify"], dryRun: "skip" },

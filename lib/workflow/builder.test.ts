@@ -1276,6 +1276,10 @@ test("兩份提示一致性：既有流程修改看得到的東西不能比從�
     ["stepIndex", "改迴圈裡某一步的方法"],
     ["label", "改步驟名稱的方法"],
     ["codeReplace", "定點改程式碼的方法"],
+    // 這一輪又踩了同一次：寄信配方只加進「從零建圖」那份，編輯既有流程時模型讀不到，
+    // 症狀會是「跟他說用公司信箱寄，他卻加了 SMTP 寄信節點」。已抽成共用常數，用測試釘住。
+    ["webmail-send", "使用者說「用我的公司信箱寄」時要選對節點"],
+    ["custom-code 算出內文", "內文要運算時必須拆成兩步，不能塞進寄信節點的 body"],
   ];
   for (const [needle, why] of mustHave) {
     assert.ok(editPrompt.includes(needle), `既有流程修改的提示缺少「${needle}」——${why}`);

@@ -28,6 +28,7 @@ import { writeFileNode, readFileNode } from "./nodes/fileOps";
 import { webPageNode } from "./nodes/webPage";
 import { desktopNotifyNode } from "./nodes/desktopNotify";
 import { sendEmailNode } from "./nodes/sendEmail";
+import { webmailSendNode } from "./nodes/webmailSend";
 import { googleSlidesRefreshNode } from "./nodes/googleSlidesRefresh";
 import { googleSlidesCreateNode } from "./nodes/googleSlidesCreate";
 
@@ -63,6 +64,7 @@ const ALL: NodeDefinition[] = [
   lineNotifyNode,
   slackNotifyNode,
   sendEmailNode,
+  webmailSendNode,
   desktopNotifyNode,
   googleSlidesRefreshNode,
   googleSlidesCreateNode,

@@ -58,6 +58,14 @@ function sanitizeConfig(type: string, config: Record<string, unknown>, counters:
     counters.clearedEmailCount++;
     counters.clearedEmailLabels.push(label);
   }
+  // 用網頁信箱寄信的外洩風險更高：它是用**匯入者本人已登入的公司信箱**寄出去的，
+  // 收件人沒清掉的話，一跑就等於用他的身分把資料寄給流程作者指定的任何人。
+  // 三個收件欄位都要清(密件副本尤其危險——它不會出現在收件人眼中，最不容易被發現)。
+  if (type === "webmail-send" && (out.to || out.cc || out.bcc)) {
+    out = { ...out, to: "", cc: "", bcc: "" };
+    counters.clearedEmailCount++;
+    counters.clearedEmailLabels.push(label);
+  }
   if (type === "browser-login") counters.needsManualLogin = true;
   if (type === "repeat-steps" && typeof out.steps === "string") {
     try {
