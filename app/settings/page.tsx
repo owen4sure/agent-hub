@@ -5,6 +5,7 @@ import { MODELS, KNOWN_WORKING_MODELS, DEFAULT_MODEL, supportsVision, supportsCa
 import { isClaudeCodeModel } from "@/lib/claudeCodeShared";
 import { PageHeader } from "@/components/ui";
 import { RevealCopyButton } from "./RevealCopyButton";
+import { GoogleAccountCard } from "./GoogleAccountCard";
 
 interface SecretField { key: string; label: string; type: string; }
 /** 跨所有 workflow 去重後的一個共用帳密欄位 + 有哪些 workflow 用到它 */
@@ -360,6 +361,8 @@ export default function SettingsPage() {
           </div>
         )}
       </section>
+
+      <GoogleAccountCard />
 
       <section className="space-y-3">
         <div>

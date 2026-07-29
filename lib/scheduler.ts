@@ -4,6 +4,7 @@ import { resumeRun, startWorkflowRun } from "./workflow/engine";
 import { getWorkflow } from "./workflow/store";
 import { resolveParams } from "./relativeDate";
 import { getAutomationReadiness } from "./workflow/automationReadiness";
+import { sweepGoogleTokenHealth } from "./googleTokenHealth";
 import { sweepExpiredApprovals } from "./approvals";
 import { sweepHealthChecks } from "./workflow/healthCheck";
 
@@ -272,6 +273,13 @@ function tick() {
     sweepHealthChecks();
   } catch (err) {
     console.error("[scheduler] 健康巡檢掃描失敗:", err);
+  }
+  // Google 授權保活：每天主動用一次 refresh token。兩個目的——擋掉「長期沒用被 Google 回收」，
+  // 以及在排程真的撞上去之前就先發現授權死了(真實踩過：第 7 天失效，直到排程失敗才有人知道)。
+  try {
+    sweepGoogleTokenHealth();
+  } catch (err) {
+    console.error("[scheduler] Google 授權保活失敗:", err);
   }
   const dt = taipeiParts(now);
   const minuteKey = `${dt.year}-${pad(dt.month)}-${pad(dt.day)}T${pad(dt.hour)}:${pad(dt.minute)}`;

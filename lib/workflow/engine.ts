@@ -897,12 +897,11 @@ export function classifyFailure(error: string): { reason: string; resolution: "a
   // (真實踩過：同一條流程上次成功到這次失敗剛好整整 7 天。)
   if (/invalid_grant|Google OAuth 憑證已失效/i.test(e)) {
     return {
-      reason: `${e}｜需人工：Google 的授權(refresh token)已經失效，AI 沒辦法自己生成。`
-        + `如果這條流程「上次確認可以、隔幾天又壞」，幾乎都是同一個原因：OAuth 同意畫面還停在「測試中」，`
-        + `Google 會讓測試模式發出的授權 7 天後自動失效。`
-        + `一勞永逸的做法是先到 Google Cloud Console →「OAuth 同意畫面」把發布狀態改成「正式版」，`
-        + `再到 OAuth Playground 重新走一次授權拿新的 refresh token，貼回設定頁的 googleOAuthRefreshToken。`
-        + `只換 token 不改發布狀態的話，7 天後會再壞一次。`,
+      reason: `${e}｜需人工：Google 的授權已經失效，AI 沒辦法自己生成。`
+        + `處理方式：到「設定 → Google 帳號」按一下「重新連結 Google 帳號」，同意之後就好了，其他欄位都不用動。`
+        + `如果這條流程「上次確認可以、隔幾天又壞」，原因幾乎都是 OAuth 同意畫面還停在「測試中」——`
+        + `Google 會讓測試模式發出的授權 7 天後自動失效。到 Google Cloud Console →「OAuth 同意畫面」`
+        + `把發布狀態改成「正式版」，才不會每週再壞一次。`,
       resolution: "needs-human", category: "credentials", transient: false,
     };
   }

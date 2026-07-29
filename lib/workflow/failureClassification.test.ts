@@ -81,7 +81,7 @@ describe("classifyFailure", () => {
     assert.equal(result.resolution, "needs-human");
     assert.match(result.reason, /7 天/);
     assert.match(result.reason, /正式版/);
-    assert.match(result.reason, /googleOAuthRefreshToken/);
+    assert.match(result.reason, /重新連結 Google 帳號/);
   });
 
   it("Google OAuth 用戶端 ID/密鑰貼錯(invalid_client)也要歸帳密類——這是 invalid_grant 的漏網之魚，真實跑過才發現只顧到一種 OAuth 錯誤", () => {
