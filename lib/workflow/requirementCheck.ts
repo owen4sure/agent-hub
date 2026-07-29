@@ -25,6 +25,17 @@ export interface RequirementItem {
    * 的查詢步驟刪掉。「圖不安全」跟「等使用者確認」是兩件事，要分開。
    */
   needsUser?: boolean;
+  /**
+   * 這一項是被「哪幾個頂層節點」害得沒達成。只有在**確定性地知道是哪幾個**時才會帶
+   * (目前只有 noUnrequestedOutbound)，讓自動移除那一層可以精準地只動這幾個節點。
+   *
+   * 為什麼要有它(真實踩過)：autoTrim 本來只拿到「noUnrequestedOutbound 沒過」這個布林值，
+   * 就自己按「型別是不是寄信/通知」把整張圖的同型別節點全砍——使用者明明說「寄 email 給我」，
+   * 模型只是多加了一個桌面通知，結果連他要的那封信一起被刪掉，還回一句「你這次沒有要求寄信」。
+   * 判斷的來源必須是同一份：這裡算出是誰，就只砍誰；算不出來(例如有掃不到的區域)就一個都不砍。
+   * 內嵌步驟不會出現在這裡——它們沒有頂層 id，不是 autoTrim 動得了的東西，仍走模型修正。
+   */
+  nodeIds?: string[];
 }
 
 export interface RequirementCheckOptions {
@@ -46,6 +57,16 @@ interface GraphLike {
   onFailureWorkflow?: string;
 }
 
+const WATCH_SIGNAL = /監聽|丟進(?:資料夾|文件夾)|放進資料夾|掉進資料夾/;
+// 「不要監聽資料夾，我每次自己選檔」講的是**不要**這個觸發方式。裸字「別」照這個 repo 既有的教訓
+// 處理：「特別/差別/分別/級別/個別」都含「別」但完全不是否定語氣，只認緊接在動作前的祈使句型。
+const NEGATED_WATCH = /(?:不要|不用|不必|無需|不需|不是|(?<![特差分級個])別)[^。，,、\n]{0,3}(?:監聽|丟進|放進|掉進)/g;
+
+/** 使用者要的是「資料夾裡一有新檔就自己跑」。判斷只寫這一份，驗收與手動選檔都用它。 */
+export function isFolderWatchRequested(text: string): boolean {
+  return WATCH_SIGNAL.test(String(text ?? "").replace(NEGATED_WATCH, ""));
+}
+
 /**
  * 「執行時我會上傳／選擇一份檔案」和「監聽某個資料夾」是兩種完全不同的觸發方式。
  * 前者已經有 RunForm 的選檔介面，不能因為模型不知道這個能力就硬問使用者一個根本不存在的資料夾路徑。
@@ -54,6 +75,10 @@ interface GraphLike {
 export function isManualFileUploadRequested(text: string): boolean {
   const t = text.replace(/\s+/g, " ");
   if (/Google\s*(?:Drive|雲端硬碟)|Dropbox|OneDrive/i.test(t)) return false;
+  // 明確說了要監聽資料夾時，「我會把報表上傳到這個資料夾」講的是檔案怎麼進來，不是每次執行跳選檔器。
+  // 兩者是互斥的觸發方式，同時成立會讓驗收永遠矛盾：watch 要求 trigger 填 watchPath、manualFileUpload
+  // 要求它不准有 watchPath，模型填一次被清一次，修正迴圈到死都收斂不了(真實踩過的死迴圈)。
+  if (isFolderWatchRequested(t)) return false;
   // 「檔(?:案)?」而不是硬性要求「檔案」兩字：真實踩過的 bug——連系統自己在澄清句裡建議使用者
   // 回覆的措辭都是白話縮寫「選檔」(不是「選擇檔案」)，使用者照著系統的建議一字不差回覆，
   // 舊版正規表示式卻認不得「檔」單獨出現，導致使用者照做也還是被同一句話卡住問第二次。
@@ -154,8 +179,8 @@ export function checkRequirements(userText: string, graph: GraphLike, opts: Requ
   const has = (...ts: string[]) => ts.some((x) => types.has(x));
   const trigger = graph.nodes.find((n) => n.type === "trigger");
   const items: RequirementItem[] = [];
-  const add = (key: string, label: string, met: boolean, hint: string, needsUser = false) =>
-    items.push({ key, label, met, hint, ...(needsUser ? { needsUser: true } : {}) });
+  const add = (key: string, label: string, met: boolean, hint: string, needsUser = false, nodeIds?: string[]) =>
+    items.push({ key, label, met, hint, ...(needsUser ? { needsUser: true } : {}), ...(nodeIds?.length ? { nodeIds } : {}) });
 
   // ⚠️ fail closed：走訪碰到「巢狀超過政策上限」或「steps 讀不出來」時，這張圖有一整塊是我們**看不到**
   // 的區域，底下每一條安全否決規則的「沒發現問題」都不成立(第四層埋一個 send-email，掃不到就等於
@@ -280,7 +305,7 @@ export function checkRequirements(userText: string, graph: GraphLike, opts: Requ
     );
   }
   // 監聽資料夾
-  if (/監聽|丟進(資料夾|文件夾)|放進資料夾|掉進資料夾/.test(t)) {
+  if (isFolderWatchRequested(t)) {
     add("watch", "監聽資料夾觸發", Boolean(String(trigger?.config?.watchPath ?? "").trim()), "trigger 節點的 config.watchPath 要填監聽路徑(使用者沒講就 clarify 問)");
   }
   // 手動上傳檔案：執行表單會辨識 filePath 並提供選檔器。這不是資料夾監聽，不能要求使用者提供
@@ -428,6 +453,10 @@ export function checkRequirements(userText: string, graph: GraphLike, opts: Requ
         : "") +
       (hasBlindSpots ? `${blindSpotDetail}，系統無法確認那些區域裡有沒有寄信／通知步驟，所以這一項不能算通過。` : "") +
         `使用者若說「不要通知」，桌面通知也必須移除；執行結果會在平台內顯示`,
+      false,
+      // 有掃不到的區域時一個 id 都不給：不確定就不准自動刪(那時連「還有沒有別的」都不知道)。
+      // 內嵌步驟沒有頂層 id，自動移除那一層動不了它，只能繼續交給模型改。
+      hasBlindSpots ? [] : unrequestedOutbound.filter((node) => !node.nested && node.id).map((node) => node.id as string),
     );
   }
   // 「這次需求禁止哪些資料變更」的判斷抽到 dataChangePolicy.ts——建圖需求驗收、建立 workflow 層級

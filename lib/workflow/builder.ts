@@ -165,17 +165,30 @@ export function looksLikeBrokenStructuredOutput(text: string): boolean {
  * - 使用者要求整條重建後又分幾句補資料：從最後一次「重建」開始收集所有使用者訊息，不能只看最後
  *   一句「每週一」，也不能把更早已淘汰的「不要存檔」重新當成限制。
  */
-export function effectiveRequirementText(history: ChatMessage[], hasExistingGraph: boolean): string {
-  if (!hasExistingGraph) return userRequirementText(history);
+export function effectiveRequirementText(history: ChatMessage[], hasExistingGraph: boolean, opts: RequirementTextOptions = {}): string {
+  if (!hasExistingGraph) return userRequirementText(history, opts);
   let replacementStart = -1;
   for (let i = 0; i < history.length; i++) {
     const message = history[i];
     if (message.role !== "user") continue;
     if (wantsFullGraphReplacement(userRequirementText([message]))) replacementStart = i;
   }
-  if (replacementStart >= 0) return userRequirementText(history.slice(replacementStart));
+  if (replacementStart >= 0) return userRequirementText(history.slice(replacementStart), opts);
   const lastUser = [...history].reverse().find((message) => message.role === "user");
-  return lastUser ? userRequirementText([lastUser]) : "";
+  return lastUser ? userRequirementText([lastUser], opts) : "";
+}
+
+export interface RequirementTextOptions {
+  /**
+   * true = 只取使用者**自己打的字**，不含被併進來的附件內文。
+   *
+   * 給「這句話是不是一個指令」這類判斷用。附件是資料，不是命令：一份 SOP 文件裡出現
+   * 「不要隨便更改欄位」「不用再確認」這種再普通不過的句子，就足以讓「使用者授權我直接建、
+   * 不用問」被誤判成成立，之後每一輪合理的反問都會被系統改寫掉，使用者永遠等不到那個問題
+   * (真實會發生：附件內容本來就常常是一份寫滿祈使句的作業說明)。
+   * 需求驗收那類「這次要做什麼」的判斷仍然要看附件，兩者不能共用同一份文字。
+   */
+  typedOnly?: boolean;
 }
 
 /**
@@ -183,13 +196,14 @@ export function effectiveRequirementText(history: ChatMessage[], hasExistingGrap
  * 有文字時，只有文字明確說「照附件／需求文件」才把檔案內容併入，避免一般資料表裡剛好出現
  * 「通知、每月」等字樣而被誤判成使用者要求。
  */
-export function userRequirementText(history: ChatMessage[]): string {
+export function userRequirementText(history: ChatMessage[], opts: RequirementTextOptions = {}): string {
   const chunks: string[] = [];
   for (const message of history) {
     if (message.role !== "user") continue;
     const text = message.parts.filter((part): part is Extract<MessagePart, { kind: "text" }> => part.kind === "text")
       .map((part) => part.text).join("\n").trim();
     if (text) chunks.push(text);
+    if (opts.typedOnly) continue;
     const files = message.parts.filter((part): part is Extract<MessagePart, { kind: "file" }> => part.kind === "file");
     const fileIsTheRequest = !text || /(?:照(?:著|這份)?|依(?:照)?|根據|參考).{0,8}(?:附件|文件|需求|規格|sop|流程)|(?:這份|附件(?:裡|中)?的?)(?:需求|規格|sop|流程|文件)|(?:需求|規格|sop|流程)文件/i.test(text);
     if (fileIsTheRequest) {
@@ -511,7 +525,10 @@ export function authorizesImmediateBuild(text: string): boolean {
   if (/(?:用|按|照|取|給|走)[^。\n]{0,4}(?:合理(?:的)?預設|預設值|預設就好|預設即可|預設設定)/.test(t)) return true;
   if (/合理預設|合理的預設值?/.test(t)) return true;
   // ④明講交給 AI 判斷(你決定／你判斷／隨你／看著辦／自己安排)
-  if (/(?:你|AI|系統)(?:自己)?(?:決定|判斷|安排|挑|選就好|看著辦)|隨(?:你|便)|由你(?:決定|判斷|安排)/.test(t)) return true;
+  // 「隨便」不能單獨算授權：「不要隨便改欄位」「別隨便寄信」裡的「隨便」是在**限制**我，
+  // 意思跟「隨便你」完全相反。這一項一旦誤判，之後每一個合理的反問都會被系統改寫成「不准問」，
+  // 使用者連自己為什麼沒被問過都不會知道——寧可漏判(他再說一次「你決定就好」即可)。
+  if (/(?:你|AI|系統)(?:自己)?(?:決定|判斷|安排|挑|選就好|看著辦)|隨你|隨便你|由你(?:決定|判斷|安排)/.test(t)) return true;
   return false;
 }
 
@@ -728,7 +745,7 @@ export function hiddenCodeWarning(hiddenCode: string[]): string {
     + `所以跟那幾步有關的判斷可能不準。要改那幾步的話，請直接點名是哪一步，我會針對它重新看過。`;
 }
 
-function compactGraphJson(graph: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }, exactKeep: string[] = [], fuzzyKeep: string[] = []): CompactGraph {
+function compactGraphJson(graph: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }, exactKeep: string[] = [], fuzzyKeep: string[] = [], ceilingChars = CODE_CEILING_CHARS): CompactGraph {
   const parseSteps = (cfg: Record<string, unknown>): { type: string; label?: string; config: Record<string, unknown> }[] | null => {
     if (typeof cfg.steps !== "string") return null;
     try {
@@ -758,12 +775,12 @@ function compactGraphJson(graph: { nodes: WorkflowNode[]; edges: WorkflowEdge[] 
   // ② 只有超過預算才截，而且「無關的、大的」先截；相關的永遠留完整
   const truncateKeys = new Set<string>();
   let total = holders.reduce((sum, holder) => sum + holder.size, 0);
-  if (total > CODE_CEILING_CHARS) {
+  if (total > ceilingChars) {
     // 先砍無關的、大的；真的還是超過就連相關的也得砍(否則提示會直接爆掉)，
     // 但兩種情況都會被列進 hiddenCode 讓使用者知道模型沒看到什麼。
     const candidates = [...holders].sort((a, b) => (a.relevant === b.relevant ? b.size - a.size : a.relevant ? 1 : -1));
     for (const candidate of candidates) {
-      if (total <= CODE_CEILING_CHARS) break;
+      if (total <= ceilingChars) break;
       truncateKeys.add(candidate.key);
       total -= candidate.size;
     }
@@ -1374,7 +1391,7 @@ export async function buildWorkflow(
   // 做針對性修改時看得到內文；其餘節點照常截斷控制提示大小)
   const lastUserMsg = [...history].reverse().find((m) => m.role === "user");
   const lastUserPlainText = (lastUserMsg?.parts ?? []).map((p) => (p.kind === "text" ? p.text : "")).join("\n");
-  const compacted = compactGraphJson(currentGraph, quotedStrings(lastUserPlainText), bareTechnicalTokens(lastUserPlainText));
+  let compacted = compactGraphJson(currentGraph, quotedStrings(lastUserPlainText), bareTechnicalTokens(lastUserPlainText));
   const graphStr = compacted.text;
   const fullHistory = history;
   const latestUserText = lastUserMsg ? userRequirementText([lastUserMsg]) : "";
@@ -1390,7 +1407,8 @@ export async function buildWorkflow(
   // 就是把使用者困在原地(他除了重打同一句話沒有別的出路)。這時不再擋，改由 IMMEDIATE_BUILD_CONTRACT
   // 要求模型把「還沒拿到的資料」做成執行期輸入；「不准編造業務數字」的底線由那份契約 + 需求驗收的
   // realBusinessData 這項繼續守住，不是放行造假。第一輪(還沒問過)仍照常問一次，那一次是必要的。
-  const buildNowAuthorized = authorizesImmediateBuild(requirementText);
+  // 只看使用者自己打的字：附件內文不是他對我下的指令(見 RequirementTextOptions.typedOnly)。
+  const buildNowAuthorized = authorizesImmediateBuild(effectiveRequirementText(fullHistory, currentGraph.nodes.length > 1, { typedOnly: true }));
   const alreadyClarifiedOnce = fullHistory.some((message) => message.role === "assistant" && !message.isControl);
   // 從零建立時，沒有真實業務數據來源不能靠合理預設補齊；這不是技術細節，而是會直接決定
   // 流程內容正不正確的唯一關鍵事。直接白話詢問，避免白等模型、避免它反問投影片版型或造假。
@@ -1452,6 +1470,41 @@ export async function buildWorkflow(
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: "system", content: fullSystemPrompt },
   ];
+  /**
+   * 模型說「這包太大我吞不下」時，把程式碼壓到一個很小的預算重組提示，讓這次請求還有機會完成。
+   *
+   * 預設是**整條流程的程式碼原文全部給模型看**(見 CODE_CEILING_CHARS 的說明，那是使用者拍板的)。
+   * 但模型是可換的：同一條流程換到一個上下文視窗小很多的免費模型，就會直接被網關擋成 400，
+   * 使用者看到的是「這次 AI 回覆的格式有問題」——一條本來改得動的流程，換個模型就再也改不動，
+   * 而且完全看不出跟大小有關。
+   *
+   * 所以只在**真的被擋下來時**降級，而且降完一定會被 hiddenCodeWarning 講出來(「這次沒看到哪幾步」)。
+   * 順序不能反過來——先省提示等於天天犧牲正確性，去換一個偶爾才發生的失敗。
+   */
+  const SHRUNK_CODE_CEILING_CHARS = 20_000;
+  let shrunkForContextLimit = false;
+  const shrinkPromptForContextLimit = (): boolean => {
+    if (shrunkForContextLimit) return false;
+    shrunkForContextLimit = true;
+    const smaller = compactGraphJson(currentGraph, quotedStrings(lastUserPlainText), bareTechnicalTokens(lastUserPlainText), SHRUNK_CODE_CEILING_CHARS);
+    if (smaller.hiddenCode.length === 0) return false;  // 本來就不大，縮了也沒差，別白跑一次
+    compacted = smaller;
+    messages[0] = {
+      role: "system",
+      content: (useEditPrompt
+        ? existingGraphEditSystemPrompt(smaller.text, runtimeContext, currentGraph.triggerParams, currentGraph, currentGraph.inheritedContext, currentGraph.confirmedRules)
+        : systemPrompt(smaller.text, runtimeContext, currentGraph.triggerParams, currentGraph, currentGraph.inheritedContext, currentGraph.confirmedRules) + communityRefs + clarifyCapNote + immediateBuildNote
+      ) + secretsStatusSection(currentGraph.requiredSecretsStatus),
+    };
+    console.warn("[workflow-builder] shrunk-for-context-limit", { hidden: smaller.hiddenCode.length, systemChars: String(messages[0].content).length });
+    onStage?.("📉 這條流程對目前的模型太大，改用精簡版重試(會告訴你哪幾步沒被看到)…");
+    return true;
+  };
+  /** 網關/模型回的「上下文塞不下」長什麼樣沒有統一標準，只能看訊息裡的關鍵字。 */
+  const looksLikeContextOverflow = (err: unknown): boolean => {
+    const text = err instanceof Error ? `${err.message}` : String(err ?? "");
+    return /context.{0,20}(length|window|limit)|too many tokens|maximum context|prompt is too long|request too large|payload too large|413/i.test(text);
+  };
   for (const m of history) {
     const parts = m.parts ?? [];
     const hasMedia = parts.some((p) => p.kind === "image");
@@ -1495,11 +1548,23 @@ export async function buildWorkflow(
   const backupModel = [...new Set(backupPreference)].find((candidate) => candidate !== model && (KNOWN_WORKING_MODELS as readonly string[]).includes(candidate));
   let preferredRouteForThisBuild: "backup-model" | "claude-code" | null = null;
   const callOnce = async (extra: OpenAI.Chat.ChatCompletionMessageParam[], extraCC: ChatMessage[]): Promise<string> => {
+    // 用「目前這一份」系統提示，不是最初那份：上面若因為模型吞不下而換成精簡版，本機備援也要拿
+    // 同一份，否則使用者收到的「哪幾步沒看到」會跟實際情況對不上。
     const claudeCodeFallback = () =>
-      callViaClaudeCode(fullSystemPrompt, [...history, ...extraCC], signal, deadlineAt);
+      callViaClaudeCode(String(messages[0].content ?? fullSystemPrompt), [...history, ...extraCC], signal, deadlineAt);
     if (isClaudeCodeModel(model)) return callAIWithRetry(claudeCodeFallback, { label: "建立流程圖(Claude Code)", signal, maxAttempts: 2 });
     const claudeAvailable = await isClaudeCodeAvailable();
-    const callGatewayModel = (targetModel: string) =>
+    // 「這包太大」不是暫時性故障：重試同一包、甚至換另一個模型，結果通常還是同一個。
+    // 在這裡就地縮小重打一次，不要讓它一路掉進換模型/換本機備援的通用重試鏈裡白等。
+    const callGatewayModel = async (targetModel: string): Promise<string> => {
+      try {
+        return await requestGatewayModel(targetModel);
+      } catch (err) {
+        if (!looksLikeContextOverflow(err) || !shrinkPromptForContextLimit()) throw err;
+        return await requestGatewayModel(targetModel);
+      }
+    };
+    const requestGatewayModel = (targetModel: string) =>
       client.chat.completions.create({ model: targetModel, messages: [...messages, ...extra], max_tokens: BUILDER_MAX_OUTPUT_TOKENS }, { signal, timeout: gatewayTimeoutMs }).then((res) => {
         const choice = res.choices[0];
         const content = choice?.message?.content ?? "";
@@ -1572,9 +1637,6 @@ export async function buildWorkflow(
   let requirementFeedbackRounds = 0;
   const MAX_REQUIREMENT_FEEDBACK_ROUNDS = 2;
   let varFeedbackGiven = false;
-  // 自動拿掉的東西(模型多做的通知/排程)。一定要帶到最後的回覆裡告訴使用者——
-  // 這個 repo 踩過「安全機制攔了什麼埋在紀錄裡等於沒講」的虧，靜默修改比不修改更難查。
-  const autoRemovedNotes: string[] = [];
 
   // 弱模型偶爾只回「我需要更多資訊」這種沒有指出缺什麼的空泛反問。對新手而言，這等於
   // 明明已經說了「上傳 Excel、算合計、不要改檔」，平台卻把工作丟回給他重新描述；而我們的
@@ -1620,7 +1682,9 @@ export async function buildWorkflow(
     const phase = String(obj.phase ?? "").trim().toLowerCase(); // 弱模型偶爾大小寫/空白不乾淨，正規化後再判斷
 
     if (phase === "answer") {
-      return { phase: "answer", message: plainLanguage(String(obj.message ?? "目前沒有足夠資訊回答這個問題"), {}, userWordsToPreserve(requirementText)) };
+      // 回答問題時更需要附上「有哪些程式碼沒被看到」：使用者問「為什麼這步抓不到 X」，模型手上
+      // 若剛好缺了那一段，它照樣會很有把握地解釋一遍。被砍掉的東西一定要浮到回覆裡(見 contextBudget.ts)。
+      return { phase: "answer", message: plainLanguage(String(obj.message ?? "目前沒有足夠資訊回答這個問題"), {}, userWordsToPreserve(requirementText)) + hiddenCodeWarning(compacted.hiddenCode) };
     }
 
     // ── 修現有節點(edits)──先確定性驗證 nodeId 與型別，錯了餵回去修，不能靜默吞。
@@ -1862,6 +1926,12 @@ export async function buildWorkflow(
           ...validateSuggestedSchedule(validated.data.schedule as SuggestedSchedule | undefined),
         ];
         if (lintErrors.length === 0) {
+          // 自動拿掉的東西(模型多做的通知/排程)。一定要帶到最後的回覆裡告訴使用者——
+          // 這個 repo 踩過「安全機制攔了什麼埋在紀錄裡等於沒講」的虧，靜默修改比不修改更難查。
+          // **每一輪各自一份**：這一輪的圖若沒通過就會被丟掉重畫，那一輪拿掉的東西當然不能算在
+          // 使用者最後真正收到的那張圖上(真實踩過：第一輪刪了一個通知、第二輪模型根本沒畫那個
+          // 通知，交付訊息仍然寫著「移除了 Telegram 通知」，講的是一張不存在的圖)。
+          const autoRemovedNotes: string[] = [];
           // 由左到右分層對齊排列
           const pos = autoLayout(rawNodes, validated.data.edges);
           const positionedNodes = rawNodes.map((n) => ({ ...n, position: pos[n.id] ?? n.position }));
@@ -1894,12 +1964,13 @@ export async function buildWorkflow(
           // 模型「多做的事」直接拿掉，不要再花一輪模型去請它改(見 autoTrim.ts)。判斷依據只用
           // 驗收剛算出來的結論，不在這裡重新解讀使用者原話——重新解讀必然跟驗收漂移。
           // 只處理「拿掉多做的」，缺步驟/缺分流一律仍餵回模型，那種只有它補得出來。
-          const trimmable = new Set(reqItems.filter((item) => !item.met && !item.needsUser).map((item) => item.key));
+          const trimmable = reqItems.filter((item) => !item.met && !item.needsUser);
           const trimmed = autoTrimUnrequested(
             { nodes, edges, schedule },
             {
-              dropUnrequestedOutbound: trimmable.has("noUnrequestedOutbound"),
-              dropUnrequestedSchedule: trimmable.has("noUnexpectedSchedule"),
+              // 砍誰完全照驗收算出來的名單(見 AutoTrimPolicy.dropOutboundNodeIds)。
+              dropOutboundNodeIds: trimmable.find((item) => item.key === "noUnrequestedOutbound")?.nodeIds,
+              dropUnrequestedSchedule: trimmable.some((item) => item.key === "noUnexpectedSchedule"),
             },
           );
           if (trimmed.removed.length > 0) {
@@ -1914,6 +1985,18 @@ export async function buildWorkflow(
               { resolveSubflow: storeSubflowResolver },
             );
           }
+          // 上面兩段(補選檔契約、拿掉多做的東西)真的改了節點與接線，而前面那次 lintGraph 驗的是
+          // 模型的原圖。**改完必須重驗**，否則交出去的可能是一張結構上不合法的圖：真實會發生的
+          // 情況是「簽核通過那一側只接了一個通知」，通知被拿掉後那個出口就空了——對話說「流程已建好」，
+          // 使用者按套用才被伺服器擋下(套用端一定會 lint)，而且那個錯誤他自己完全無從處理。
+          // 這裡把問題當燃料餵回模型重畫，不是硬修——少一條線該怎麼接只有模型知道。
+          const postTrimLintErrors = autoRemovedNotes.length > 0 ? lintGraph(nodes, edges) : [];
+          if (postTrimLintErrors.length > 0) {
+            lastProblems = [
+              `把使用者沒有要求的步驟拿掉之後，這張圖的結構就不成立了：${postTrimLintErrors.join("；")}。` +
+              `請重新輸出一張「一開始就不含那些步驟」的完整流程圖，並把分支出口接到正確的下一步。`,
+            ];
+          } else {
           const unmet = reqItems.filter((i) => !i.met && !i.needsUser);
           if (unmet.length > 0) {
             // 「還缺需求」絕不是可交付的 ready。以前修正輪數用完後會掉進下面的
@@ -1950,6 +2033,7 @@ export async function buildWorkflow(
               };
             }
           }
+          }
         } else {
           lastProblems = lintErrors;
         }
@@ -1975,7 +2059,9 @@ export async function buildWorkflow(
           "使用者的需求已經具體，但你只回了沒有指出任何缺口的罐頭反問。不要把資料格式、欄位位置或技術設定丟回給使用者；請用合理預設直接產出 phase:ready 的可安全試跑流程。若需要假設，寫在 message 讓使用者核對，不要回 phase:clarify。",
         ];
       } else {
-        return { phase: "clarify", message: plainLanguage(clarifyMessage, {}, userWordsToPreserve(requirementText)) };
+        // 反問也要附上「有哪些程式碼沒被看到」——模型可能正是因為沒看到那一段才反問，
+        // 使用者至少要知道這一點，才不會以為是自己講得不夠清楚(見 contextBudget.ts)。
+        return { phase: "clarify", message: plainLanguage(clarifyMessage, {}, userWordsToPreserve(requirementText)) + hiddenCodeWarning(compacted.hiddenCode) };
       }
     }
 

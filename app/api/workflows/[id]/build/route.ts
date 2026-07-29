@@ -25,7 +25,7 @@ import { CLAUDE_CODE_MODEL, isClaudeCodeAvailable, isClaudeCodeModel } from "@/l
 import { DEFAULT_MODEL } from "@/lib/models";
 import { getNodeDef } from "@/lib/workflow/registry";
 import { userWordsToPreserve, plainLanguage, shortFieldLabel, humanizeTemplates } from "@/lib/workflow/plainLanguage";
-import { findCoverageGaps, coverageWarning } from "@/lib/workflow/editCoverage";
+import { appliedTextForCoverage, findCoverageGaps, coverageWarning } from "@/lib/workflow/editCoverage";
 import { extractAppsScriptExecUrl, putSheetUrlIntoAllWriteNodes } from "@/lib/sheetWriteUrlMigration";
 import { probeSheetScript } from "@/lib/workflow/nodes/googleSheet";
 import { sheetWriteNodesNeedingSetup } from "@/lib/googleSheetScriptTemplate";
@@ -828,9 +828,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       // 「做對／停下來問／宣告成功但只做一半」三種結果之間跳，第三種最傷——使用者以為做完了，
       // 要等下次執行拿到錯的產出才發現。比對的是**真正寫進磁碟的內容**，不是模型的說明文字
       // (拿說明來比對＝讓它自己批改自己，它說有做就算有做，這層防護等於不存在)。
+      // 比對範圍(只算這次真的被動到的節點、連型別與名稱一起算)的理由見 appliedTextForCoverage。
       const appliedText = rolledBackAfterFailedTest
         ? ""
-        : JSON.stringify((getWorkflow(id)?.nodes ?? []).map((node) => node.config));
+        : appliedTextForCoverage(
+          getWorkflow(id)?.nodes ?? [],
+          new Set(applied.map((edit) => edit.nodeId)),
+          triggerParamsChanged ? getWorkflow(id)?.triggerParams ?? [] : undefined,
+        );
       const coverageGaps = rolledBackAfterFailedTest ? [] : findCoverageGaps(rawLastUserCommandText, appliedText);
       if (coverageGaps.length > 0) {
         console.warn("[workflow-build] coverage-gap", { diagnosticId, workflowId: id, missing: coverageGaps.map((gap) => gap.literal) });

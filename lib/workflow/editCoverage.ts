@@ -50,10 +50,41 @@ export interface CoverageGap {
   literal: string;
 }
 
+/** 只取用得到的形狀，不從別處匯入型別——這是葉模組，不能反過來依賴呼叫它的人。 */
+interface NodeLike {
+  id: string;
+  type: string;
+  label?: string;
+  config: Record<string, unknown>;
+}
+
+/**
+ * 組出要拿來比對的「這次改動」文字。範圍是這一層有沒有用的關鍵，兩個條件都不能少：
+ *
+ * ①**只算這次真的被動到的節點**。拿整張圖來比的話，使用者點名的值只要早就躺在別的(沒被動到的)
+ *   節點裡就算數，於是「模型改了下游、真正決定輸出的上游原封不動」——這一層唯一想抓的情況——
+ *   永遠不會被抓到，等於白做。
+ * ②**連型別與名稱一起算**。使用者說「把 Excel 的分頁改成 Sheet2」，Excel 兩個字本來就只會出現在
+ *   節點型別/名稱、不會出現在設定值裡；只比對設定會在一次完全正確的修改之後跳一句「你提到的
+ *   Excel 完全沒有出現」——假警報會訓練使用者忽略所有警告，比不檢查更糟。
+ */
+export function appliedTextForCoverage(
+  nodes: readonly NodeLike[],
+  touchedNodeIds: ReadonlySet<string>,
+  triggerParams?: unknown,
+): string {
+  const touched = nodes.filter((node) => touchedNodeIds.has(node.id));
+  return JSON.stringify(touched.map((node) => ({ type: node.type, label: node.label, config: node.config })))
+    + (triggerParams === undefined ? "" : JSON.stringify(triggerParams));
+}
+
 /**
  * 回傳「使用者點名了、但這次改動裡完全找不到」的目標值。
- * appliedText 要是這次真正寫進磁碟的內容(改動後的 config 序列化)，不是模型的說明文字——
- * 拿模型的說明來比對等於讓它自己批改自己，它說有做就算有做，這層防護就完全失效。
+ *
+ * appliedText 有兩個硬性要求，少一個這層就形同虛設：
+ * ①要是真正寫進磁碟的內容，不是模型的說明文字——拿說明來比對＝讓它自己批改自己，它說有做就算有做。
+ * ②範圍只能是**這次真的被動到的節點**(連型別與名稱一起算)。拿整張圖來比的話，值只要早就存在於
+ *   別的節點就算數，而「改錯節點」正是這一層唯一想抓的東西(見呼叫端的說明)。
  */
 export function findCoverageGaps(requirementText: string, appliedText: string): CoverageGap[] {
   const literals = requestedLiterals(requirementText);

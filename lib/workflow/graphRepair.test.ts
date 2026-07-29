@@ -461,3 +461,60 @@ test("editSchema：真正的 edits 與真正的 structure 同時出現仍要維�
 test("editSchema：只有空殼 structure、沒有任何 edits 時仍視為無效(沒有可執行的修改)", () => {
   assert.equal(editSchema({ structure: {} }), false);
 });
+
+// 提示明講「設定早就對了、只剩名字不對就只送一筆帶 label 的 edits，不要附沒變動的 config」。
+// 但「等於沒改」的防呆只比對 config，於是模型照規則送、系統照樣退回，而且那個退回理由還會被
+// 當成問題餵回去要它重試——用對話把節點改名在結構上變成不可能成功的事(真實踩過)。
+test("只改名稱的 edits 要能成功套用，不能被「等於沒改」防呆擋掉", () => {
+  const workflow = createWorkflow(`test-label-only-${Date.now()}`);
+  try {
+    saveWorkflow({
+      ...workflow,
+      nodes: [{ id: "calc", type: "custom-code", label: "舊名稱", config: { intent: "算數字", code: "return { n: 1 };" }, position: { x: 0, y: 0 } }],
+      edges: [],
+    });
+    const result = applyNodeConfigEdits(workflow.id, [{ nodeId: "calc", label: "季度結算彙整", config: {} }]);
+    assert.deepEqual(result.skipped, []);
+    assert.equal(result.edits.length, 1);
+    assert.equal(getWorkflow(workflow.id)?.nodes[0]?.label, "季度結算彙整");
+
+    // 名稱與設定都沒有變動時仍然要擋下來(防呆本身不能失效)
+    const noop = applyNodeConfigEdits(workflow.id, [{ nodeId: "calc", label: "季度結算彙整", config: {} }]);
+    assert.equal(noop.edits.length, 0);
+    assert.match(noop.skipped[0]?.reason ?? "", /等於沒改/);
+  } finally {
+    deleteWorkflow(workflow.id);
+  }
+});
+
+// 模型很常把整包 config 原樣回抄，裡面的 code 是提示裡那句「(已有程式碼約 N 字…)」標記——
+// 那句話的意思正好是「這段我沒有動」，跟 codeReplace 一點都不衝突。把它當成衝突會讓一個完全
+// 正確的定點取代被整批退回，使用者只看到「有一部分不能安全套用，所以整次沒有改動」。
+test("codeReplace 搭配「截斷標記回聲」不算衝突；搭配真的完整程式碼才算", () => {
+  const workflow = createWorkflow(`test-codereplace-${Date.now()}`);
+  try {
+    const code = "const label = `第一季結算`;\nreturn { label };";
+    saveWorkflow({
+      ...workflow,
+      nodes: [{ id: "calc", type: "custom-code", label: "算檔名", config: { intent: "產生檔名", code }, position: { x: 0, y: 0 } }],
+      edges: [],
+    });
+    const echoed = applyNodeConfigEdits(workflow.id, [{
+      nodeId: "calc",
+      config: { code: "(已有程式碼約 48 字，要改就整段重寫，不用貼原文)" },
+      codeReplace: [{ from: "第一季結算", to: "第二季結算" }],
+    }]);
+    assert.deepEqual(echoed.skipped, [], "標記回聲的意思是「這段我沒動」，不是另一份互相矛盾的程式碼");
+    assert.match(String(getWorkflow(workflow.id)?.nodes[0]?.config.code), /第二季結算/);
+
+    const conflicting = applyNodeConfigEdits(workflow.id, [{
+      nodeId: "calc",
+      config: { code: "return { label: '完全不同的程式碼' };" },
+      codeReplace: [{ from: "第二季結算", to: "第三季結算" }],
+    }]);
+    assert.equal(conflicting.edits.length, 0);
+    assert.match(conflicting.skipped[0]?.reason ?? "", /無法判斷以哪個為準/);
+  } finally {
+    deleteWorkflow(workflow.id);
+  }
+});

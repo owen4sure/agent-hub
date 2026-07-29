@@ -114,20 +114,47 @@ export function applyCodeReplacements(currentCode: unknown, pairs: CodeReplaceme
 }
 
 /**
- * 從模型給的錨點裡找出「程式碼裡真的存在、而且只出現一次」的最長連續片段。
- * 做法刻意單純：從原字串的所有連續子字串裡，由長到短找第一個在程式碼中剛好出現一次的。
- * 錨點長度上限已由 MAX_ANCHOR_CHARS 擋在 2000 字，掃描量可控。找到的片段本身不是給模型當答案用的，
- * 而是用來定位「原文是哪一行」——真正回給模型的是那一行的完整原文。
+ * 從模型給的錨點裡找出「程式碼裡真的存在、而且只出現一次」的片段。
+ * 找到的片段本身不是給模型當答案用的，而是用來定位「原文是哪一行」——真正回給模型的是那一行的完整原文。
+ *
+ * ⚠️ 這裡的計算量必須**寫死上界**，因為它跑在 Node 的單一執行緒上，而且是同步的：
+ * 這一整個伺服器(每個人的每一條流程、執行進度、那顆停止按鈕)在它跑完之前完全不會有反應。
+ * 原本的寫法是「原字串的所有連續子字串，由長到短試」——那是 O(錨點² × 程式碼長度)：實測一段
+ * 74,700 字的程式碼配一個 2,000 字對不上的錨點要 **29.6 秒**，整台伺服器就這樣卡住半分鐘，
+ * 而且每一輪修正都會再卡一次。這個路徑本來就是「模型錨點寫錯」時走的，一點都不罕見。
+ *
+ * 改成三層都有上界的搜尋，寧可偶爾找不到最理想的片段(找不到就退回通用建議，錯誤訊息仍然可用)：
+ * ①先用錨點自己的「行」與「詞」當候選——真正能定位的幾乎都是這種完整的語法單位；
+ * ②再用固定幾種長度的滑動視窗補；③整體還有一道時間預算兜底。
  */
 function nearestUniqueAnchor(code: string, attempted: string): string | null {
-  // 3 字元就收：中文片段(「結算)」)三個字就有定位意義，而且既然錯誤訊息會把**整行原文**貼回去，
+  // 3 字元就收：中文片段(三個字)就有定位意義，而且既然錯誤訊息會把**整行原文**貼回去，
   // 片段本身短一點也不影響模型改對——真正有價值的資訊是那一行，片段只是用來定位是哪一行。
   const MIN_USEFUL = 3;
-  for (let length = attempted.length - 1; length >= MIN_USEFUL; length--) {
+  const TIME_BUDGET_MS = 200;
+  const deadline = Date.now() + TIME_BUDGET_MS;
+  const tried = new Set<string>();
+  const isUnique = (candidate: string): boolean => {
+    if (candidate.length < MIN_USEFUL || !candidate.trim()) return false;
+    if (tried.has(candidate)) return false;
+    tried.add(candidate);
+    return occurrences(code, candidate) === 1;
+  };
+  // ①錨點自己的行與詞，長的先試(語法單位最可能同時「存在」又「唯一」)
+  const units = [
+    ...attempted.split("\n"),
+    ...attempted.split(/[\s(){}[\],;]+/),
+  ].map((unit) => unit.trim()).filter((unit) => unit.length >= MIN_USEFUL);
+  for (const unit of units.sort((a, b) => b.length - a.length)) {
+    if (Date.now() > deadline) return null;
+    if (isUnique(unit)) return unit;
+  }
+  // ②固定幾種長度的滑動視窗。長度數量固定 ⇒ 掃描量跟錨點長度成正比，不會平方成長。
+  for (const length of [120, 80, 48, 32, 20, 12, 8, 5, MIN_USEFUL]) {
+    if (length > attempted.length) continue;
     for (let start = 0; start + length <= attempted.length; start++) {
-      const candidate = attempted.slice(start, start + length);
-      if (!candidate.trim()) continue;
-      if (occurrences(code, candidate) === 1) return candidate;
+      if (Date.now() > deadline) return null;
+      if (isUnique(attempted.slice(start, start + length))) return attempted.slice(start, start + length);
     }
   }
   return null;

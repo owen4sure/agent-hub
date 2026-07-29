@@ -271,7 +271,11 @@ export function applyNodeConfigEdits(
       skipped.push({ nodeId: node.id, reason: `「${node.label}」的程式碼定點取代未套用：${replaced.reason}` });
       continue;
     }
-    if (replaced?.ok && typeof e.config.code === "string") {
+    // 「同時給了 codeReplace 和完整 code」才是真的有歧義。但模型很常把整包 config 原樣回抄，
+    // 裡面的 code 是提示裡那句「(已有程式碼約 N 字…)」標記——那句話的意思正好是「這段我沒有動」，
+    // 跟 codeReplace 一點都不衝突。把它當成衝突會讓一個完全正確的定點取代被整批退回，使用者只看到
+    // 「有一部分不能安全套用，所以整次沒有改動」，而他要的改動明明是對的(真實踩過的假衝突)。
+    if (replaced?.ok && typeof e.config.code === "string" && !CODE_TRUNCATION_MARKER.test(e.config.code.trim())) {
       skipped.push({ nodeId: node.id, reason: `「${node.label}」同時給了 codeReplace 和完整 code，無法判斷以哪個為準；請只給其中一種` });
       continue;
     }
@@ -310,9 +314,19 @@ export function applyNodeConfigEdits(
     // undefined→""(非 allowEmpty 欄位)執行期都會被補回預設值,寫進去也是零效果,不能回報「已套用」
     // 騙使用者(實測踩過:AI 想清空日期格式,回報「(空)→(空)已套用」但執行行為完全沒變)。
     // allowEmpty 欄位的 undefined→"" 是真改動(未設=用預設,明確空=停用),resolved 比對自然分得出來。
+    // 模型明確給了新名稱時優先採用它，蓋過下面自動同步的猜測——這是修「節點改了用途/邏輯後名稱卻沒
+    // 跟著變」的正面解法：目的地字串替換的自動同步只認得「新舊值有共同前綴」這種窄情境，重寫整段
+    // custom-code 邏輯或改變節點用途時完全不適用，模型自己知道新用途是什麼，直接讓它說出新名稱。
+    // 空字串/純空白視為沒有給(不能把節點名稱洗空)。
+    const explicitLabel = typeof e.label === "string" && e.label.trim() ? e.label.trim().slice(0, 120) : undefined;
+    const renamesNode = explicitLabel !== undefined && explicitLabel !== node.label;
     const resolvedBefore = withSchemaDefaults({ ...node.config }, def.configSchema);
     const resolvedAfter = withSchemaDefaults(newConfig, def.configSchema);
-    if (JSON.stringify(resolvedBefore) === JSON.stringify(resolvedAfter)) {
+    // 「只改名稱」是一筆完全正常、而且提示裡明講可以這樣送的修改(設定早就對了、只剩名字誤導人)。
+    // 這個防呆只該擋「設定跟名稱都沒動」的空包，不能因為 config 沒變就把改名也一起判成等於沒改——
+    // 那會讓「用對話把節點改名」變成一件結構上不可能成功的事(真實踩過：模型照規則送、系統照樣退回，
+    // 退回理由還被當成問題餵回去要它重試，一路把修正輪數燒完)。
+    if (JSON.stringify(resolvedBefore) === JSON.stringify(resolvedAfter) && !renamesNode) {
       skipped.push({ nodeId: node.id, reason: `對「${node.label}」的修改跟目前實際生效的設定完全相同(等於沒改)——真正的問題可能在別的地方，請換個方向` });
       continue;
     }
@@ -325,11 +339,6 @@ export function applyNodeConfigEdits(
       return typeof before === "string" && typeof after === "string" && before !== after ? [{ from: before, to: after }] : [];
     });
     const synced = syncLabelForDestinationChange(node.label, node.config, destinationPairs);
-    // 模型明確給了新名稱時優先採用它，蓋過自動同步的猜測——這是修「節點改了用途/邏輯後名稱卻沒跟著
-    // 變」的正面解法：目的地字串替換的自動同步只認得「新舊值有共同前綴」這種窄情境，重寫整段
-    // custom-code 邏輯或改變節點用途時完全不適用，模型自己知道新用途是什麼，直接讓它說出新名稱。
-    // 空字串/純空白視為沒有給(不能把節點名稱洗空)。
-    const explicitLabel = typeof e.label === "string" && e.label.trim() ? e.label.trim().slice(0, 120) : undefined;
     const finalLabel = explicitLabel ?? synced.label;
     edits.push({ nodeId: node.id, nodeType: node.type, nodeLabel: finalLabel, previousLabel: node.label, before: { ...node.config }, after: newConfig });
     workingNodes = workingNodes.map((n) => (n.id === node!.id ? { ...n, label: finalLabel, config: newConfig } : n));

@@ -1281,3 +1281,159 @@ test("兩份提示一致性：既有流程修改看得到的東西不能比從�
     assert.ok(editPrompt.includes(needle), `既有流程修改的提示缺少「${needle}」——${why}`);
   }
 });
+
+// ── 自動移除之後的三件事：重驗結構、只講這一輪、問答也要說有沒有東西沒看到 ──
+
+// 自動移除是「拿掉模型多做的」，但拿掉之後圖可能就不成立了(最典型：簽核通過那一側只接了一個
+// 通知，通知被拿掉那個出口就空了)。以前只重驗需求、沒重驗結構，於是對話說「流程已建好」，
+// 使用者按套用才被伺服器擋下，而且那個錯誤他自己完全無從處理。
+test("自動移除後結構不成立時要餵回模型重畫，不能宣告流程已建好", async () => {
+  const broken = {
+    phase: "ready",
+    message: "好了",
+    nodes: [
+      { id: "trigger", type: "trigger", label: "開始", config: {} },
+      { id: "ok", type: "wait-approval", label: "等我核准", config: {} },
+      { id: "note", type: "desktop-notify", label: "完成通知", config: { message: "好了" } },
+      { id: "log", type: "template-text", label: "記一筆", config: { template: "被拒絕" } },
+    ],
+    edges: [
+      { from: "trigger", to: "ok" },
+      { from: "ok", to: "note", fromPort: "approved" },
+      { from: "ok", to: "log", fromPort: "rejected" },
+    ],
+  };
+  const responses = [JSON.stringify(broken), JSON.stringify(broken), JSON.stringify(broken), JSON.stringify(broken)];
+  const sent: string[] = [];
+  const client = {
+    chat: { completions: { create: async (body: { messages: { role: string; content: string }[] }) => {
+      for (const message of body.messages) if (message.role === "user") sent.push(String(message.content));
+      return { choices: [{ message: { content: responses.shift() ?? "" }, finish_reason: "stop" }] };
+    } } },
+  } as never;
+  const result = await buildWorkflow(
+    client,
+    "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "抓完資料後等我核准" }] }],
+    { nodes: [], edges: [] },
+  );
+  assert.equal(result.phase, "clarify", "結構不成立的圖不能當成 ready 交付");
+  assert.ok(sent.some((text) => /結構就不成立/.test(text)), "要把具體問題餵回模型，不是默默重試");
+});
+
+// 這一輪的圖沒通過就會被丟掉重畫，那一輪拿掉的東西當然不能算在使用者最後真正收到的圖上。
+test("被丟棄那一輪自動移除的東西，不能寫進最後交付的說明裡", async () => {
+  const responses = [
+    JSON.stringify({
+      phase: "ready",
+      message: "好了",
+      nodes: [
+        { id: "trigger", type: "trigger", label: "開始", config: {} },
+        { id: "n1", type: "template-text", label: "整理", config: { template: "固定文字" } },
+        { id: "n2", type: "telegram-notify", label: "傳送 Telegram 通知", config: { text: "完成" } },
+      ],
+      edges: [{ from: "trigger", to: "n1" }, { from: "n1", to: "n2" }],
+    }),
+    JSON.stringify({
+      phase: "ready",
+      message: "好了",
+      nodes: [
+        { id: "trigger", type: "trigger", label: "開始", config: {} },
+        { id: "n1", type: "template-text", label: "整理", config: { template: "固定文字" } },
+      ],
+      edges: [{ from: "trigger", to: "n1" }],
+      schedule: { cron: "0 9 * * *" },
+    }),
+  ];
+  const client = {
+    chat: { completions: { create: async () => ({ choices: [{ message: { content: responses.shift() ?? "" }, finish_reason: "stop" }] }) } },
+  } as never;
+  const result = await buildWorkflow(
+    client,
+    "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "每天早上九點自動整理一段固定文字" }] }],
+    { nodes: [], edges: [] },
+  );
+  assert.equal(result.phase, "ready");
+  assert.ok(!/Telegram/.test(result.message), `講的是一張不存在的圖：${result.message}`);
+});
+
+// 使用者問「為什麼這一步抓不到 X」時，模型手上若剛好缺了那一段程式碼，它照樣會很有把握地解釋
+// 一遍。被砍掉的東西一定要浮到回覆裡，否則使用者拿到的是一個建立在殘缺資訊上的答案。
+test("回答問題與反問時也要附上「有哪些程式碼這次沒看到」", async () => {
+  const huge = `// ${"x".repeat(210_000)}\nreturn { done: true };`;
+  const graph = {
+    nodes: [
+      { id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
+      { id: "big", type: "custom-code", label: "超大步驟", config: { intent: "做很多事", code: huge }, position: { x: 300, y: 0 } },
+      { id: "tail", type: "template-text", label: "收尾", config: { template: "完成" }, position: { x: 600, y: 0 } },
+    ],
+    edges: [{ from: "trigger", to: "big" }, { from: "big", to: "tail" }],
+  };
+  for (const reply of [{ phase: "answer", message: "這一步會做完整理" }, { phase: "clarify", message: "你是指哪一個欄位？" }]) {
+    const client = {
+      chat: { completions: { create: async () => ({ choices: [{ message: { content: JSON.stringify(reply) }, finish_reason: "stop" }] }) } },
+    } as never;
+    const result = await buildWorkflow(
+      client,
+      "test-builder-model",
+      [{ role: "user", parts: [{ kind: "text", text: "為什麼收尾那一步抓不到資料？" }] }],
+      graph,
+    );
+    assert.equal(result.phase, reply.phase);
+    assert.match(result.message, /沒有看到/, `${reply.phase} 也要講出哪幾步沒看到`);
+  }
+});
+
+// 附件是資料，不是使用者對我下的指令。一份 SOP 文件裡出現「不要隨便更改欄位」這種再普通不過的
+// 句子，就足以讓「使用者授權我直接建、不用問」被誤判成成立，之後每一個合理的反問都會被系統
+// 改寫掉，使用者永遠等不到那個問題。
+test("授權直接建圖只看使用者自己打的字，附件內文不算", () => {
+  assert.equal(authorizesImmediateBuild("不要隨便更改欄位"), false, "這是在限制我，不是授權我");
+  assert.equal(authorizesImmediateBuild("別隨便寄信給客戶"), false);
+  assert.equal(authorizesImmediateBuild("隨便你，你決定就好"), true);
+  assert.equal(authorizesImmediateBuild("不用再問了直接建"), true);
+  const history = [{
+    role: "user" as const,
+    parts: [
+      { kind: "text" as const, text: "照這份需求文件做" },
+      { kind: "file" as const, name: "sop.txt", content: "作業規範：不要隨便更改欄位，不用再確認。" },
+    ],
+  }];
+  assert.match(userRequirementText(history), /不要隨便更改欄位/, "需求驗收仍然要看得到附件內容");
+  assert.equal(authorizesImmediateBuild(effectiveRequirementText(history, false, { typedOnly: true })), false);
+});
+
+// 預設是「整條流程的程式碼原文全部給模型看」。但模型是可換的：同一條流程換到一個上下文視窗小
+// 很多的免費模型會直接被網關擋成 400，使用者看到的是「這次 AI 回覆的格式有問題」，完全看不出
+// 跟大小有關。降級只在真的被擋下來時發生，而且一定要講出「這次沒看到哪幾步」。
+test("模型說上下文塞不下時，改用精簡版重試，並告訴使用者哪幾步沒被看到", async () => {
+  const huge = `// ${"y".repeat(210_000)}\nreturn { done: true };`;
+  const graph = {
+    nodes: [
+      { id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
+      { id: "big", type: "custom-code", label: "超大步驟", config: { intent: "做很多事", code: huge }, position: { x: 300, y: 0 } },
+      { id: "tail", type: "custom-code", label: "收尾", config: { intent: "收尾", code: `// ${"z".repeat(30_000)}` }, position: { x: 600, y: 0 } },
+    ],
+    edges: [{ from: "trigger", to: "big" }, { from: "big", to: "tail" }],
+  };
+  const promptSizes: number[] = [];
+  let calls = 0;
+  const client = {
+    chat: { completions: { create: async (body: { messages: { role: string; content: string }[] }) => {
+      promptSizes.push(String(body.messages[0]?.content ?? "").length);
+      calls++;
+      if (calls === 1) throw new Error("400 This model's maximum context length is 32768 tokens");
+      return { choices: [{ message: { content: JSON.stringify({ phase: "answer", message: "收尾那步會整理資料" }) }, finish_reason: "stop" }] };
+    } } },
+  } as never;
+  const result = await buildWorkflow(
+    client,
+    "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "收尾那一步在做什麼？" }] }],
+    graph,
+  );
+  assert.equal(result.phase, "answer");
+  assert.ok(promptSizes.length >= 2 && promptSizes[1] < promptSizes[0], `重試時提示要變小：${promptSizes.join(" → ")}`);
+  assert.match(result.message, /沒有看到/, "降級了就一定要講");
+});

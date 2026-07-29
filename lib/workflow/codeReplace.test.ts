@@ -273,3 +273,25 @@ test("套用 edits：內嵌步驟送來跟現況一模一樣的修改，要當�
     deleteWorkflow(workflow.id);
   }
 });
+
+// 錨點對不上時的「最接近片段」搜尋跑在 Node 的單一執行緒上，而且是同步的：它跑多久，整台
+// 伺服器(每個人的每一條流程、執行進度、那顆停止按鈕)就有多久完全沒有反應。舊寫法是
+// O(錨點² × 程式碼長度)，實測 74,700 字程式碼配 2,000 字對不上的錨點要 29.6 秒，而且每一輪
+// 修正都會再卡一次——這條路徑本來就是「模型錨點寫錯」時走的，一點都不罕見。
+test("錨點找不到時的搜尋要有時間上界，不能把整台伺服器凍住", () => {
+  const code = Array.from({ length: 2_000 }, (_, i) => `  const value${i} = compute(${i}, "資料列${i}");`).join("\n");
+  assert.ok(code.length > 70_000, `這個測試要用真實規模的程式碼才有意義(目前 ${code.length} 字)`);
+  const attempted = `${"const 完全對不上的錨點 = ".repeat(60)}`.slice(0, 1_999);
+  const startedAt = Date.now();
+  const outcome = applyCodeReplacements(code, [{ from: attempted, to: "x" }]);
+  const elapsed = Date.now() - startedAt;
+  assert.equal(outcome.ok, false);
+  assert.ok(elapsed < 2_000, `找不到錨點時花了 ${elapsed}ms，等於整台伺服器卡住那麼久`);
+});
+
+test("錨點找不到時仍要指出程式碼裡真正的那一行(時間上界不能換掉這個能力)", () => {
+  const code = "const label = `第一季結算`;\nconst other = 1;";
+  const outcome = applyCodeReplacements(code, [{ from: "'第一季結算'", to: "'第二季結算'" }]);
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.ok === false ? outcome.reason : "", /第一季結算/);
+});

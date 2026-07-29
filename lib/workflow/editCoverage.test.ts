@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { findCoverageGaps, coverageWarning, requestedLiterals } from "./editCoverage";
+import { appliedTextForCoverage, findCoverageGaps, coverageWarning, requestedLiterals } from "./editCoverage";
 import { plainChatMessage, plainLanguage, userWordsToPreserve } from "./plainLanguage";
 
 /**
@@ -77,4 +77,30 @@ test("顯示層白話化：使用者自己講過的字，第二次白話化也�
   const shown = plainChatMessage(serverMessage, userWordsToPreserve(userSaid));
   assert.match(shown, /BrandAlpha,BrandBeta/, `使用者自己講的名字不能被翻譯：${shown}`);
   assert.ok(shown.includes("前面步驟提供的「quarterLabel」"), "使用者沒講過的內部欄位仍要白話化");
+});
+
+// ── 比對範圍 ──
+// 這一層唯一想抓的是「模型改錯節點」。拿整張圖來比就永遠抓不到：使用者點名的值早就存在於
+// 那個沒被動到的正確節點裡，看起來就像已經做到了。
+test("完成度核對：值只存在於沒被動到的節點時，要算成沒做到(這正是改錯節點的樣子)", () => {
+  const nodes = [
+    { id: "upstream", type: "custom-code", label: "算出代碼清單", config: { code: "const codes = ['agg19'];" } },
+    { id: "downstream", type: "custom-code", label: "彙整", config: { code: "return { total: sum(codes) };" } },
+  ];
+  const applied = appliedTextForCoverage(nodes, new Set(["downstream"]));
+  assert.deepEqual(findCoverageGaps("要抓的代碼改成 agg19", applied).map((gap) => gap.literal), ["agg19"]);
+  // 真的改到上游那個節點時就不該再警告
+  assert.deepEqual(findCoverageGaps("要抓的代碼改成 agg19", appliedTextForCoverage(nodes, new Set(["upstream"]))), []);
+});
+
+// 假警報會訓練使用者忽略所有警告，比不檢查更糟：使用者點名的詞常常是節點的型別或名稱
+// (「把 Excel 的分頁改成 Sheet2」)，那種字本來就不會出現在設定值裡。
+test("完成度核對：節點型別與名稱也算數，一次完全正確的修改不能跳警告", () => {
+  const nodes = [{ id: "x", type: "excel-process", label: "讀 Excel", config: { sheetName: "Sheet2" } }];
+  assert.deepEqual(findCoverageGaps("把 Excel 的分頁改成 Sheet2", appliedTextForCoverage(nodes, new Set(["x"]))), []);
+});
+
+test("完成度核對：只改了執行時欄位(沒動節點)時，那些欄位也要算進比對範圍", () => {
+  const applied = appliedTextForCoverage([], new Set<string>(), [{ key: "reportCode", label: "代碼", default: "agg19" }]);
+  assert.deepEqual(findCoverageGaps("預設代碼改成 agg19", applied), []);
 });

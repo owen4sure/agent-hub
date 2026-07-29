@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkRequirements, unmetFeedback, checklistText, isManualFileUploadRequested, isScheduledExecutionRequested } from "./requirementCheck";
+import { checkRequirements, unmetFeedback, checklistText, isFolderWatchRequested, isManualFileUploadRequested, isScheduledExecutionRequested } from "./requirementCheck";
 import { MAX_REPEAT_STEPS_NESTING } from "./repeatNesting";
 import type { SubflowLookup } from "./subflowEffects";
 import type { WorkflowNode, WorkflowEdge } from "./types";
@@ -844,4 +844,67 @@ test("需求驗收(安全):沒有只讀類需求時，失敗備援不受這條�
     resolveSubflow: subflowResolverFor({ "fb-sheet": [N("t", "trigger"), N("writeSheet", "google-sheet-append")] }),
   }).find((i) => i.key === "noUnrequestedWrite");
   assert.equal(item, undefined, "沒有「只讀/不要修改」的需求就不該憑空多出寫入限制");
+});
+
+// ── 「未獲授權的外送」要點名是誰 ──
+// 這份名單是自動移除那一層唯一的依據(見 autoTrim.ts)。真實踩過的回歸：那一層本來只拿到
+// 「這一項沒過」這個布林值，就自己按型別把整張圖的寄信/通知全砍——使用者明明說了「寄 email 給我」，
+// 模型只是多加一個桌面通知，結果連他要的那封信一起被刪，還被告知「你這次沒有要求寄信」。
+test("需求驗收:未獲授權的外送要精確點名節點 id，使用者自己要求的那個不能被列進去", () => {
+  const item = checkRequirements(
+    "每天抓報表寄 email 給我",
+    g([N("t", "trigger"), N("mail", "send-email"), N("notify", "desktop-notify")]),
+  ).find((i) => i.key === "noUnrequestedOutbound");
+  assert.ok(item && !item.met);
+  assert.deepEqual(item!.nodeIds, ["notify"], "只有沒被要求的那個桌面通知該被點名");
+});
+
+test("需求驗收:使用者明說不要通知時，接在錯誤分支上的桌面提醒也要被點名(豁免只有一份)", () => {
+  const nodes = [N("t", "trigger"), N("work", "excel-process"), N("alert", "desktop-notify")];
+  const errorBranch: WorkflowEdge[] = [{ from: "work", to: "alert", fromPort: "error" }];
+  const exempt = checkRequirements("跑完把結果存成 Excel", g(nodes, errorBranch)).find((i) => i.key === "noUnrequestedOutbound");
+  assert.equal(exempt, undefined, "沒有禁止通知時，錯誤分支上的桌面提醒是零設定備案，不該被列為問題");
+  const forbidden = checkRequirements("跑完把結果存成 Excel，不要通知我", g(nodes, errorBranch)).find((i) => i.key === "noUnrequestedOutbound");
+  assert.ok(forbidden && !forbidden.met, "使用者明說不要通知時就不再豁免");
+  assert.deepEqual(forbidden!.nodeIds, ["alert"]);
+});
+
+test("需求驗收:有掃不到的區域時一個節點都不點名——不確定就不准自動刪", () => {
+  const item = checkRequirements(
+    "把資料整理好",
+    g([N("t", "trigger"), { ...N("loop", "repeat-steps"), config: { steps: "這不是 JSON" } }]),
+  ).find((i) => i.key === "noUnrequestedOutbound");
+  assert.ok(item && !item.met, "看不到的區域一律 fail closed");
+  assert.deepEqual(item!.nodeIds, undefined, "不知道是誰的時候不能給名單");
+});
+
+test("需求驗收:迴圈內嵌步驟的外送不進名單(它沒有頂層 id，只能交給模型改)", () => {
+  const steps = JSON.stringify([{ type: "send-email", label: "寄出", config: {} }]);
+  const item = checkRequirements(
+    "把資料整理好",
+    g([N("t", "trigger"), { ...N("loop", "repeat-steps"), config: { steps } }]),
+  ).find((i) => i.key === "noUnrequestedOutbound");
+  assert.ok(item && !item.met);
+  assert.deepEqual(item!.nodeIds, undefined);
+  assert.match(item!.hint, /步驟/);
+});
+
+// ── 監聽資料夾 vs 執行時選檔：兩種觸發方式互斥 ──
+// 真實踩過的死迴圈：同一句話同時觸發兩項驗收，一項要 trigger 填 watchPath、另一項要它不准有
+// watchPath，模型填一次被清一次，修正輪數燒完為止，使用者只會看到「自動修正了幾輪但沒通過」。
+test("需求驗收:明確要求監聽資料夾時不會同時要求「執行時選檔」", () => {
+  const text = "我會把每個月的報表上傳到這個資料夾，請監聽它，有新的 excel 就處理";
+  assert.equal(isManualFileUploadRequested(text), false);
+  const items = checkRequirements(text, g([N("t", "trigger"), N("x", "excel-process")]));
+  assert.ok(items.some((i) => i.key === "watch"));
+  assert.equal(items.find((i) => i.key === "manualFileUpload"), undefined, "兩者同時成立就永遠不可能都達成");
+});
+
+test("需求驗收:「不要監聽資料夾，我自己選檔」不能被當成要求監聽", () => {
+  const text = "不要監聽資料夾，我每次執行時自己選一份 Excel 檔";
+  assert.equal(isFolderWatchRequested(text), false);
+  assert.equal(isManualFileUploadRequested(text), true, "否定監聽之後，手動選檔才是他真正要的觸發方式");
+  assert.equal(checkRequirements(text, g([N("t", "trigger")])).find((i) => i.key === "watch"), undefined);
+  // 「特別」的「別」不是否定詞(這個 repo 踩過的老坑)
+  assert.equal(isFolderWatchRequested("請特別監聽這個資料夾"), true);
 });
