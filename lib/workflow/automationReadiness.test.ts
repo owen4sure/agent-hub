@@ -46,3 +46,17 @@ test("啟用護照同版同結果去重，阻擋原因改變才留下新快照",
     deleteWorkflow(created.id);
   }
 });
+
+// 真實踩過(另一台電腦把流程匯入後)：排程時間到了卻沒跑，畫面上什麼都看不到。
+// 原因是「匯入的流程要先確認」這道閘門只寫在 engine.startWorkflowRun 裡、沒有同步到這份檢查——
+// 排程每分鐘照樣觸發、每分鐘被 throw 擋掉，而 throw 發生在建立執行紀錄之前(所以沒有任何紀錄)，
+// 也跳過了 next_run_at 的更新(所以下一分鐘又被當成「錯過了要補跑」)，變成無限靜默重試。
+test("匯入但還沒確認的流程要算「不能自動觸發」，不能讓排程每分鐘去撞 engine 的閘門", () => {
+  const result = buildAutomationReadiness(wf({ importedUntrusted: true }));
+  assert.equal(result.ready, false);
+  const item = result.items.find((entry) => entry.code === "imported-untrusted");
+  assert.ok(item, "要明確列出這一項，使用者才知道排程為什麼沒跑");
+  assert.match(item!.action, /確認/);
+  // 確認過後就不該再擋(旗標會在確認時被清掉)
+  assert.deepEqual(buildAutomationReadiness(wf({ importedUntrusted: false })), { ready: true, items: [] });
+});

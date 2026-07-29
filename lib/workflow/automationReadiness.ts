@@ -12,6 +12,7 @@ import { getHealthCheckGate } from "@/lib/workflow/healthCheck";
 
 export type AutomationReadinessCode =
   | "draft"
+  | "imported-untrusted"
   | "invalid-graph"
   | "missing-settings"
   | "acceptance-outdated"
@@ -70,6 +71,20 @@ export function buildAutomationReadiness(workflow: Workflow, input: AutomationRe
   const items: AutomationReadinessItem[] = [];
   if (workflow.status !== "official") {
     items.push({ code: "draft", title: "流程還是草稿", detail: "草稿可以編輯與測試，但不會在背景自動執行。", action: "先完成測試，再按「設為正式」。", actionCode: "open-workflow" });
+  }
+  // 匯入的流程在使用者親自確認前，engine.startWorkflowRun 一律直接 throw。這道閘門本來只寫在
+  // engine 裡、沒有同步到這份「自動觸發前的現況檢查」——同一個判斷分兩處、其中一處不知道，
+  // 後果是排程每分鐘照樣觸發、每分鐘在 engine 被 throw 擋掉：**不會產生任何執行紀錄**(throw 發生在
+  // 建立 run 之前)、next_run_at 也永遠不會前進(throw 跳過了更新那一行)，所以畫面上完全看不出
+  // 「這條排程正在無限重試」，使用者只知道「時間到了卻沒跑」。真實踩過(另一台電腦匯入流程後)。
+  if (workflow.importedUntrusted) {
+    items.push({
+      code: "imported-untrusted",
+      title: "匯入的流程還沒有你的第一次確認",
+      detail: "從外部檔案匯入的流程可能讀取本機檔案、開啟網站或把資料送到外部，所以在你親自跑過一次並確認之前，任何自動觸發(排程／資料夾監聽／收信／Webhook)都不會執行。",
+      action: "打開流程頁按「執行」跑一次，看到匯入確認提示後按確認；確認完排程會在下一分鐘自動補跑這次錯過的時間。",
+      actionCode: "open-workflow",
+    });
   }
   if ((input.lintErrors?.length ?? 0) > 0) {
     items.push({ code: "invalid-graph", title: "流程圖還有結構問題", detail: input.lintErrors!.slice(0, 3).join("；"), action: "回到畫布修正紅色問題，再重新檢查。", actionCode: "open-workflow" });
