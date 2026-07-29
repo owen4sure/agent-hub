@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import { describeOutgoingMail, resolveAttachmentPaths, splitRecipients, webmailSendNode } from "./webmailSend";
 import { nodeTypesWithSideEffect, dryRunSkipTypes } from "../sideEffects";
 import { getNodeDef } from "../registry";
@@ -61,4 +62,15 @@ test("設定欄位要用白話，而且看得出 {{欄位}} 可以用", () => {
     const field = webmailSendNode.configSchema.find((f) => f.key === key)!;
     assert.match(field.label, /進階/, `${key} 要標成進階`);
   }
+});
+
+// 真實踩過、而且是最難發現的那一種：三行 log 都寫著「已填」，畫面上卻是收件人欄裡塞著
+// 一整段內文、內文區空白。原因是這套信箱的收件人欄本身就是 textarea(要能填多個地址)，
+// 而內文填寫在找不到富文字編輯器時會退回找 textarea，就抓到它了。
+test("內文絕不能寫進已經填過的欄位——收件人本身也是 textarea", () => {
+  // execute 內部呼叫 fillBody，函式本體不在 execute 的字串裡；直接讀原始碼確認這條防線還在
+  const source = readFileSync(new URL("./webmailSend.ts", import.meta.url), "utf-8");
+  assert.match(source, /textarea:not\(\[data-agenthub-field\]\)/,
+    "退回 textarea 時必須排除已經用過的欄位，否則會把內文覆蓋到收件人上");
+  assert.match(source, /waitComposeClosed/, "「表單有沒有收起來」是判斷信箱收下了沒的唯一可靠訊號");
 });

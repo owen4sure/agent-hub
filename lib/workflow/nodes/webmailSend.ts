@@ -95,8 +95,14 @@ export function describeOutgoingMail(input: {
   return lines.join("\n");
 }
 
-/** 找「這個標籤字旁邊的輸入框」。回傳 null 代表找不到，由呼叫端負責講清楚失敗原因。 */
-async function inputNearLabel(page: Page, labels: string[]): Promise<string | null> {
+/**
+ * 找「這個標籤字旁邊的輸入框」。回傳 null 代表找不到，由呼叫端負責講清楚失敗原因。
+ *
+ * 吃 Page 或 Frame：真實踩過——MAIL2000 的寫信表單是載進 `ifrmCompose` 這個 iframe 的，
+ * 點「寫信」之後主頁面完全沒變(它呼叫的是 S_GoCompose() 這種 JS，不是換頁)。
+ * 只找主頁面的話，畫面上明明有「收件人」三個字，程式卻永遠找不到那個欄位。
+ */
+async function inputNearLabel(page: Page | Frame, labels: string[]): Promise<string | null> {
   for (const label of labels) {
     const handle = await page.evaluateHandle((text: string) => {
       const nodes = [...document.querySelectorAll("td, th, label, span, div, a")]
@@ -136,7 +142,7 @@ function hashString(text: string): number {
 }
 
 /** 這一頁上實際看得到哪些輸入框/按鈕——找不到欄位時附上去，讓人(和 AI 修復)有東西可以判斷。 */
-async function describePage(page: Page): Promise<string> {
+async function describePage(page: Page | Frame): Promise<string> {
   return page.evaluate(() => {
     const inputs = [...document.querySelectorAll("input, textarea, select")].slice(0, 25).map((el) => {
       const e = el as HTMLInputElement;
@@ -157,25 +163,89 @@ async function saveDebug(ctx: NodeContext, step: string) {
   await fs.promises.writeFile(path.join(/* turbopackIgnore: true */ dir, `${step}.html`), await page.content()).catch(() => {});
 }
 
-/** 內文編輯區可能是 iframe、可能是 contenteditable、也可能是 textarea——三種都試。 */
-async function fillBody(page: Page, config: MailPreset, body: string, asHtml: boolean): Promise<boolean> {
-  const targets: (Page | Frame)[] = [page, ...page.frames().filter((frame) => frame !== page.mainFrame())];
+/**
+ * 等「寫信」入口出現，並回傳可以點的那個元素。
+ *
+ * 真實踩過的兩件事，都不是「選擇器寫錯」：
+ * ①**網頁信箱是慢慢長出來的**：登入後外層網頁馬上就回來了，但左邊的功能列是靠好幾個 iframe
+ *   陸續載入的。第一次跑因為要辨識驗證碼比較慢，剛好等到；第二次沿用登入狀態、快了幾秒，
+ *   去找按鈕的時候整個介面還停在 loading，於是「畫面上明明有寫信兩個字」卻找不到。
+ *   所以這裡是**等到出現為止**，不是看一眼就下結論。
+ * ②那顆按鈕不一定在主頁面，也不一定是連結——MAIL2000 的是一個帶 onclick="S_GoCompose()" 的 div。
+ *   所以文字、id、onclick 三種找法都試，而且每一層框架都找。
+ */
+async function findComposeEntry(page: Page, config: MailPreset, timeoutMs = 25_000) {
+  const pattern = new RegExp(`^(${config.composeEntry.join("|")})$`);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const target of [page, ...page.frames()]) {
+      const byText = target.getByText(pattern).first();
+      if (await byText.count().catch(() => 0) > 0) return byText;
+      const byAttr = target.locator("#composeInside, [onclick*='Compose'], [onclick*='compose']").first();
+      if (await byAttr.count().catch(() => 0) > 0) return byAttr;
+    }
+    await page.waitForTimeout(500);
+  }
+  return null;
+}
+
+/**
+ * 寫信表單到底在哪一層。
+ *
+ * 網頁信箱幾乎都是「一個外殼 + 好幾個 iframe」的結構，點「寫信」只是把某個 iframe 換成寫信表單，
+ * 外層網址跟 DOM 完全不動。所以不能假設欄位在主頁面上——要在主頁面與所有框架裡找「收件人」這個
+ * 標籤，找到的那一層才是要操作的對象。這裡也順便當成「寫信頁到底開好了沒」的等待條件，
+ * 比固定 sleep 幾秒可靠得多。
+ */
+async function findComposeContext(page: Page, config: MailPreset, timeoutMs = 20_000): Promise<Page | Frame | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const target of [page, ...page.frames()]) {
+      const found = await inputNearLabel(target, config.toLabel).catch(() => null);
+      if (found) return target;
+    }
+    await page.waitForTimeout(500);
+  }
+  return null;
+}
+
+/**
+ * 把內文填進真正的內文區。
+ *
+ * 真實踩過、而且是「看起來成功、實際填錯地方」的那種：MAIL2000 的**收件人欄位本身就是一個
+ * textarea**(要能填多個地址)。舊寫法在找不到富文字編輯器時會退而求其次找 textarea，結果抓到
+ * 收件人欄，把整封內文覆蓋上去——log 三行都顯示「已填」，畫面上卻是收件人欄裡塞著一整段內文、
+ * 內文區空白。所以：
+ *   ①**富文字編輯器一律優先**，而且要掃過每一層框架才放棄(它常常是 iframe 裡再一層 iframe)；
+ *   ②真的要退回 textarea 時，**排除掉已經填過的欄位**(inputNearLabel 會在用過的元素上做記號)。
+ */
+async function fillBody(page: Page, compose: Page | Frame, config: MailPreset, body: string, asHtml: boolean): Promise<boolean> {
+  const targets: (Page | Frame)[] = [compose, ...page.frames()];
+  const write = async (locator: ReturnType<Page["locator"]>, plain: boolean) => {
+    if (plain) { await locator.fill(body); return; }
+    await locator.evaluate((el: Element, payload: { text: string; html: boolean }) => {
+      (el as HTMLElement).innerHTML = payload.html
+        ? payload.text
+        : payload.text.split("\n").map((line) => line.replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch] as string))).join("<br>");
+    }, { text: body, html: asHtml });
+  };
+  // 第一輪：所有框架的富文字編輯器
   for (const target of targets) {
-    for (const selector of config.bodyEditable) {
+    for (const selector of config.bodyEditable.filter((sel) => sel !== "textarea")) {
       const locator = target.locator(selector).first();
-      if (await locator.count() === 0) continue;
+      if (await locator.count().catch(() => 0) === 0) continue;
       if (!(await locator.isVisible().catch(() => false))) continue;
-      if (selector === "textarea") {
-        await locator.fill(body);
-        return true;
-      }
-      await locator.evaluate((el: Element, payload: { text: string; html: boolean }) => {
-        (el as HTMLElement).innerHTML = payload.html
-          ? payload.text
-          : payload.text.split("\n").map((line) => line.replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch] as string))).join("<br>");
-      }, { text: body, html: asHtml });
+      await write(locator, false);
       return true;
     }
+  }
+  // 第二輪：純文字模式的 textarea，但絕不能碰已經填過的欄位(收件人/主旨也是 textarea/input)
+  for (const target of targets) {
+    const locator = target.locator("textarea:not([data-agenthub-field])").first();
+    if (await locator.count().catch(() => 0) === 0) continue;
+    if (!(await locator.isVisible().catch(() => false))) continue;
+    await write(locator, true);
+    return true;
   }
   return false;
 }
@@ -246,60 +316,70 @@ export const webmailSendNode: NodeDefinition = {
     if (composeUrl) {
       await page.goto(composeUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
     } else {
-      const entry = page.getByText(new RegExp(`^(${config.composeEntry.join("|")})$`)).first();
-      if (await entry.count() === 0) {
+      // 「寫信」在 MAIL2000 是一個 onclick="S_GoCompose()" 的 div，不是連結——所以要點的是那個
+      // 元素本身，而且點完外層網址不會變(表單載進 iframe)。用「找得到收件人欄位」當完成條件。
+      const entry = await findComposeEntry(page, config);
+      if (!entry) {
         await saveDebug(ctx, "no-compose-entry");
         throw new PermanentError(
-          `在目前這一頁找不到「${config.composeEntry[0]}」入口。這一步要在**已經登入**的網頁信箱裡操作——`
+          `等了 25 秒還是找不到「${config.composeEntry[0]}」入口。這一步要在**已經登入**的網頁信箱裡操作——`
           + "如果還沒登入，請先在這條流程用「⋯ → 🔐 手動登入一次」登入一次；如果已經登入但畫面不一樣，"
           + `可以在這一步的「進階：寫信頁網址」直接填寫信頁的網址。\n${await describePage(page)}`,
         );
       }
       await entry.click();
-      await page.waitForLoadState("domcontentloaded").catch(() => {});
     }
-    await page.waitForTimeout(800);
+
+    const compose = await findComposeContext(page, config);
+    if (!compose) {
+      await saveDebug(ctx, "no-compose-form");
+      throw new PermanentError(
+        `按了「${config.composeEntry[0]}」，但等不到寫信表單出現(找不到「${config.toLabel[0]}」欄位)。`
+        + "可能是這套信箱把寫信開在新視窗、或畫面配置不一樣——可以在這一步的「進階：寫信頁網址」直接填寫信頁網址。"
+        + `\n${await describePage(page)}`,
+      );
+    }
+    ctx.log("已進到寫信畫面");
 
     const fill = async (labels: string[], value: string, what: string, required: boolean) => {
       if (!value) return;
-      const selector = await inputNearLabel(page, labels);
+      const selector = await inputNearLabel(compose, labels);
       if (!selector) {
         if (!required) { ctx.log(`⚠️ 找不到「${labels[0]}」欄位，這次略過${what}`); return; }
         await saveDebug(ctx, `no-field-${what}`);
         throw new PermanentError(
-          `找不到「${labels[0]}」欄位。這一步是在網頁信箱的寫信畫面操作的，可能是還沒進到寫信頁、或這套信箱的畫面不一樣。`
-          + `\n${await describePage(page)}`,
+          `寫信畫面上找不到「${labels[0]}」欄位，所以沒有寄出。\n${await describePage(compose)}`,
         );
       }
-      await page.fill(selector, value);
+      await compose.fill(selector, value);
       ctx.log(`已填${what}：${value.slice(0, 120)}`);
     };
 
     await fill(config.toLabel, to.join(", "), "收件人", true);
     if (cc.length > 0) await fill(config.ccLabel, cc.join(", "), "副本", false);
     if (bcc.length > 0) {
-      const toggle = page.getByText(new RegExp(`^(${config.bccToggle.join("|")})$`)).first();
+      const toggle = compose.getByText(new RegExp(`^(${config.bccToggle.join("|")})$`)).first();
       if (await toggle.count() > 0) { await toggle.click(); await page.waitForTimeout(300); }
       await fill(config.bccToggle, bcc.join(", "), "密件副本", false);
     }
     await fill(config.subjectLabel, subject, "主旨", true);
 
-    if (!(await fillBody(page, config, body, asHtml))) {
+    if (!(await fillBody(page, compose, config, body, asHtml))) {
       await saveDebug(ctx, "no-body");
-      throw new PermanentError(`找不到信件內容的編輯區，內文沒有填進去，所以沒有寄出。\n${await describePage(page)}`);
+      throw new PermanentError(`找不到信件內容的編輯區，內文沒有填進去，所以沒有寄出。\n${await describePage(compose)}`);
     }
     ctx.log(`已填內容（${asHtml ? "HTML" : "純文字"}，${body.length} 字）`);
 
     for (const file of attachments) {
-      const fileInput = page.locator("input[type='file']").first();
-      if (await fileInput.count() === 0) {
-        const attachEntry = page.getByText(new RegExp(`^(${config.attachEntry.join("|")})`)).first();
+      let input = compose.locator("input[type='file']").first();
+      if (await input.count() === 0) {
+        const attachEntry = compose.getByText(new RegExp(`^(${config.attachEntry.join("|")})`)).first();
         if (await attachEntry.count() > 0) { await attachEntry.click(); await page.waitForTimeout(500); }
+        input = compose.locator("input[type='file']").first();
       }
-      const input = page.locator("input[type='file']").first();
       if (await input.count() === 0) {
         await saveDebug(ctx, "no-attach-input");
-        throw new PermanentError(`找不到附加檔案的地方，所以沒有寄出（避免寄出一封少了附件的信）。\n${await describePage(page)}`);
+        throw new PermanentError(`找不到附加檔案的地方，所以沒有寄出（避免寄出一封少了附件的信）。\n${await describePage(compose)}`);
       }
       await input.setInputFiles(file);
       ctx.log(`已附加：${path.basename(file)}`);
@@ -307,56 +387,90 @@ export const webmailSendNode: NodeDefinition = {
     }
 
     if (signature) {
-      const select = page.locator("select").filter({ hasText: new RegExp(config.signatureSelectText.join("|")) }).first();
+      const select = compose.locator("select").filter({ hasText: new RegExp(config.signatureSelectText.join("|")) }).first();
       if (await select.count() > 0) {
-        await select.selectOption({ label: signature }).catch(async () => {
+        await select.selectOption({ label: signature }).catch(() => {
           ctx.log(`⚠️ 簽名檔選單裡沒有「${signature}」，這次沒有附加簽名檔`);
         });
       } else {
-        ctx.log(`⚠️ 這個畫面找不到簽名檔選單，這次沒有附加簽名檔`);
+        ctx.log("⚠️ 這個畫面找不到簽名檔選單，這次沒有附加簽名檔");
       }
     }
 
-    const send = page.getByText(new RegExp(`^(${config.sendButton.join("|")})$`)).first();
-    const sendFallback = page.locator(`input[type='submit'][value='${config.sendButton[0]}'], button:has-text('${config.sendButton[0]}')`).first();
+    const send = compose.getByText(new RegExp(`^(${config.sendButton.join("|")})$`)).first();
+    const sendFallback = compose.locator(`input[type='submit'][value='${config.sendButton[0]}'], button:has-text('${config.sendButton[0]}')`).first();
     const sendTarget = await send.count() > 0 ? send : sendFallback;
     if (await sendTarget.count() === 0) {
       await saveDebug(ctx, "no-send-button");
-      throw new PermanentError(`找不到「${config.sendButton[0]}」按鈕，信沒有寄出（內容都填好了，只差送出這一下）。\n${await describePage(page)}`);
+      throw new PermanentError(`找不到「${config.sendButton[0]}」按鈕，信沒有寄出（內容都填好了，只差送出這一下）。\n${await describePage(compose)}`);
     }
     await sendTarget.click();
-    await page.waitForLoadState("domcontentloaded").catch(() => {});
-    await page.waitForTimeout(1500);
     ctx.log(`已按下「${config.sendButton[0]}」`);
+    // 「按了送出」不等於「信箱收下了」。真正的訊號是寫信表單自己收掉——欄位沒填、收件人格式
+    // 被擋下來時，表單會原地不動並跳提示。固定 sleep 幾秒兩種情況看起來一模一樣(真實踩過)。
+    const composeClosed = await waitComposeClosed(page, compose, config);
+    if (!composeClosed) {
+      await saveDebug(ctx, "compose-still-open");
+      throw new PermanentError(
+        `按了「${config.sendButton[0]}」之後，寫信畫面沒有收起來，代表信箱沒有收下這封信(信沒有寄出)。`
+        + "常見原因：收件人格式被擋(少了 @、多了奇怪字元)、或這套信箱有必填欄位還沒填。"
+        + "可以打開失敗現場的截圖看信箱跳了什麼提示。",
+      );
+    }
+    ctx.log("寫信畫面已收起，信箱已收下這封信");
 
+    // 「有沒有在寄件備份匣看到」是**加分確認**，不是成功判準。
+    //
+    // 這個分寸是實測撞出來的，而且撞出來的是一個會害人的設計：信其實已經寄出去了(信箱的寄件
+    // 備份匣計數確實 +1)，只因為程式沒能切到那個資料夾就把整步判失敗——使用者看到紅色會做什麼？
+    // **重跑**。於是對方收到兩封。誤判失敗在這裡比誤判成功更危險。
+    //
+    // 所以判準分兩層：①寫信表單有沒有收起來(信箱收下了沒)＝成功與否，這個訊號可靠又通用；
+    // ②寄件備份匣裡找不找得到＝額外確認，找不到就老實說「沒能確認」，但不推翻已經送出的事實。
     let verified = false;
     if (cfgBool(ctx, "verifySent", true)) {
       verified = await verifyInSentFolder(page, config, subject);
-      if (!verified) {
-        await saveDebug(ctx, "not-in-sent");
-        throw new PermanentError(
-          `按了「${config.sendButton[0]}」，但在「${config.sentFolder[0]}」裡找不到主旨為「${subject}」的信，`
-          + "所以不敢說已經寄出去。請自己到信箱確認一次：如果其實有寄出，可以把這一步的「寄出後到寄件備份匣確認」關掉；"
-          + "如果沒寄出，多半是收件人格式被信箱擋下來(例如少了 @)，或有必填欄位沒填。",
-        );
-      }
-      ctx.log(`✓ 已在「${config.sentFolder[0]}」確認寄出`);
+      ctx.log(verified
+        ? `✓ 已在「${config.sentFolder[0]}」確認寄出`
+        : `⚠️ 信已經送出(寫信畫面已收起)，但這次沒能切到「${config.sentFolder[0]}」再確認一次。`
+          + "如果你想百分之百確定，自己到信箱看一眼；這一步不會因此重跑，避免對方收到兩封。");
     }
 
     return { output: { sentSubject: subject, sentTo: to.join(", "), sentVerified: verified } };
   },
 };
 
+/**
+ * 等寫信表單真的收掉。這是「信箱收下了」唯一可靠的訊號——被擋下來時表單會原地不動。
+ */
+async function waitComposeClosed(page: Page, compose: Page | Frame, config: MailPreset, timeoutMs = 20_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const still = await inputNearLabel(compose, config.toLabel).catch(() => null);
+    if (!still) return true;
+    // 欄位還在，但可能是已經清空準備寫下一封——值空了也算收下了
+    const value = await compose.inputValue(still).catch(() => null);
+    if (value !== null && value.trim() === "") return true;
+    await page.waitForTimeout(500);
+  }
+  return false;
+}
+
 /** 到寄件備份匣找那封主旨的信。按下送出鍵不等於寄出去了——這一步是「誠實收斂」的最後一道。 */
 async function verifyInSentFolder(page: Page, config: MailPreset, subject: string): Promise<boolean> {
   for (const folder of config.sentFolder) {
-    const entry = page.getByText(new RegExp(`^${folder}`)).first();
-    if (await entry.count() === 0) continue;
-    await entry.click();
-    await page.waitForLoadState("domcontentloaded").catch(() => {});
-    await page.waitForTimeout(1200);
-    const found = await page.getByText(subject, { exact: false }).count();
-    if (found > 0) return true;
+    // 左側資料夾在主頁面，但信件列表通常在另一個框架裡——兩邊都要找(跟寫信表單同一個教訓)。
+    // 同一個名稱可能出現好幾次(左側資料夾選單、信箱資訊表格)——一個一個試，點得動哪個算哪個。
+    const candidates = page.getByText(new RegExp(`^${folder}`));
+    const total = await candidates.count().catch(() => 0);
+    if (total === 0) continue;
+    for (let i = 0; i < Math.min(total, 3); i++) {
+      await candidates.nth(i).click({ timeout: 5_000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+      for (const target of [page, ...page.frames()]) {
+        if (await target.getByText(subject, { exact: false }).count().catch(() => 0) > 0) return true;
+      }
+    }
   }
   return false;
 }
