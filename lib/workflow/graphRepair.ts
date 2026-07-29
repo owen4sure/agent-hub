@@ -17,6 +17,7 @@ import { findLatestScreenshotPath, findLatestHtml, extractFormElements, getNodeI
 import { buildSelectorProbeReport, extractSelectorsFromCode, splitSelectorList, probeSelectorsInHtml, tokenNeighborhood } from "./selectorProbe";
 import { syncLabelForDestinationChange, type ReplacePair } from "./textReplace";
 import { applyCodeReplacements, CODE_TRUNCATION_MARKER, type CodeReplacement } from "./codeReplace";
+import { parseUserFields } from "./userStepFields";
 import { applyGraphStructureEdits, hasStructureChanges, planGraphStructureEdits, type GraphStructureEdits, type StructureChange } from "./graphStructure";
 import { probeSlidesPresentationPages } from "../googleSlidesApi";
 import { resolvePresentationId } from "./nodes/googleSlidesRefresh";
@@ -281,7 +282,13 @@ export function applyNodeConfigEdits(
     }
     let newConfig: Record<string, unknown> = restoreEchoedCodeMarkers(node, { ...node.config, ...e.config, ...(replaced?.ok ? { code: replaced.code } : {}) });
     const allowedKeys = new Set(def.configSchema.map((f) => f.key));
+    // 「我的步驟」展開出來的節點會帶著使用者自訂的設定欄位，那些 key 不在型別的 schema 裡。
+    // 不放行的話，AI 只要改過這個節點一次，使用者親手設定的收件人/網址/關鍵字就會被整批清掉——
+    // 而且畫面上只會看到欄位默默消失，沒有任何錯誤訊息。
+    for (const field of parseUserFields(node.config.userFields)) allowedKeys.add(field.key);
     if (allowedKeys.size > 0) {
+      allowedKeys.add("userFields");
+      allowedKeys.add("userStepId");
       newConfig = Object.fromEntries(Object.entries(newConfig).filter(([k]) => allowedKeys.has(k)));
     }
     // 型別驗證(與建圖 lint 共用同一份規則)：非法值(number 欄填文字、select 填清單外的值)整個 edit

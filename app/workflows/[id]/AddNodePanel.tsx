@@ -51,21 +51,30 @@ async function fetchDefs(): Promise<NodeDefLite[]> {
   return (await fetchNodeDefs()).filter((d) => d.type !== "trigger");
 }
 
+export interface UserStepLite { id: string; name: string; description: string; params: { key: string; label: string }[] }
+
 export function AddNodePanel({
   title,
   onPick,
+  onPickUserStep,
   onClose,
 }: {
   title: string;
   onPick: (type: string) => void;
+  /** 挑了「我的步驟」——使用者自己存起來的可重複套用步驟 */
+  onPickUserStep?: (stepId: string) => void;
   onClose: () => void;
 }) {
   const [defs, setDefs] = useState<NodeDefLite[] | null>(null);
+  const [userSteps, setUserSteps] = useState<UserStepLite[]>([]);
   const [query, setQuery] = useState("");
   const [error, setError] = useState(false);
 
   useEffect(() => {
     fetchDefs().then(setDefs).catch(() => setError(true));
+    fetch("/api/user-steps").then((res) => res.json())
+      .then((data) => setUserSteps(Array.isArray(data.steps) ? data.steps : []))
+      .catch(() => { /* 沒有自訂步驟不影響原本的積木清單 */ });
   }, []);
 
   const grouped = useMemo(() => {
@@ -103,6 +112,40 @@ export function AddNodePanel({
         {error && <p className="text-xs" style={{ color: "var(--red)" }}>載入節點庫失敗,請關掉重開一次。</p>}
         {!defs && !error && <p className="text-xs muted">載入中…</p>}
         {defs && grouped.length === 0 && <p className="text-xs muted">沒有符合「{query}」的積木——也可以直接用白話跟 AI 說你要做什麼。</p>}
+        {/* 使用者自己存的步驟放最上面：那是他親手調通的東西，比任何內建積木都更該先看到。
+            這一區的存在本身就是在回答「現成的沒有我要的功能怎麼辦」。 */}
+        {onPickUserStep && userSteps.filter((step) => !query.trim()
+          || step.name.toLowerCase().includes(query.trim().toLowerCase())
+          || step.description.toLowerCase().includes(query.trim().toLowerCase())).length > 0 && (
+          <div>
+            <p className="text-[11px] font-semibold mb-1.5 px-1" style={{ color: "var(--accent)" }}>我的步驟（你自己存的）</p>
+            <div className="space-y-1">
+              {userSteps.filter((step) => !query.trim()
+                || step.name.toLowerCase().includes(query.trim().toLowerCase())
+                || step.description.toLowerCase().includes(query.trim().toLowerCase())).map((step) => (
+                <button
+                  key={step.id}
+                  onClick={() => onPickUserStep(step.id)}
+                  className="w-full flex items-start gap-2.5 px-2.5 py-2 rounded-xl text-left transition-colors hover:bg-[var(--surface-2)]"
+                  title={step.description}
+                >
+                  <span
+                    className="grid place-items-center w-8 h-8 rounded-lg text-[15px] shrink-0"
+                    style={{ background: "color-mix(in srgb, var(--accent) 16%, var(--surface-2))", border: "1px solid color-mix(in srgb, var(--accent) 32%, transparent)" }}
+                  >
+                    ⭐
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-[13px] font-medium leading-tight" style={{ color: "var(--text)" }}>{step.name}</span>
+                    <span className="block text-[11px] leading-snug mt-0.5 faint">
+                      {step.description || (step.params.length > 0 ? `可以設定：${step.params.map((p) => p.label).join("、")}` : "你自己存的步驟")}
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {grouped.map(({ cat, items }) => (
           <div key={cat}>
             <p className="text-[11px] font-semibold mb-1.5 px-1" style={{ color: `var(--cat-${cat})` }}>{CATEGORY_LABEL[cat] ?? cat}</p>

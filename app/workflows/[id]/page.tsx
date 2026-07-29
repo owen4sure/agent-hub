@@ -1172,6 +1172,28 @@ export default function WorkflowPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [undo]);
 
+  /** 加入「我的步驟」——使用者自己存起來的可重複套用步驟。 */
+  const pickUserStep = useCallback(async (stepId: string) => {
+    const ctx = drawer;
+    setDrawer(null);
+    const center = rfInstance.current?.screenToFlowPosition({ x: window.innerWidth / 2 - 260, y: window.innerHeight / 2 }) ?? { x: 120, y: 120 };
+    try {
+      const res = await fetch(`/api/workflows/${id}/add-user-step`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stepId, position: { x: Math.round(center.x), y: Math.round(center.y) } }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { flashToast((data as { error?: string }).error ?? "加入失敗"); return; }
+      if ((data as { nodeId?: string }).nodeId) pushUndo({ kind: "addNode", nodeId: (data as { nodeId: string }).nodeId });
+      flashToast(`已加入「${(data as { label?: string }).label ?? "我的步驟"}」，拉線接上流程`);
+      load();
+    } catch {
+      flashToast("加入失敗，請再試一次");
+    }
+    void ctx;
+  }, [drawer, id, flashToast, pushUndo, load]);
+
   const pickNodeType = useCallback(
     async (type: string) => {
       const ctx = drawer;
@@ -2138,6 +2160,7 @@ export default function WorkflowPage() {
             <AddNodePanel
               title={drawer.mode === "add" ? "＋ 加一個步驟" : "在這條線中間插一步"}
               onPick={pickNodeType}
+            onPickUserStep={pickUserStep}
               onClose={() => setDrawer(null)}
             />
           )}

@@ -8,6 +8,7 @@ import { plainLanguage } from "@/lib/workflow/plainLanguage";
 import { GOOGLE_SHEET_SCRIPT_TEMPLATE } from "@/lib/googleSheetScriptTemplate";
 import type { Part } from "@/lib/wfChatStore";
 import { findFieldMistakes, type InsertableField } from "@/lib/workflow/insertableFields";
+import { parseUserFields } from "@/lib/workflow/userStepFields";
 
 /** select 選項支援 "value=顯示文字";只有「=」前後都有內容才切(跟 graphLint 同一套規則,別把 == 切壞) */
 function parseOption(o: string): { value: string; label: string } {
@@ -221,6 +222,13 @@ export function NodePanel({
   // 真的做出來看畫面才發現的問題：每個欄位下面都掛一排，同樣三塊重複五次變成一片雜訊，
   // 而且在「收件人」下面提示插入信件內文根本沒意義。跟著游標走才有用。
   const [focusedField, setFocusedField] = useState<string | null>(null);
+  // 「存成我的步驟」：把這一步變成可以在別條流程重複套用的積木。
+  const [saveStepDraft, setSaveStepDraft] = useState<null | {
+    name: string; description: string; intent: string; code: string;
+    params: { key: string; label: string; type: string; default?: string }[];
+    rejected: { literal: string; reason: string }[]; note: string;
+  }>(null);
+  const [saveStepBusy, setSaveStepBusy] = useState(false);
   /** 插到游標處，不是無腦接在最後面——使用者通常是想插在某一句話中間。 */
   const insertToken = (key: string, fieldKey: string, current: string, set: (v: string) => void) => {
     const el = fieldRefs.current[fieldKey];
@@ -270,9 +278,20 @@ export function NodePanel({
   // 切換節點時的草稿重置不用 effect——父層用 key={node.id} 強制重建整個面板,state 天生就是乾淨的
   const schema = defs?.find((d) => d.type === node.type)?.configSchema ?? [];
   // 可直接改的欄位:排除帳密(在設定頁)、AI 管的程式碼/內嵌步驟、觸發參數衍生欄位
-  const editableFields = schema.filter(
+  const schemaFields = schema.filter(
     (f) => f.type !== "secret" && f.type !== "code" && !f.derived && !(node.type === "repeat-steps" && f.key === "steps") && !(node.type === "custom-code" && f.key === "code"),
   );
+  // 「我的步驟」展開出來的節點，會在自己的 config 裡宣告使用者自訂的設定欄位。
+  // 這是整個「讓使用者做出現成沒有的功能」的最後一哩：不長出這些欄位的話，他存的步驟每次套用
+  // 都得進去改程式碼，那就跟沒存一樣。使用者自訂的排前面——那才是他每次真的要改的東西。
+  const userFields = parseUserFields((node.config as Record<string, unknown>).userFields).map((field) => ({
+    key: field.key,
+    label: field.label,
+    type: field.type,
+    default: field.default,
+    help: field.help,
+  })) as ParamFieldLite[];
+  const editableFields = [...userFields, ...schemaFields.filter((f) => !userFields.some((u) => u.key === f.key))];
   // AI 微調後的回報是給使用者確認「有沒有改對」，不是除錯用的 raw config dump。程式碼、內嵌步驟、
   // JSON 與沒有對應表單的內部欄位一律收成白話結論；真正技術細節仍只在後端與 AI 的修復現場使用。
   const friendlyLastDiff = lastDiff
@@ -639,6 +658,120 @@ export function NodePanel({
             </div>
           )}
         </div>
+        {/* 讓使用者把自己調通的東西存成可重複套用的積木——這是「現成的沒有我要的功能怎麼辦」的答案。
+            只對自訂程式碼步驟出現：其他型別的步驟本來就能在任何流程重複使用。 */}
+        {!readonlyWf && node.type === "custom-code" && String((node.config as Record<string, unknown>).code ?? "").trim() && (
+          <div className="card p-4 space-y-2">
+            <p className="text-sm font-medium" style={{ color: "var(--accent)" }}>⭐ 存成我的步驟</p>
+            <p className="text-xs faint">
+              存起來之後，在任何流程按「加步驟」都能直接用它，不用再叫 AI 重做一次。
+              每次可能要改的地方（收件人、網址、關鍵字…）會變成可以填的欄位。
+            </p>
+            <button
+              className="btn btn-ghost text-xs"
+              disabled={saveStepBusy}
+              onClick={async () => {
+                setSaveStepBusy(true);
+                try {
+                  const res = await fetch(`/api/workflows/${workflowId}/parameterize`, {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ nodeId: node.id }),
+                  });
+                  const data = await res.json().catch(() => ({}));
+                  if (!res.ok) { onToast((data as { error?: string }).error ?? "沒辦法存成步驟"); return; }
+                  setSaveStepDraft({
+                    name: String(data.name ?? node.label),
+                    description: String(data.intent ?? ""),
+                    intent: String(data.intent ?? ""),
+                    code: String(data.code ?? ""),
+                    params: Array.isArray(data.params) ? data.params : [],
+                    rejected: Array.isArray(data.rejected) ? data.rejected : [],
+                    note: String(data.note ?? ""),
+                  });
+                } finally { setSaveStepBusy(false); }
+              }}
+            >
+              {saveStepBusy ? "整理中…" : "⭐ 存成我的步驟"}
+            </button>
+          </div>
+        )}
+
+        {saveStepDraft && (
+          <div className="card p-4 space-y-3" style={{ borderColor: "var(--accent)" }}>
+            <p className="text-sm font-medium">存成我的步驟</p>
+            <label className="block text-xs">
+              <span className="faint">名稱（之後在「加步驟」裡會看到它）</span>
+              <input className="input text-sm mt-1" value={saveStepDraft.name}
+                onChange={(e) => setSaveStepDraft((d) => (d ? { ...d, name: e.target.value } : d))} />
+            </label>
+            <label className="block text-xs">
+              <span className="faint">一句話說明這個步驟在做什麼</span>
+              <input className="input text-sm mt-1" value={saveStepDraft.description}
+                onChange={(e) => setSaveStepDraft((d) => (d ? { ...d, description: e.target.value } : d))} />
+            </label>
+            <div className="text-xs">
+              <div className="faint mb-1">
+                {saveStepDraft.params.length > 0
+                  ? "下面這幾個是「每次套用可以不一樣」的地方，名稱可以改成你看得懂的說法："
+                  : (saveStepDraft.note || "這一步沒有需要每次調整的地方。")}
+              </div>
+              <div className="space-y-1.5">
+                {/* 名稱輸入框獨佔一行：跟「目前是…」「不要這個」擠在同一列時，實測寬度只剩幾個字，
+                    使用者連自己打的名稱都看不完整，等於改不了名(截圖才發現的)。 */}
+                {saveStepDraft.params.map((param, index) => (
+                  <div key={param.key} className="rounded-md border p-2 space-y-1" style={{ borderColor: "var(--border)" }}>
+                    <input
+                      className="input text-sm w-full"
+                      value={param.label}
+                      placeholder="給這個欄位一個你看得懂的名稱"
+                      onChange={(e) => setSaveStepDraft((d) => d && ({
+                        ...d, params: d.params.map((p, i) => (i === index ? { ...p, label: e.target.value } : p)),
+                      }))}
+                    />
+                    <div className="flex items-center gap-2">
+                      <span className="faint truncate">目前是「{String(param.default ?? "").slice(0, 40)}」</span>
+                      <button
+                        className="btn btn-ghost text-xs shrink-0 ml-auto"
+                        title="這個不要變成欄位"
+                        onClick={() => setSaveStepDraft((d) => d && ({ ...d, params: d.params.filter((_, i) => i !== index) }))}
+                      >不要這個</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {saveStepDraft.rejected.length > 0 && (
+                <div className="faint mt-2">
+                  有 {saveStepDraft.rejected.length} 個地方本來想做成欄位但沒辦法（{saveStepDraft.rejected[0].reason}），存起來之後那幾個地方會固定不變。
+                </div>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                className="btn btn-primary text-xs"
+                disabled={saveStepBusy}
+                onClick={async () => {
+                  setSaveStepBusy(true);
+                  try {
+                    const res = await fetch("/api/user-steps", {
+                      method: "POST", headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        name: saveStepDraft.name, description: saveStepDraft.description, intent: saveStepDraft.intent,
+                        code: saveStepDraft.code, params: saveStepDraft.params,
+                        sourceWorkflowId: workflowId, sourceNodeId: node.id,
+                      }),
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok) { onToast((data as { error?: string }).error ?? "存檔失敗"); return; }
+                    setSaveStepDraft(null);
+                    onToast(`已存成「${saveStepDraft.name}」，之後在「加步驟」就找得到`);
+                  } finally { setSaveStepBusy(false); }
+                }}
+              >{saveStepBusy ? "存檔中…" : "確定存起來"}</button>
+              <button className="btn btn-ghost text-xs" onClick={() => setSaveStepDraft(null)}>取消</button>
+            </div>
+          </div>
+        )}
+
         {!readonlyWf && editableFields.length > 0 && (
           <div className="card p-4 space-y-4">
             <div>

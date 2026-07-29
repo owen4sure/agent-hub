@@ -247,6 +247,16 @@ function init(): Database.Database {
 
     -- 資料夾監聽觸發的「已處理檔案」記錄：同一顆資料目錄可能有多個進程(daemon+dev)同時掃描，
     -- 用 PRIMARY KEY + INSERT OR IGNORE 當原子搶佔鎖，誰先插入成功誰觸發，不會重複跑同一個檔案。
+    -- 「我的步驟」：使用者把自己調通的自訂程式碼存成可重複套用的範本。
+    -- 存的是**範本**不是新的節點型別——加進流程時展開成普通的自訂程式碼節點，
+    -- 所以所有以型別為鍵的安全防線(只讀契約/匯入清空/副作用分類/安全排練)都自動適用，一條都不用改。
+    CREATE TABLE IF NOT EXISTS user_steps (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      data TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS watch_seen (
       workflow_id TEXT NOT NULL,
       file_key TEXT NOT NULL,
