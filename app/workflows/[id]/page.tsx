@@ -111,6 +111,11 @@ export default function WorkflowPage() {
   const [wf, setWf] = useState<Workflow | null>(null);
   const [evidenceState, setEvidenceState] = useState<EvidenceState | null>(null);
   const [readOnlyImpact, setReadOnlyImpact] = useState<ReadOnlyImpact[]>([]);
+  // 匯入的流程本來就帶著排程時，直接在這裡問「要開嗎」。不問的話它會靜靜躺在那裡永遠不執行
+  // (草稿＋未確認兩道閘門)，而使用者只會看到「時間到了什麼都沒發生」——真實踩過。
+  const [importedScheduleConsent, setImportedScheduleConsent] = useState<{ descriptions: string[]; consequences: string[] } | null>(null);
+  const [adoptingSchedules, setAdoptingSchedules] = useState(false);
+  const [scheduleConsentDismissed, setScheduleConsentDismissed] = useState(false);
   const [nodeRuns, setNodeRuns] = useState<Record<string, NodeRun>>({});
   // 哪些帳密欄位已填(來自 GET 的 secretsSet)——缺帳密的失敗要直接給安全輸入卡,不是叫人「讓 AI 修」
   const [secretsSet, setSecretsSet] = useState<Record<string, boolean>>({});
@@ -614,6 +619,7 @@ export default function WorkflowPage() {
         : compacted ? { ...data.workflow, nodes: candidateNodes } : data.workflow;
       setWf(workflow);
       setReadOnlyImpact(Array.isArray(data.readOnlyImpact) ? data.readOnlyImpact : []);
+      setImportedScheduleConsent(data.importedScheduleConsent ?? null);
       setSecretsSet(data.secretsSet ?? {});
       // 既有流程若曾存進重疊座標或舊版超寬單列，載入時一次性修正；只送座標，不會覆蓋 AI 同時修好的 config。
       if (separated.changed || compacted) {
@@ -1976,6 +1982,58 @@ export default function WorkflowPage() {
           </div>
         </div>
         <div className="flex-1 relative" style={{ background: "var(--app-bg)" }}>
+          {importedScheduleConsent && !scheduleConsentDismissed && (
+            <div
+              className="absolute left-4 right-4 top-3 z-30 rounded-xl border px-4 py-3 shadow-sm"
+              style={{ background: "color-mix(in srgb, var(--accent) 10%, var(--panel-bg))", borderColor: "color-mix(in srgb, var(--accent) 45%, var(--border))" }}
+              role="dialog"
+              aria-label="匯入流程的排程確認"
+            >
+              <div className="flex items-start gap-2">
+                <span aria-hidden="true">⏰</span>
+                <div className="min-w-0 text-sm leading-relaxed flex-1">
+                  <div className="font-semibold">這條流程本來就設定了排程，要現在開啟嗎？</div>
+                  <div className="mt-1">
+                    帶進來的時間：{importedScheduleConsent.descriptions.map((text) => `「${text}」`).join("、")}（台北時間）
+                  </div>
+                  <ul className="mt-2 space-y-1 text-xs muted list-disc ml-4">
+                    {importedScheduleConsent.consequences.map((line) => <li key={line}>{line}</li>)}
+                  </ul>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      className="btn btn-primary text-xs"
+                      disabled={adoptingSchedules}
+                      onClick={async () => {
+                        setAdoptingSchedules(true);
+                        try {
+                          const res = await fetch(`/api/workflows/${id}/adopt-schedules`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ consent: true }),
+                          });
+                          const data = await res.json().catch(() => ({}));
+                          if (!res.ok) { flashToast(data.error ?? "開啟排程失敗"); return; }
+                          setImportedScheduleConsent(null);
+                          flashToast(data.warning ?? "排程已開啟，這條流程也設為正式了");
+                          load();
+                        } finally {
+                          setAdoptingSchedules(false);
+                        }
+                      }}
+                    >
+                      {adoptingSchedules ? "開啟中…" : "✓ 同意，開啟排程"}
+                    </button>
+                    <button className="btn btn-ghost text-xs" onClick={() => setScheduleConsentDismissed(true)}>
+                      先不要，我自己檢查
+                    </button>
+                  </div>
+                  <div className="mt-2 text-xs faint">
+                    先不要的話，這條流程會維持草稿、排程不會執行；之後想開再回到這頁，或到「⚡ 自動觸發」自己啟用。
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
           {readOnlyImpact.length > 0 && (
             <div
               className="absolute left-4 right-4 top-3 z-20 rounded-xl border px-4 py-3 shadow-sm"

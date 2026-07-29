@@ -16,6 +16,9 @@ import { n8nAutomationNeedsPreview, n8nGraphNeedsReview } from "@/lib/workflow/n
 import { readOnlyParentsBlockedBy } from "@/lib/workflow/safetyContract";
 import { getAutomationReadiness, recordAutomationReadiness } from "@/lib/workflow/automationReadiness";
 import { hasActiveRepairSession } from "@/lib/workflow/repairSessions";
+import { importedScheduleConsent } from "@/lib/workflow/importedScheduleConsent";
+import { listSchedules } from "@/lib/scheduler";
+import { describeSuggestedSchedule } from "@/lib/workflow/builder";
 
 const PARAM_TYPES = new Set(["text", "number", "date-or-token", "select", "boolean", "secret", "code", "textarea"]);
 
@@ -62,6 +65,12 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     .get(id, currentFingerprint));
   const automationReadiness = getAutomationReadiness(wf);
   const automationPassport = recordAutomationReadiness(wf, automationReadiness, "workflow-page");
+  // 匯入的流程本來就帶著排程時，直接在流程頁問「要開嗎」——不要讓使用者自己去發現排程存在、
+  // 卻因為草稿＋未確認兩道閘門而永遠不會執行(真實踩過：他只看到時間到了什麼都沒發生)。
+  const pendingConsent = importedScheduleConsent(wf, listSchedules(id));
+  const importedScheduleConsentPayload = pendingConsent
+    ? { descriptions: pendingConsent.crons.map(describeSuggestedSchedule), consequences: pendingConsent.consequences }
+    : undefined;
   return NextResponse.json({
     workflow: { ...wf, requiresSecrets, model: getWorkflowModel(id, wf.defaultModel) },
     acceptanceSpecValid: isAcceptanceSpecForGraph(wf.acceptanceSpec, wf, workflowExecutionFingerprint),
@@ -71,6 +80,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     n8nAutomationReady: !n8nAutomationNeedsPreview(wf, hasSuccessfulPreview),
     automationReadiness,
     automationPassport,
+    ...(importedScheduleConsentPayload ? { importedScheduleConsent: importedScheduleConsentPayload } : {}),
     readOnlyImpact,
     secretsSet: Object.fromEntries((requiresSecrets ?? []).map((f) => [f.key, Boolean(secrets[f.key]?.length)])),
     runs: listRuns(id),
