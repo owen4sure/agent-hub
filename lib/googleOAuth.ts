@@ -35,6 +35,51 @@ export const GOOGLE_SCOPES = {
 } as const;
 
 /**
+ * 一次要齊：這個平台**所有** Google 功能會用到的權限。
+ *
+ * 為什麼不按「這條流程現在用到什麼」逐次要(那是更小權限的做法、我一開始也是那樣寫的)：
+ * 使用者的流程是會長大的。今天只更新簡報、下個月加一步寫試算表，逐次授權的話那天就會遇到
+ * 一個執行期 403，然後被要求「再去授權一次」——而那時候他八成早就忘記當初是怎麼設定的。
+ * 這種「用到才發現要設定」正是要消滅的體驗，所以第一次就把平台做得到的事情一次要齊。
+ *
+ * 但**要齊 ≠ 要滿**。這裡刻意只包含「平台真的有節點在用」的範圍：
+ * - 沒有 Gmail(讀信是走使用者自己的信箱網頁，不是 Gmail API)
+ * - 沒有雲端硬碟的寫入權限(平台不會替使用者刪改檔案)
+ * 多要一個用不到的權限，就是多給 AI 產生的程式碼一份它不需要的能力——這跟平台
+ * 「未獲授權的外送一律擋下」的底線是同一件事。真的哪天多出需求，下面的缺口偵測會自己講。
+ */
+export const GOOGLE_FULL_SCOPES: string[] = [
+  GOOGLE_SCOPES.sheetsWrite,       // 讀寫試算表(含唯讀)
+  GOOGLE_SCOPES.slides,            // 建立/更新簡報
+  GOOGLE_SCOPES.driveRead,         // 找檔案(例如「資料夾裡最新的那份簡報」)
+  GOOGLE_SCOPES.scriptProjects,    // 讓平台自己建立/更新寫入用的 Apps Script
+  GOOGLE_SCOPES.scriptDeployments, // 讓平台自己重新部署，範本改版時使用者不用碰編輯器
+];
+
+/** 上面那些權限對應要在 Google Cloud 專案裡啟用的 API。一次全開，不要等執行時撞 403。 */
+export const GOOGLE_REQUIRED_APIS = [
+  "sheets.googleapis.com",
+  "slides.googleapis.com",
+  "drive.googleapis.com",
+  "script.googleapis.com",
+] as const;
+
+/** 一個連結把上面全部 API 一次啟用(Google 官方的批次啟用流程，使用者只要按一次確認)。 */
+export function googleEnableApisUrl(): string {
+  return `https://console.cloud.google.com/flows/enableapi?apiid=${GOOGLE_REQUIRED_APIS.join(",")}`;
+}
+
+/** 白話說明每個權限是拿來做什麼的——使用者要同意的東西，他得看得懂。 */
+export const GOOGLE_SCOPE_LABELS: Record<string, string> = {
+  [GOOGLE_SCOPES.sheetsWrite]: "讀寫 Google 試算表",
+  [GOOGLE_SCOPES.sheetsRead]: "讀取 Google 試算表",
+  [GOOGLE_SCOPES.slides]: "建立與更新 Google 簡報",
+  [GOOGLE_SCOPES.driveRead]: "在雲端硬碟裡找檔案（唯讀）",
+  [GOOGLE_SCOPES.scriptProjects]: "代管試算表寫入用的指令碼",
+  [GOOGLE_SCOPES.scriptDeployments]: "指令碼改版時自動重新部署",
+};
+
+/**
  * 這條流程實際需要哪些 Google 權限。
  *
  * 同時看**節點型別**與**程式碼/設定裡真的打了哪個 API**——只看型別會漏掉最重要的那一類：
@@ -174,6 +219,20 @@ export function googleAuthErrorMessage(code: string, raw = ""): string {
     return "你在 Google 的同意畫面按了取消（或帳號沒有被加進測試使用者）。要重新授權的話再按一次連結即可。";
   }
   return `Google 授權失敗：${(raw || code || "沒有回傳原因").slice(0, 300)}`;
+}
+
+/**
+ * 已經拿到的權限有沒有涵蓋這些流程真的需要的。
+ *
+ * 這是「以後不用再回來設定」的保險：授權當下要齊了不代表永遠夠——平台之後可能長出新的 Google
+ * 能力，使用者也可能從別台匯入用到新東西的流程。與其讓它變成一個執行期 403（那時候沒有人
+ * 會聯想到是權限問題），不如**由系統自己比對、自己開口**，而且復原就是同一顆按鈕。
+ */
+export function missingGoogleScopes(grantedScope: string | undefined, needed: string[]): string[] {
+  const granted = new Set((grantedScope ?? "").split(/\s+/).filter(Boolean));
+  // 完整試算表權限涵蓋唯讀，別把它誤報成缺少。
+  if (granted.has(GOOGLE_SCOPES.sheetsWrite)) granted.add(GOOGLE_SCOPES.sheetsRead);
+  return needed.filter((scope) => !granted.has(scope));
 }
 
 /**

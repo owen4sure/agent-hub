@@ -9,10 +9,14 @@ import { useCallback, useEffect, useState } from "react";
  * 中間任何一步錯了，代價都是「幾天後排程失敗」，而錯誤訊息是一句原始 JSON。
  * 這張卡把它變成：一顆按鈕、一行狀態、壞掉的時候當場給你同一顆按鈕。
  */
+interface ScopeInfo { scope: string; label: string }
 interface GoogleStatus {
   hasClient: boolean;
   hasRefreshToken: boolean;
   redirectUri: string;
+  enableApisUrl: string;
+  willRequest: ScopeInfo[];
+  missingScopes: ScopeInfo[];
   health: { ok: boolean; checkedAt: string; error?: string; scope?: string } | null;
 }
 
@@ -45,12 +49,20 @@ export function GoogleAccountCard() {
 
       <div className="card p-5 space-y-3">
         {!status.hasClient ? (
-          <div className="text-sm">
-            <div style={{ color: "var(--amber)" }}>還缺 Google 用戶端 ID／密鑰</div>
-            <div className="muted mt-1">
-              到 <a className="underline" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">Google Cloud Console →「憑證」</a> 建立一個
-              「OAuth 用戶端 ID」（應用程式類型選<b>網頁應用程式</b>），把 Client ID 與密鑰填進上面的共用帳密欄位，這一步只要做一次。
-            </div>
+          <div className="text-sm space-y-2">
+            <div style={{ color: "var(--amber)" }}>還沒設定，照這三步做一次就好（之後都不用再回來）</div>
+            <ol className="list-decimal ml-4 space-y-1 muted leading-relaxed">
+              <li>
+                <a className="underline" href={status.enableApisUrl} target="_blank" rel="noreferrer">一次啟用平台會用到的 Google API</a>
+                （沒有專案的話這頁會請你先建一個，取任意名稱即可）
+              </li>
+              <li>
+                <a className="underline" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">建立 OAuth 用戶端</a>
+                ：類型選<b>網頁應用程式</b>，「已授權的重新導向 URI」貼下面這一行
+                <CopyLine text={status.redirectUri} />
+              </li>
+              <li>把 Client ID 與密鑰填進上面的共用帳密欄位並儲存，這張卡就會出現「連結」按鈕。</li>
+            </ol>
           </div>
         ) : (
           <>
@@ -63,8 +75,24 @@ export function GoogleAccountCard() {
             </div>
 
             {broken && <div className="text-sm" style={{ color: "var(--red)" }}>{health!.error}</div>}
+
+            {/* 「以後不用再回來設定」的保險：現有流程需要、但這串授權沒拿到的權限，
+                由系統自己講出來，不要變成幾天後執行時一個沒人看得懂的 403。 */}
+            {status.missingScopes.length > 0 && (
+              <div className="text-sm rounded-md border p-2" style={{ borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))" }}>
+                <div style={{ color: "var(--amber)" }}>你的流程需要多一項權限，但目前的授權沒有</div>
+                <div className="muted mt-0.5">缺少：{status.missingScopes.map((item) => item.label).join("、")}。按下面的「重新連結」再同意一次就補上了（原有的權限不會不見）。</div>
+              </div>
+            )}
+
             {linked && health?.ok && health.scope && (
               <div className="text-xs faint">已授權範圍：{health.scope.split(/\s+/).map(shortScope).join("、")}</div>
+            )}
+            {!linked && (
+              <div className="text-xs muted">
+                按下去會一次要齊平台所有 Google 功能的權限（{status.willRequest.map((item) => item.label).join("、")}），
+                之後新增用到 Google 的流程都不用再設定一次。
+              </div>
             )}
 
             <div className="flex flex-wrap items-center gap-2">
@@ -91,7 +119,15 @@ export function GoogleAccountCard() {
               <div className="mt-2 leading-relaxed">
                 到 Google Cloud Console →「憑證」→ 你的 OAuth 用戶端 →「已授權的重新導向 URI」，
                 把這一行加進去（只要做一次）：
-                <code className="block mt-1 p-2 rounded" style={{ background: "var(--surface)" }}>{status.redirectUri}</code>
+                <CopyLine text={status.redirectUri} />
+              </div>
+            </details>
+            <details className="text-xs faint">
+              <summary className="cursor-pointer">出現「這個 API 尚未在專案中啟用」？</summary>
+              <div className="mt-2 leading-relaxed">
+                代表這個 Google Cloud 專案還沒開啟對應的 API。
+                <a className="underline ml-1" href={status.enableApisUrl} target="_blank" rel="noreferrer">按這裡一次全部啟用</a>
+                （平台會用到的四個 API 一起開，按一次確認就好）。
               </div>
             </details>
             <details className="text-xs faint">
@@ -106,6 +142,28 @@ export function GoogleAccountCard() {
         )}
       </div>
     </section>
+  );
+}
+
+/** 要使用者「貼一行字到別的網站」時，一定要給複製鈕——手動選取複製是最容易出錯的一步。 */
+function CopyLine({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <span className="flex items-center gap-2 mt-1">
+      <code className="flex-1 p-2 rounded break-all" style={{ background: "var(--surface)" }}>{text}</code>
+      <button
+        className="btn btn-ghost text-xs shrink-0"
+        onClick={async () => {
+          try {
+            await navigator.clipboard.writeText(text);
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 2000);
+          } catch { /* 沒有剪貼簿權限時使用者還是可以自己選取 */ }
+        }}
+      >
+        {copied ? "已複製" : "複製"}
+      </button>
+    </span>
   );
 }
 

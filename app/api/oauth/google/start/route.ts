@@ -1,14 +1,13 @@
 import { NextResponse } from "next/server";
 import { getSharedSecrets } from "@/lib/settingsStore";
-import { listWorkflows } from "@/lib/workflow/store";
-import { GOOGLE_SCOPES, buildGoogleAuthUrl, googleRedirectUri, googleScopesForNodes, issueOAuthState } from "@/lib/googleOAuth";
+import { GOOGLE_FULL_SCOPES, buildGoogleAuthUrl, googleRedirectUri, issueOAuthState } from "@/lib/googleOAuth";
 
 /**
  * 「連結 Google 帳號」按下去之後的第一站：把使用者導到 Google 的同意畫面。
  *
- * 權限範圍由平台自己算——掃過所有流程實際用到什麼(含 custom-code 裡真的打了哪個 API)。
- * 舊流程要使用者自己到 OAuth Playground 逐一挑，挑漏一個的代價是「幾天後執行時 403」，
- * 而那時候沒有人會聯想到是當初少勾了一個範圍(真實踩過)。
+ * 權限範圍一次要齊平台所有 Google 功能(見 GOOGLE_FULL_SCOPES)，使用者不用挑、也不用之後
+ * 「用到了才回來再設定一次」。舊流程要使用者自己到 OAuth Playground 逐一勾，勾漏一個的代價是
+ * 「幾天後執行時 403」，而那時候沒有人會聯想到是當初少勾了一個範圍(真實踩過)。
  */
 export async function GET(req: Request) {
   const secrets = getSharedSecrets();
@@ -20,18 +19,10 @@ export async function GET(req: Request) {
   }
 
   const redirectUri = googleRedirectUri(req.url);
-  // 所有流程一起算：帳密是全機共用的(依欄位名)，一次授權就該涵蓋這台電腦上所有 Google 相關的流程，
-  // 不然使用者每加一條流程就要重新授權一次。
-  const scopes = new Set<string>();
-  for (const workflow of listWorkflows()) {
-    for (const scope of googleScopesForNodes(workflow.nodes)) scopes.add(scope);
-  }
-  // 一個 Google 流程都還沒有時(第一次設定)，先給最常用的兩個，讓使用者可以先授權再建流程。
-  if (scopes.size === 0) {
-    scopes.add(GOOGLE_SCOPES.sheetsWrite);
-    scopes.add(GOOGLE_SCOPES.slides);
-  }
-  const scopeList = [...scopes].sort();
+  // 一次要齊平台所有 Google 功能的權限，不按「現在這幾條流程用到什麼」逐次要——
+  // 使用者的流程會長大，逐次授權的代價是「下個月加一步就撞 403，然後要他再設定一次」。
+  // 已經授權過的範圍會被 include_granted_scopes 保留，所以重按也不會弄丟東西。
+  const scopeList = [...GOOGLE_FULL_SCOPES].sort();
   const state = issueOAuthState(redirectUri, scopeList);
   return NextResponse.redirect(buildGoogleAuthUrl({ clientId, redirectUri, scopes: scopeList, state }));
 }
