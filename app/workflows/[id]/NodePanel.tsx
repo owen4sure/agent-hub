@@ -7,6 +7,7 @@ import type { WFNode, NodeRun } from "./types";
 import { plainLanguage } from "@/lib/workflow/plainLanguage";
 import { GOOGLE_SHEET_SCRIPT_TEMPLATE } from "@/lib/googleSheetScriptTemplate";
 import type { Part } from "@/lib/wfChatStore";
+import { findFieldMistakes, type InsertableField } from "@/lib/workflow/insertableFields";
 
 /** select 選項支援 "value=顯示文字";只有「=」前後都有內容才切(跟 graphLint 同一套規則,別把 == 切壞) */
 function parseOption(o: string): { value: string; label: string } {
@@ -58,6 +59,64 @@ function formatOutput(raw: string): string {
   } catch {
     return raw;
   }
+}
+
+
+/**
+ * 「可以插入前面步驟算出來的資料」——使用者原話：「使用者看不懂 {{periodLabel}} 這種東西是什麼」。
+ *
+ * 所以這一排方塊做三件事：①顯示白話名稱 ②顯示上次執行的真實值(他認得出是不是自己要的)
+ * ③點一下就插進游標處——他從頭到尾不用打出大括號，也不用知道那串英文是什麼。
+ */
+function InsertableFieldChips({ fields, onInsert }: { fields: InsertableField[]; onInsert: (key: string) => void }) {
+  if (fields.length === 0) return null;
+  return (
+    <div className="mt-1.5">
+      <div className="text-xs faint mb-1">📎 可以插入前面步驟算出來的資料（點一下就插進游標處）：</div>
+      <div className="flex flex-wrap gap-1.5">
+        {fields.map((field) => (
+          <button
+            key={field.key}
+            type="button"
+            onClick={() => onInsert(field.key)}
+            className="rounded-md border px-2 py-1 text-left hover:opacity-80"
+            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+            title={`來自「${field.from}」這一步`}
+          >
+            <div className="text-xs">{field.label}</div>
+            {field.sample ? <div className="text-[10px] faint">{field.sample}</div> : null}
+            <div className="text-[10px] faint opacity-70">← {field.from}</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** 打了一個沒有人產生的欄位時，當場說「你是不是要用○○？」——不要等執行時才炸。 */
+function FieldMistakeHints({ text, fields, onFix }: { text: string; fields: InsertableField[]; onFix: (from: string, to: string) => void }) {
+  const mistakes = findFieldMistakes(text, fields);
+  if (mistakes.length === 0) return null;
+  return (
+    <div className="mt-1.5 space-y-1">
+      {mistakes.map((mistake) => (
+        <div key={mistake.token} className="text-xs rounded-md border p-2" style={{ borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))" }}>
+          {mistake.suggestion ? (
+            <>
+              <span style={{ color: "var(--amber)" }}>前面的步驟沒有「{mistake.token}」這個資料。</span>
+              <span className="muted">你是不是要用「{mistake.suggestion.label}」？</span>
+              <button type="button" className="btn btn-ghost text-xs ml-1" onClick={() => onFix(mistake.token, mistake.suggestion!.key)}>換成這個</button>
+            </>
+          ) : (
+            <>
+              <span style={{ color: "var(--amber)" }}>前面的步驟沒有「{mistake.token}」這個資料。</span>
+              <span className="muted">需要的話，在右邊對話跟我說「加一步算出{mistake.token}」，我幫你補上那個步驟。</span>
+            </>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export function NodePanel({
@@ -146,6 +205,28 @@ export function NodePanel({
 
   // ── 直接改設定:簡單值(網址/關鍵字/檔名…)自己打字改,不用每次都求 AI(雙模式編輯拍板) ──
   const [defs, setDefs] = useState<NodeDefLite[] | null>(null);
+  // 可以插入的上游欄位（含上次執行的真實值）——讓使用者不用打出 {{}} 也不用懂那串英文
+  const [insertable, setInsertable] = useState<InsertableField[]>([]);
+  useEffect(() => {
+    let alive = true;
+    fetch(`/api/workflows/${workflowId}/insertable-fields?nodeId=${encodeURIComponent(node.id)}`)
+      .then((res) => res.json())
+      .then((data) => { if (alive) setInsertable(Array.isArray(data.fields) ? data.fields : []); })
+      .catch(() => { /* 拿不到就不顯示，不影響面板其他功能 */ });
+    return () => { alive = false; };
+  }, [workflowId, node.id]);
+  const fieldRefs = useRef<Record<string, HTMLTextAreaElement | HTMLInputElement | null>>({});
+  /** 插到游標處，不是無腦接在最後面——使用者通常是想插在某一句話中間。 */
+  const insertToken = (key: string, fieldKey: string, current: string, set: (v: string) => void) => {
+    const el = fieldRefs.current[fieldKey];
+    const token = `{{${key}}}`;
+    if (!el || typeof el.selectionStart !== "number") { set(current + token); return; }
+    const start = el.selectionStart ?? current.length;
+    const end = el.selectionEnd ?? start;
+    set(current.slice(0, start) + token + current.slice(end));
+    window.setTimeout(() => { el.focus(); el.setSelectionRange(start + token.length, start + token.length); }, 0);
+  };
+
   const [draftCfg, setDraftCfg] = useState<Record<string, string | boolean>>({});
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
@@ -582,15 +663,28 @@ export function NodePanel({
                       <span className="muted">開啟</span>
                     </label>
                   ) : f.type === "textarea" ? (
-                    <textarea value={String(v)} onChange={(e) => set(e.target.value)} rows={6} className="input text-sm resize-y leading-relaxed min-h-32" placeholder={f.default ? `預設：${f.default}` : "留空會使用預設值"} />
+                    <textarea ref={(el) => { fieldRefs.current[f.key] = el; }} value={String(v)} onChange={(e) => set(e.target.value)} rows={6} className="input text-sm resize-y leading-relaxed min-h-32" placeholder={f.default ? `預設：${f.default}` : "留空會使用預設值"} />
                   ) : (
                     <input
+                      ref={(el) => { fieldRefs.current[f.key] = el; }}
                       value={String(v)}
                       onChange={(e) => set(e.target.value)}
                       inputMode={f.type === "number" ? "numeric" : undefined}
                       className="input text-sm min-h-11"
                       placeholder={f.default ? `預設：${f.default}` : "留空會使用預設值"}
                     />
+                  )}
+                  {/* 可以插入哪些上游資料 + 打錯了當場提醒。只對「會做 {{欄位}} 代換」的文字型欄位顯示；
+                      勾選框、下拉選單不吃樣板，掛上去只會變成雜訊。 */}
+                  {(f.type === "textarea" || f.type === "text" || !f.type) && (
+                    <>
+                      <InsertableFieldChips fields={insertable} onInsert={(key) => insertToken(key, f.key, String(v), (val) => set(val))} />
+                      <FieldMistakeHints
+                        text={String(v)}
+                        fields={insertable}
+                        onFix={(from, to) => set(String(v).split(`{{${from}}}`).join(`{{${to}}}`))}
+                      />
+                    </>
                   )}
                   {f.key === "readOnly" && node.type === "http-request" && readOnlyState?.applicable && (
                     <div className="mt-2 rounded-lg border p-3 text-xs space-y-2" style={{ borderColor: readOnlyState.approved ? "var(--green)" : "var(--amber)" }}>
