@@ -78,6 +78,7 @@ function InsertableFieldChips({ fields, onInsert }: { fields: InsertableField[];
           <button
             key={field.key}
             type="button"
+            onMouseDown={(e) => e.preventDefault()}
             onClick={() => onInsert(field.key)}
             className="rounded-md border px-2 py-1 text-left hover:opacity-80"
             style={{ borderColor: "var(--border)", background: "var(--surface)" }}
@@ -216,6 +217,10 @@ export function NodePanel({
     return () => { alive = false; };
   }, [workflowId, node.id]);
   const fieldRefs = useRef<Record<string, HTMLTextAreaElement | HTMLInputElement | null>>({});
+  // 那排「可以插入」的方塊只在**正在編輯的那個欄位**底下出現。
+  // 真的做出來看畫面才發現的問題：每個欄位下面都掛一排，同樣三塊重複五次變成一片雜訊，
+  // 而且在「收件人」下面提示插入信件內文根本沒意義。跟著游標走才有用。
+  const [focusedField, setFocusedField] = useState<string | null>(null);
   /** 插到游標處，不是無腦接在最後面——使用者通常是想插在某一句話中間。 */
   const insertToken = (key: string, fieldKey: string, current: string, set: (v: string) => void) => {
     const el = fieldRefs.current[fieldKey];
@@ -663,10 +668,11 @@ export function NodePanel({
                       <span className="muted">開啟</span>
                     </label>
                   ) : f.type === "textarea" ? (
-                    <textarea ref={(el) => { fieldRefs.current[f.key] = el; }} value={String(v)} onChange={(e) => set(e.target.value)} rows={6} className="input text-sm resize-y leading-relaxed min-h-32" placeholder={f.default ? `預設：${f.default}` : "留空會使用預設值"} />
+                    <textarea ref={(el) => { fieldRefs.current[f.key] = el; }} onFocus={() => setFocusedField(f.key)} value={String(v)} onChange={(e) => set(e.target.value)} rows={6} className="input text-sm resize-y leading-relaxed min-h-32" placeholder={f.default ? `預設：${f.default}` : "留空會使用預設值"} />
                   ) : (
                     <input
                       ref={(el) => { fieldRefs.current[f.key] = el; }}
+                      onFocus={() => setFocusedField(f.key)}
                       value={String(v)}
                       onChange={(e) => set(e.target.value)}
                       inputMode={f.type === "number" ? "numeric" : undefined}
@@ -678,7 +684,9 @@ export function NodePanel({
                       勾選框、下拉選單不吃樣板，掛上去只會變成雜訊。 */}
                   {(f.type === "textarea" || f.type === "text" || !f.type) && (
                     <>
-                      <InsertableFieldChips fields={insertable} onInsert={(key) => insertToken(key, f.key, String(v), (val) => set(val))} />
+                      {focusedField === f.key && (
+                        <InsertableFieldChips fields={insertable} onInsert={(key) => insertToken(key, f.key, String(v), (val) => set(val))} />
+                      )}
                       <FieldMistakeHints
                         text={String(v)}
                         fields={insertable}
