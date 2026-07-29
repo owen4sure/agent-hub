@@ -7,7 +7,13 @@ import { useCallback, useEffect, useState } from "react";
  *
  * 存在的理由：這件事原本是純手動的——到 OAuth Playground 挑權限、換 token、複製三串值貼回來。
  * 中間任何一步錯了，代價都是「幾天後排程失敗」，而錯誤訊息是一句原始 JSON。
- * 這張卡把它變成：一顆按鈕、一行狀態、壞掉的時候當場給你同一顆按鈕。
+ *
+ * 這張卡的三個設計要求(都是踩過才知道的)：
+ * ①**先講設定完能做什麼**，再講要做什麼。使用者不會為了「完成設定」而設定，是為了用得到的功能。
+ * ②**每一步都要對得上 Google 畫面上的字**。使用者看不懂「用戶端」「重新導向 URI」，但只要
+ *   我們說「那頁上會寫這幾個字」，他就找得到——他是在比對，不是在理解。
+ * ③**要填的欄位就放在這張卡裡**。舊版寫「填進上面的共用帳密欄位」，但那些欄位是從既有流程
+ *   推導出來的——新使用者一條 Google 流程都還沒有，那個欄位**根本不存在**，等於指著空氣叫他填。
  */
 interface ScopeInfo { scope: string; label: string }
 interface GoogleStatus {
@@ -23,6 +29,10 @@ interface GoogleStatus {
 export function GoogleAccountCard() {
   const [status, setStatus] = useState<GoogleStatus | null>(null);
   const [checking, setChecking] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -37,38 +47,107 @@ export function GoogleAccountCard() {
   const health = status.health;
   const broken = linked && health && !health.ok;
 
+  async function saveClient() {
+    if (!clientId.trim() || !clientSecret.trim()) { setSaveError("兩個欄位都要填"); return; }
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const res = await fetch("/api/secrets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secrets: { googleOAuthClientId: clientId.trim(), googleOAuthClientSecret: clientSecret.trim() } }),
+      });
+      if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "儲存失敗");
+      setClientId("");
+      setClientSecret("");
+      await load();
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "儲存失敗");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <section className="space-y-3">
       <div>
         <h2 className="font-medium">Google 帳號</h2>
         <p className="text-sm muted mt-0.5">
-          流程要讀寫 Google 試算表、更新簡報時使用。授權只存在這台電腦，平台每天會自己確認一次還有效——
-          失效會在排程撞上去之前先通知你。
+          連結之後，你的流程就能自動<b>讀寫 Google 試算表、做簡報、寫文件、排行事曆、收表單、管工作清單</b>，
+          不用你自己開網頁操作。授權只存在這台電腦，平台每天會自己確認一次還有效——失效會在排程撞上去之前先通知你。
         </p>
       </div>
 
-      <div className="card p-5 space-y-3">
+      <div className="card p-5 space-y-4">
         {!status.hasClient ? (
-          <div className="text-sm space-y-2">
-            <div style={{ color: "var(--amber)" }}>還沒設定，照這三步做一次就好（之後都不用再回來）</div>
-            <ol className="list-decimal ml-4 space-y-1 muted leading-relaxed">
+          <>
+            <div className="text-sm">
+              <div className="font-medium">還沒設定 · 照下面四步做一次就好（大約 3 分鐘，之後都不用再回來）</div>
+              <div className="faint text-xs mt-1">
+                只需要一個 Google 帳號。過程中會請你在 Google 的網站上按幾個鈕，我把每一步「那頁上會出現的字」都寫出來，照著找就行。
+              </div>
+            </div>
+
+            <ol className="text-sm space-y-4 ml-4 list-decimal">
               <li>
-                <a className="underline" href={status.enableApisUrl} target="_blank" rel="noreferrer">一次啟用平台會用到的 Google API</a>
-                （沒有專案的話這頁會請你先建一個，取任意名稱即可）
+                <b>把 Google 的服務打開</b>
+                <div className="muted mt-1">
+                  <a className="underline" href={status.enableApisUrl} target="_blank" rel="noreferrer">按這裡開啟 Google 的設定頁</a>
+                  ，它會列出九項服務（試算表、簡報、文件…），按下方的<b>「啟用」</b>就好。
+                  <div className="faint text-xs mt-1">第一次使用會先請你「建立專案」，名稱隨便取（例如 my-agent-hub），按建立即可。</div>
+                </div>
               </li>
+
               <li>
-                <a className="underline" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">建立 OAuth 用戶端</a>
-                ：類型選<b>網頁應用程式</b>，「已授權的重新導向 URI」貼下面這一行
-                <CopyLine text={status.redirectUri} />
+                <b>建立一組「鑰匙」</b>
+                <div className="muted mt-1">
+                  <a className="underline" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">按這裡開啟憑證頁</a>
+                  → 上方<b>「+ 建立憑證」</b> → 選<b>「OAuth 用戶端 ID」</b>。
+                  <ul className="list-disc ml-4 mt-1 space-y-0.5">
+                    <li>「應用程式類型」選 <b>網頁應用程式</b>（選成「電腦版」的話下一步會失敗）</li>
+                    <li>找到<b>「已授權的重新導向 URI」</b>→ 按「+ 新增 URI」→ 貼上這一行：</li>
+                  </ul>
+                  <CopyLine text={status.redirectUri} />
+                  <div className="faint text-xs mt-1">按「建立」之後會跳出兩串字，下一步要用，先別關掉。</div>
+                </div>
               </li>
-              <li>把 Client ID 與密鑰填進上面的共用帳密欄位並儲存，這張卡就會出現「連結」按鈕。</li>
+
+              <li>
+                <b>把那兩串字貼進來</b>
+                <div className="mt-2 space-y-2">
+                  <label className="block text-sm">
+                    <span className="muted">Google 那邊叫「用戶端 ID」（很長，結尾是 .apps.googleusercontent.com）</span>
+                    <input className="input mt-1" value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="貼上用戶端 ID" />
+                  </label>
+                  <label className="block text-sm">
+                    <span className="muted">Google 那邊叫「用戶端密鑰」（比較短，通常是 GOCSPX- 開頭）</span>
+                    <input className="input mt-1" type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} placeholder="貼上用戶端密鑰" />
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <button className="btn btn-primary text-sm" onClick={saveClient} disabled={saving}>{saving ? "儲存中…" : "儲存"}</button>
+                    {saveError && <span className="text-sm" style={{ color: "var(--red)" }}>{saveError}</span>}
+                  </div>
+                  <div className="faint text-xs">存好之後，這張卡會出現「連結 Google 帳號」的按鈕，按下去同意就完成了。</div>
+                </div>
+              </li>
+
+              <li>
+                <b>把狀態改成「正式版」</b><span style={{ color: "var(--amber)" }}>（這步別跳過）</span>
+                <div className="muted mt-1">
+                  <a className="underline" href="https://console.cloud.google.com/auth/audience" target="_blank" rel="noreferrer">按這裡開啟</a>
+                  ，看「發布狀態」——如果寫<b>「測試中」</b>，按<b>「發布應用程式」</b>把它改成<b>「正式版」</b>。
+                  <div className="faint text-xs mt-1">
+                    不改的話，Google 會讓授權<b>七天後自動失效</b>，你的排程會在一週後莫名其妙壞掉。這是最常見、也最難自己查出來的坑。
+                  </div>
+                </div>
+              </li>
             </ol>
-          </div>
+          </>
         ) : (
           <>
             <div className="text-sm flex flex-wrap items-center gap-2">
               <span className="muted">目前狀態：</span>
-              {!linked && <span style={{ color: "var(--amber)" }}>尚未連結</span>}
+              {!linked && <span style={{ color: "var(--amber)" }}>鑰匙已存好，還差最後一步：按下面的按鈕授權</span>}
               {linked && !health && <span className="muted">已連結（還沒驗證過）</span>}
               {linked && health?.ok && <span style={{ color: "var(--green)" }}>✓ 有效（最後確認 {formatTime(health.checkedAt)}）</span>}
               {broken && <span style={{ color: "var(--red)" }}>✕ 授權已失效</span>}
@@ -85,15 +164,12 @@ export function GoogleAccountCard() {
               </div>
             )}
 
-            {linked && health?.ok && health.scope && (
-              <div className="text-xs faint">已授權範圍：{health.scope.split(/\s+/).map(shortScope).join("、")}</div>
-            )}
-            {!linked && (
-              <div className="text-xs muted">
-                按下去會一次要齊平台所有 Google 功能的權限（{status.willRequest.map((item) => item.label).join("、")}），
-                之後新增用到 Google 的流程都不用再設定一次。
+            <div className="text-sm">
+              <div className="muted">{linked ? "你現在可以在流程裡自動做這些事：" : "按下去會一次要齊這些權限，之後新增用到 Google 的流程都不用再設定："}</div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
+                {status.willRequest.map((item) => <span key={item.scope}>• {item.label}</span>)}
               </div>
-            )}
+            </div>
 
             <div className="flex flex-wrap items-center gap-2">
               <a className="btn btn-primary text-sm" href="/api/oauth/google/start">
@@ -114,38 +190,39 @@ export function GoogleAccountCard() {
               )}
             </div>
 
-            <details className="text-xs faint">
-              <summary className="cursor-pointer">按了連結卻出現「redirect_uri_mismatch」？</summary>
-              <div className="mt-2 leading-relaxed">
-                到 Google Cloud Console →「憑證」→ 你的 OAuth 用戶端 →「已授權的重新導向 URI」，
-                把這一行加進去（只要做一次）：
-                <CopyLine text={status.redirectUri} />
-              </div>
-            </details>
-            <details className="text-xs faint">
-              <summary className="cursor-pointer">出現「這個 API 尚未在專案中啟用」？</summary>
-              <div className="mt-2 leading-relaxed">
-                代表這個 Google Cloud 專案還沒開啟對應的 API。
-                <a className="underline ml-1" href={status.enableApisUrl} target="_blank" rel="noreferrer">按這裡一次全部啟用</a>
-                （平台會用到的四個 API 一起開，按一次確認就好）。
-              </div>
-            </details>
-            <details className="text-xs faint">
-              <summary className="cursor-pointer">會看到「Google 尚未驗證這個應用程式」是正常的嗎？</summary>
-              <div className="mt-2 leading-relaxed">
-                是。這是你自己建立、只給自己用的憑證，沒有送 Google 審核，所以會出現這個提示——
-                確認是你剛建立的專案後選「進階」→「前往⋯」即可。副作用只有一個：這個專案終身最多
-                100 個使用者（自用完全用不到）。只有要公開發布給不特定人使用時才需要送審。
-              </div>
-            </details>
-            <details className="text-xs faint">
-              <summary className="cursor-pointer">為什麼授權會過期？</summary>
-              <div className="mt-2 leading-relaxed">
-                如果 Google Cloud Console 的「OAuth 同意畫面」發布狀態還停在<b>測試中</b>，Google 會讓授權在
-                <b>7 天後自動失效</b>。把它改成<b>正式版</b>就不會了——這是「明明上次可以、隔幾天又壞」的唯一常見原因。
-                其餘情況（你自己撤銷授權、改密碼）任何設計都救不回來，一定要重新按一次連結。
-              </div>
-            </details>
+            <div className="space-y-1">
+              <details className="text-xs faint">
+                <summary className="cursor-pointer">按了連結，Google 說「redirect_uri_mismatch」？</summary>
+                <div className="mt-2 leading-relaxed">
+                  代表建立鑰匙時漏了那一行網址。到 Google Cloud Console →「憑證」→ 你的 OAuth 用戶端 →
+                  「已授權的重新導向 URI」，把這一行加進去（只要做一次）：
+                  <CopyLine text={status.redirectUri} />
+                </div>
+              </details>
+              <details className="text-xs faint">
+                <summary className="cursor-pointer">出現「Google 尚未驗證這個應用程式」正常嗎？</summary>
+                <div className="mt-2 leading-relaxed">
+                  正常。這是你自己建立、只給自己用的鑰匙，沒有送 Google 審核，所以會出現這個提示——
+                  確認是你剛建立的專案後，選「進階」→「前往⋯」即可。唯一的副作用是這個專案最多 100 個使用者（自用用不到）。
+                </div>
+              </details>
+              <details className="text-xs faint">
+                <summary className="cursor-pointer">授權會不會過期？</summary>
+                <div className="mt-2 leading-relaxed">
+                  正常情況不會，平台每天會自己用一次維持它有效。唯一常見的例外是
+                  <b>發布狀態還停在「測試中」</b>——那樣 Google 會讓授權七天後失效。
+                  <a className="underline ml-1" href="https://console.cloud.google.com/auth/audience" target="_blank" rel="noreferrer">按這裡確認發布狀態</a>。
+                  其餘情況（你自己撤銷、改密碼）按一次「重新連結」就好。
+                </div>
+              </details>
+              <details className="text-xs faint">
+                <summary className="cursor-pointer">出現「這個 API 尚未在專案中啟用」？</summary>
+                <div className="mt-2 leading-relaxed">
+                  代表這個專案還沒開啟對應的服務。
+                  <a className="underline ml-1" href={status.enableApisUrl} target="_blank" rel="noreferrer">按這裡一次全部啟用</a>。
+                </div>
+              </details>
+            </div>
           </>
         )}
       </div>
@@ -158,7 +235,7 @@ function CopyLine({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <span className="flex items-center gap-2 mt-1">
-      <code className="flex-1 p-2 rounded break-all" style={{ background: "var(--surface)" }}>{text}</code>
+      <code className="flex-1 p-2 rounded break-all text-xs" style={{ background: "var(--surface)" }}>{text}</code>
       <button
         className="btn btn-ghost text-xs shrink-0"
         onClick={async () => {
@@ -173,18 +250,6 @@ function CopyLine({ text }: { text: string }) {
       </button>
     </span>
   );
-}
-
-function shortScope(scope: string): string {
-  const name = scope.split("/").pop() ?? scope;
-  return ({
-    "spreadsheets": "試算表（讀寫）",
-    "spreadsheets.readonly": "試算表（唯讀）",
-    "presentations": "簡報",
-    "drive.readonly": "雲端硬碟（唯讀）",
-    "script.projects": "Apps Script 指令碼",
-    "script.deployments": "Apps Script 部署",
-  } as Record<string, string>)[name] ?? name;
 }
 
 function formatTime(iso: string): string {
