@@ -24,44 +24,70 @@ import { walkGraphSteps } from "./workflow/repeatNesting";
 export const GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 export const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 
-/** 這個平台會用到的所有 Google 權限範圍。只列出真的有節點會用的，不做「先要了再說」。 */
+/** 這個平台會用到、或可預見會用到的 Google 權限範圍。 */
 export const GOOGLE_SCOPES = {
   sheetsRead: "https://www.googleapis.com/auth/spreadsheets.readonly",
   sheetsWrite: "https://www.googleapis.com/auth/spreadsheets",
   slides: "https://www.googleapis.com/auth/presentations",
+  docs: "https://www.googleapis.com/auth/documents",
   driveRead: "https://www.googleapis.com/auth/drive.readonly",
+  driveFile: "https://www.googleapis.com/auth/drive.file",
+  calendar: "https://www.googleapis.com/auth/calendar",
+  forms: "https://www.googleapis.com/auth/forms.body",
+  tasks: "https://www.googleapis.com/auth/tasks",
   scriptProjects: "https://www.googleapis.com/auth/script.projects",
   scriptDeployments: "https://www.googleapis.com/auth/script.deployments",
 } as const;
 
 /**
- * 一次要齊：這個平台**所有** Google 功能會用到的權限。
+ * 一次要齊：平台現在會用、以及**可預見會用**的 Google 權限。
  *
- * 為什麼不按「這條流程現在用到什麼」逐次要(那是更小權限的做法、我一開始也是那樣寫的)：
+ * 為什麼不按「這條流程現在用到什麼」逐次要(那是權限最小的做法、我一開始也是那樣寫的)：
  * 使用者的流程是會長大的。今天只更新簡報、下個月加一步寫試算表，逐次授權的話那天就會遇到
  * 一個執行期 403，然後被要求「再去授權一次」——而那時候他八成早就忘記當初是怎麼設定的。
- * 這種「用到才發現要設定」正是要消滅的體驗，所以第一次就把平台做得到的事情一次要齊。
+ * 這種「用到才發現要設定」正是要消滅的體驗。
  *
- * 但**要齊 ≠ 要滿**。這裡刻意只包含「平台真的有節點在用」的範圍：
- * - 沒有 Gmail(讀信是走使用者自己的信箱網頁，不是 Gmail API)
- * - 沒有雲端硬碟的寫入權限(平台不會替使用者刪改檔案)
- * 多要一個用不到的權限，就是多給 AI 產生的程式碼一份它不需要的能力——這跟平台
- * 「未獲授權的外送一律擋下」的底線是同一件事。真的哪天多出需求，下面的缺口偵測會自己講。
+ * **界線只有兩條，其餘一律先要起來：**
+ * ①**受限範圍(restricted)**：Gmail 全系列、完整雲端硬碟。Google 對這類範圍要求通過付費的
+ *   第三方安全稽核才能正式發布，代價完全不成比例。(注意：`drive.readonly` 本身也屬於受限範圍，
+ *   但它換來的是「在資料夾裡找出最新那份檔案」這種核心能力，值得；代價是同意畫面會出現
+ *   「未經驗證」提示、且該專案終身上限 100 個使用者——自用完全沒差，要公開發布才需要送審。)
+ * ②**會刪除或外送資料的能力**：平台不替使用者刪檔、不代發信。這是平台自己的底線
+ *   (「未獲授權的外送一律擋下」)，不能靠「先要起來比較方便」推翻。
+ *
+ * 除此之外(文件、日曆、表單、工作清單…)一律先要——它們都只是「沒有它就得回來重設定一次」，
+ * 沒有任何一項會讓 AI 產生的程式碼多出破壞性的能力。
  */
 export const GOOGLE_FULL_SCOPES: string[] = [
   GOOGLE_SCOPES.sheetsWrite,       // 讀寫試算表(含唯讀)
   GOOGLE_SCOPES.slides,            // 建立/更新簡報
+  GOOGLE_SCOPES.docs,              // 建立/更新文件
   GOOGLE_SCOPES.driveRead,         // 找檔案(例如「資料夾裡最新的那份簡報」)
+  GOOGLE_SCOPES.driveFile,         // 建立檔案、以及回頭改自己建的那些(非敏感範圍)
+  GOOGLE_SCOPES.calendar,          // 讀寫日曆(排會議、把流程結果寫成行程)
+  GOOGLE_SCOPES.forms,             // 讀寫表單(收集回覆後接著處理)
+  GOOGLE_SCOPES.tasks,             // 讀寫工作清單
   GOOGLE_SCOPES.scriptProjects,    // 讓平台自己建立/更新寫入用的 Apps Script
   GOOGLE_SCOPES.scriptDeployments, // 讓平台自己重新部署，範本改版時使用者不用碰編輯器
 ];
 
-/** 上面那些權限對應要在 Google Cloud 專案裡啟用的 API。一次全開，不要等執行時撞 403。 */
+/**
+ * 要在 Google Cloud 專案裡啟用的 API。
+ *
+ * 這件事跟「索取權限」完全不同，不該用同一把尺衡量：**啟用 API 是免費、可逆、而且不授予任何人
+ * 任何存取權**的——真正決定「能做什麼」的是上面的權限範圍。所以這裡不保守，凡是平台可預見會
+ * 打到的一次全開，免得使用者哪天多做一件事就撞上「這個 API 尚未在專案中啟用」然後回來設定。
+ */
 export const GOOGLE_REQUIRED_APIS = [
   "sheets.googleapis.com",
   "slides.googleapis.com",
+  "docs.googleapis.com",
   "drive.googleapis.com",
   "script.googleapis.com",
+  "calendar-json.googleapis.com",
+  "forms.googleapis.com",
+  "tasks.googleapis.com",
+  "people.googleapis.com",
 ] as const;
 
 /** 一個連結把上面全部 API 一次啟用(Google 官方的批次啟用流程，使用者只要按一次確認)。 */
@@ -74,9 +100,25 @@ export const GOOGLE_SCOPE_LABELS: Record<string, string> = {
   [GOOGLE_SCOPES.sheetsWrite]: "讀寫 Google 試算表",
   [GOOGLE_SCOPES.sheetsRead]: "讀取 Google 試算表",
   [GOOGLE_SCOPES.slides]: "建立與更新 Google 簡報",
+  [GOOGLE_SCOPES.docs]: "建立與更新 Google 文件",
   [GOOGLE_SCOPES.driveRead]: "在雲端硬碟裡找檔案（唯讀）",
+  [GOOGLE_SCOPES.driveFile]: "建立檔案，並修改自己建立的那些",
+  [GOOGLE_SCOPES.calendar]: "讀寫 Google 日曆",
+  [GOOGLE_SCOPES.forms]: "讀寫 Google 表單",
+  [GOOGLE_SCOPES.tasks]: "讀寫 Google 工作清單",
   [GOOGLE_SCOPES.scriptProjects]: "代管試算表寫入用的指令碼",
   [GOOGLE_SCOPES.scriptDeployments]: "指令碼改版時自動重新部署",
+};
+
+/**
+ * 這個平台**永遠不要**的權限，以及理由。寫成程式碼(而且有測試盯著)，不是寫在文件裡——
+ * 「先要起來比較方便」在每一次討論裡都很有說服力，需要一個不會被說服的東西擋著。
+ */
+export const GOOGLE_SCOPES_NEVER: Record<string, string> = {
+  "https://www.googleapis.com/auth/gmail.send": "平台不代替使用者發信（匯入流程時連寄信收件人都會清空，這裡不能反過來開後門）",
+  "https://www.googleapis.com/auth/gmail.readonly": "受限範圍，需付費安全稽核；讀信走使用者自己的信箱網頁，不需要它",
+  "https://www.googleapis.com/auth/gmail.modify": "受限範圍，且能改動/刪除信件",
+  "https://www.googleapis.com/auth/drive": "能刪改雲端硬碟上任何檔案——AI 產生的程式碼不該有這種能力",
 };
 
 /**

@@ -131,6 +131,14 @@ export function GoogleAccountCard() {
               </div>
             </details>
             <details className="text-xs faint">
+              <summary className="cursor-pointer">會看到「Google 尚未驗證這個應用程式」是正常的嗎？</summary>
+              <div className="mt-2 leading-relaxed">
+                是。這是你自己建立、只給自己用的憑證，沒有送 Google 審核，所以會出現這個提示——
+                確認是你剛建立的專案後選「進階」→「前往⋯」即可。副作用只有一個：這個專案終身最多
+                100 個使用者（自用完全用不到）。只有要公開發布給不特定人使用時才需要送審。
+              </div>
+            </details>
+            <details className="text-xs faint">
               <summary className="cursor-pointer">為什麼授權會過期？</summary>
               <div className="mt-2 leading-relaxed">
                 如果 Google Cloud Console 的「OAuth 同意畫面」發布狀態還停在<b>測試中</b>，Google 會讓授權在

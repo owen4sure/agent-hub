@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { GOOGLE_FULL_SCOPES, GOOGLE_SCOPES, GOOGLE_SCOPE_LABELS, buildGoogleAuthUrl, claimOAuthState, googleAuthErrorMessage, googleEnableApisUrl, googleRedirectUri, googleScopesForNodes, issueOAuthState, missingGoogleScopes } from "./googleOAuth";
+import { GOOGLE_FULL_SCOPES, GOOGLE_REQUIRED_APIS, GOOGLE_SCOPES, GOOGLE_SCOPES_NEVER, GOOGLE_SCOPE_LABELS, buildGoogleAuthUrl, claimOAuthState, googleAuthErrorMessage, googleEnableApisUrl, googleRedirectUri, googleScopesForNodes, issueOAuthState, missingGoogleScopes } from "./googleOAuth";
 import type { WorkflowNode } from "./workflow/types";
 
 const node = (id: string, type: string, config: Record<string, unknown> = {}): WorkflowNode =>
@@ -79,28 +79,28 @@ test("Google 的錯誤代碼要翻成看得懂的下一步", () => {
 // ── 一次要齊 ──
 // 逐次授權(只要現在這幾條流程用到的)在當下權限最小，但使用者的流程會長大：
 // 下個月加一步寫試算表就撞執行期 403，然後被要求「再去設定一次」。那正是要消滅的體驗。
-test("授權一次要齊平台所有 Google 功能，但不要多要用不到的權限", () => {
-  assert.ok(GOOGLE_FULL_SCOPES.includes(GOOGLE_SCOPES.sheetsWrite));
-  assert.ok(GOOGLE_FULL_SCOPES.includes(GOOGLE_SCOPES.slides));
-  assert.ok(GOOGLE_FULL_SCOPES.includes(GOOGLE_SCOPES.driveRead));
-  assert.ok(GOOGLE_FULL_SCOPES.includes(GOOGLE_SCOPES.scriptProjects));
-  assert.ok(GOOGLE_FULL_SCOPES.includes(GOOGLE_SCOPES.scriptDeployments));
-  // 多要一個用不到的權限＝多給 AI 產生的程式碼一份它不需要的能力
-  const dangerous = [
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/drive",
-  ];
-  for (const scope of dangerous) assert.ok(!GOOGLE_FULL_SCOPES.includes(scope), `不該要 ${scope}`);
+test("授權一次要齊：現在會用的、可預見會用的都先要起來", () => {
+  for (const key of ["sheetsWrite", "slides", "docs", "driveRead", "driveFile", "calendar", "forms", "tasks", "scriptProjects", "scriptDeployments"] as const) {
+    assert.ok(GOOGLE_FULL_SCOPES.includes(GOOGLE_SCOPES[key]), `少了 ${key}——之後用到就得叫使用者回來重設定一次`);
+  }
   // 每一項都要有白話說明——使用者要同意的東西，他得看得懂
   for (const scope of GOOGLE_FULL_SCOPES) assert.ok(GOOGLE_SCOPE_LABELS[scope], `${scope} 少了白話說明`);
 });
 
-test("該啟用的 API 一次全開，而且跟要的權限對得上", () => {
-  const url = googleEnableApisUrl();
-  for (const api of ["sheets.googleapis.com", "slides.googleapis.com", "drive.googleapis.com", "script.googleapis.com"]) {
-    assert.ok(url.includes(api), `批次啟用連結少了 ${api}`);
+// 「先要起來比較方便」在每一次討論裡都很有說服力，所以界線要寫成程式碼＋測試，不是寫在文件裡。
+test("永遠不要的兩類權限：受限的 Gmail 全系列、以及能刪改整個雲端硬碟的", () => {
+  for (const [scope, why] of Object.entries(GOOGLE_SCOPES_NEVER)) {
+    assert.ok(!GOOGLE_FULL_SCOPES.includes(scope), `不該要 ${scope}：${why}`);
+    assert.ok(why.length > 10, `${scope} 要寫清楚為什麼不要，不能只是列在名單裡`);
   }
+});
+
+// 啟用 API 跟索取權限完全是兩件事：啟用是免費、可逆、且不授予任何人任何存取權的，
+// 所以這裡不保守——凡是可預見會打到的一次全開，免得使用者多做一件事就撞 403 又回來設定。
+test("該啟用的 API 一次全開，而且涵蓋所有要的權限對應的服務", () => {
+  const url = googleEnableApisUrl();
+  for (const api of GOOGLE_REQUIRED_APIS) assert.ok(url.includes(api), `批次啟用連結少了 ${api}`);
+  assert.ok(GOOGLE_REQUIRED_APIS.length >= 8, "只開幾個等於把坑留給以後");
 });
 
 // 授權當下要齊了不代表永遠夠(平台會長出新能力、也可能從別台匯入用到新東西的流程)。
