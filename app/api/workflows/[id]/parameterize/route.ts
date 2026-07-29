@@ -6,6 +6,7 @@ import { callAIWithRetry } from "@/lib/aiRetry";
 import { extractJsonObject } from "@/lib/jsonExtract";
 import { callClaudeCode, isClaudeCodeAvailable, isClaudeCodeModel } from "@/lib/claudeCodeClient";
 import { applyParameterization, parameterizePrompt } from "@/lib/workflow/stepParameterize";
+import { isPlaceholderCode } from "@/lib/workflow/codegen";
 
 /**
  * 「把這一步存成我的步驟」按下去時，先問模型：這段程式碼裡哪幾個寫死的值，
@@ -30,8 +31,13 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ error: "目前只有「自訂程式碼」步驟可以存成我的步驟（其他步驟本來就能重複使用）" }, { status: 400 });
   }
   const code = String(node.config.code ?? "").trim();
-  if (!code) {
-    return NextResponse.json({ error: "這一步還沒有程式碼內容——請先讓它成功執行過一次，程式碼才會產生出來" }, { status: 400 });
+  // 空殼(還沒真的產生程式碼)也要擋。這種節點的 code 不是空字串，是一段佔位用的樣板——
+  // 不擋的話會存下一個什麼都不做的「我的步驟」，而使用者要到套用之後才會發現它沒有作用。
+  if (!code || isPlaceholderCode(code)) {
+    return NextResponse.json({
+      error: "這一步的程式碼還沒有真正產生出來（系統會在第一次執行時依說明自動產生）。"
+        + "請先按「▶ 只執行這一步」或整條跑一次，成功之後再回來存成我的步驟。",
+    }, { status: 400 });
   }
 
   const intent = String(node.config.intent ?? "").trim();

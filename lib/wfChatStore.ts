@@ -221,6 +221,24 @@ function restorePendingInput(raw: unknown): PendingChatInput | null {
 
 // localStorage：只存對話與待套用結果(重整也還在)；thinking 不存(重整後那次連線已斷)
 const keyOf = (id: string) => `agenthub_chat_${id}`;
+/**
+ * 「最後一則是使用者說的話、後面什麼都沒有」＝上一次的建立被中斷了。
+ *
+ * 建圖請求是綁在那個分頁上的：使用者重新整理、切走或關掉，請求就被中斷，伺服器端不留任何東西。
+ * 回來看到的是「自己的訊息 + 一片空白」——沒有回覆、沒有錯誤、沒有任何線索。而建圖動輒好幾分鐘，
+ * 中途離開是常態不是意外(真實踩過)。這裡把那個沉默補上。
+ * 標成 isControl，所以它不會被當成 AI 說過的話餵回模型。
+ */
+function withInterruptedNote(chat: ChatMsg[], hasPendingGraph: boolean): ChatMsg[] {
+  const last = chat[chat.length - 1];
+  if (!last || last.role !== "user" || hasPendingGraph) return chat;
+  return [...chat, {
+    role: "assistant" as const,
+    isControl: true,
+    parts: [{ kind: "text" as const, text: "⚠️ 上一次的建立沒有完成——重新整理或關掉頁面會中斷正在進行的建立(這件事通常要幾分鐘)。你剛才那句話還在上面，直接再送一次就可以了。" }],
+  }];
+}
+
 function loadPersisted(id: string): WFChatState | null {
   try {
     const raw = typeof localStorage !== "undefined" && localStorage.getItem(keyOf(id));
@@ -235,7 +253,8 @@ function loadPersisted(id: string): WFChatState | null {
     // 重整後仍必須重新輸入。這讓新手不會因為不小心重新整理就失去唯一的設定入口，又不犧牲帳密安全。
     const pendingInput = restorePendingInput(p.pendingInput);
     return {
-      chat: p.chat ?? [], thinking: false, pendingGraph: p.pendingGraph ?? null, autoTest: null,
+      chat: withInterruptedNote(p.chat ?? [], Boolean(p.pendingGraph)),
+      thinking: false, pendingGraph: p.pendingGraph ?? null, autoTest: null,
       reloadToken: 0, editToast: null, verifying: false, pendingExecution,
       pendingInput, activeExecution: null, pendingApproval: null, pendingTrust: false,
     };
@@ -1555,7 +1574,8 @@ export async function recoverChatRuntime(id: string) {
       };
       if (get(id).chat.length === 0 && Array.isArray(saved.state?.chat) && saved.state.chat.length > 0) {
         set(id, {
-          chat: saved.state.chat,
+          // 從伺服器還原也要補「上次被中斷」的提示：換一台電腦、清掉瀏覽器資料的人走的是這條路。
+          chat: withInterruptedNote(saved.state.chat, Boolean(saved.state.pendingGraph)),
           pendingGraph: saved.state.pendingGraph ?? null,
           pendingExecution: saved.state.pendingExecution ?? null,
           pendingInput: restorePendingInput(saved.state.pendingInput),

@@ -71,3 +71,16 @@ test("打對了就完全不要出聲", () => {
   const available = insertableFieldsFor(flow, "mail");
   assert.deepEqual(findFieldMistakes("{{periodLabel}} 共 {{weekTotal}} 戶", available), []);
 });
+
+// 真實踩過：AI 建的流程用「執行時你自己填」的文字欄位，但可插入清單漏掉觸發參數，
+// 於是使用者打的 {{text}} 被誤報成「前面的步驟沒有這個資料」——假警報最傷的形態，
+// 因為使用者會相信系統、跑去改一個根本沒問題的地方。
+test("執行時要填的欄位也算可插入的資料，而且不能被誤報成不存在", () => {
+  const params = [{ key: "text", label: "要整理的文字" }, { key: "hidden", label: "算出來的", derived: true }];
+  const fields = insertableFieldsFor(flow, "mail", {}, params);
+  const text = fields.find((f) => f.key === "text")!;
+  assert.equal(text.label, "要整理的文字", "用使用者自己看得懂的標籤，不是欄位代號");
+  assert.equal(text.from, "執行時你自己填");
+  assert.ok(!fields.some((f) => f.key === "hidden"), "系統自己算的衍生欄位不用列給他選");
+  assert.deepEqual(findFieldMistakes("原文：{{text}}", fields), [], "執行時填的欄位不能被誤報");
+});

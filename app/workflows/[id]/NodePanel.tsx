@@ -229,6 +229,9 @@ export function NodePanel({
     rejected: { literal: string; reason: string }[]; note: string;
   }>(null);
   const [saveStepBusy, setSaveStepBusy] = useState(false);
+  // 「你要先去執行一次」這種需要使用者動手的訊息不能只用 toast——它 3.5 秒就淡出，
+  // 使用者按完鈕、視線還在按鈕上，回頭就什麼都沒有了(實測：等 9 秒回來畫面完全乾淨)。
+  const [saveStepError, setSaveStepError] = useState<string | null>(null);
   /** 插到游標處，不是無腦接在最後面——使用者通常是想插在某一句話中間。 */
   const insertToken = (key: string, fieldKey: string, current: string, set: (v: string) => void) => {
     const el = fieldRefs.current[fieldKey];
@@ -672,13 +675,14 @@ export function NodePanel({
               disabled={saveStepBusy}
               onClick={async () => {
                 setSaveStepBusy(true);
+                setSaveStepError(null);
                 try {
                   const res = await fetch(`/api/workflows/${workflowId}/parameterize`, {
                     method: "POST", headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ nodeId: node.id }),
                   });
                   const data = await res.json().catch(() => ({}));
-                  if (!res.ok) { onToast((data as { error?: string }).error ?? "沒辦法存成步驟"); return; }
+                  if (!res.ok) { setSaveStepError((data as { error?: string }).error ?? "沒辦法存成步驟"); return; }
                   setSaveStepDraft({
                     name: String(data.name ?? node.label),
                     description: String(data.intent ?? ""),
@@ -693,6 +697,11 @@ export function NodePanel({
             >
               {saveStepBusy ? "整理中…" : "⭐ 存成我的步驟"}
             </button>
+            {saveStepError && (
+              <p className="text-xs rounded-md border p-2" style={{ borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))", color: "var(--amber)" }}>
+                {saveStepError}
+              </p>
+            )}
           </div>
         )}
 

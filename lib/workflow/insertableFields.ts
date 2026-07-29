@@ -62,11 +62,25 @@ export function insertableFieldsFor(
   flow: DataFlowLike,
   nodeId: string,
   lastValues: Record<string, unknown> = {},
+  triggerParams: { key: string; label?: string; derived?: boolean }[] = [],
 ): InsertableField[] {
   const index = flow.nodes.findIndex((node) => node.id === nodeId);
   if (index < 0) return [];
   const seen = new Set<string>();
   const out: InsertableField[] = [];
+  // 「執行時要填的欄位」也是可以插入的資料，而且對使用者來說是最直覺的那一種——
+  // 漏掉的話後果不只是少幾個選項：他打了 {{text}} 會被誤報成「前面的步驟沒有這個資料」，
+  // 而那正是假警報最傷的形態(真實踩過：AI 建的流程用執行時填的文字，面板卻說它不存在)。
+  for (const param of triggerParams) {
+    if (!param?.key || param.derived || seen.has(param.key)) continue;
+    seen.add(param.key);
+    out.push({
+      key: param.key,
+      label: param.label || FRIENDLY[param.key] || param.key,
+      from: "執行時你自己填",
+      ...(param.key in lastValues ? { sample: previewValue(lastValues[param.key]) } : {}),
+    });
+  }
   for (const node of flow.nodes.slice(0, index)) {
     for (const field of node.outputs) {
       if (field.status === "unknown-source" || !field.name || seen.has(field.name)) continue;

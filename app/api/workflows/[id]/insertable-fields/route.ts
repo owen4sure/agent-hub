@@ -17,7 +17,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   if (!workflow) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
   if (!nodeId) return NextResponse.json({ error: "缺少 nodeId" }, { status: 400 });
 
-  return NextResponse.json({ fields: insertableFieldsFor(buildWorkflowDataFlow(workflow), nodeId, lastRunValues(id)) });
+  return NextResponse.json({
+    fields: insertableFieldsFor(buildWorkflowDataFlow(workflow), nodeId, lastRunValues(id), workflow.triggerParams ?? []),
+  });
 }
 
 /**
