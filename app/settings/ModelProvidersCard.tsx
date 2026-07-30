@@ -31,6 +31,9 @@ export function ModelProvidersCard() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [testing, setTesting] = useState("");
+  // 「先測再存」的兩個結果。使用者要求：「填入要可以驗證，也要能驗證是否能看圖」
+  const [formTest, setFormTest] = useState<{ kind: string; ok: boolean; message: string } | null>(null);
+  const [formTesting, setFormTesting] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -45,6 +48,28 @@ export function ModelProvidersCard() {
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load(); }, [load]);
+
+  /** 還沒儲存就先測——第一次接自己的模型時位址打錯是常態，不該先存一個錯的再回頭改。 */
+  async function testForm(kind: "text" | "vision") {
+    setFormTesting(kind);
+    setFormTest(null);
+    try {
+      const res = await fetch("/api/model-providers/test", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          baseUrl: form.baseUrl, apiKey: form.apiKey,
+          model: form.models.split(/[,\n]/)[0]?.trim(), kind,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string; error?: string };
+      if (data.error) { setFormTest({ kind, ok: false, message: data.error }); return; }
+      setFormTest({ kind, ok: Boolean(data.ok), message: data.message ?? "" });
+      // 看圖測試通過就自動勾起來——這件事有客觀答案，不該讓使用者用猜的。
+      if (kind === "vision") setForm((f) => ({ ...f, vision: Boolean(data.ok) }));
+    } finally {
+      setFormTesting("");
+    }
+  }
 
   async function save() {
     setBusy(true);
@@ -71,16 +96,16 @@ export function ModelProvidersCard() {
     await load();
   }
 
-  async function test(ref: string) {
-    setTesting(ref);
+  async function test(ref: string, kind: "text" | "vision" = "text") {
+    setTesting(ref + kind);
     setMessage("");
     setError("");
     try {
-      const res = await fetch("/api/test-model", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: ref }),
+      const res = await fetch("/api/model-providers/test", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ref, kind }),
       });
       const data = (await res.json()) as { ok: boolean; message: string };
-      if (data.ok) setMessage(`✅ ${ref} 測試通過：${data.message.slice(0, 80)}`);
+      if (data.ok) setMessage(`✅ ${ref}：${data.message}`);
       else setError(`❌ ${ref}：${data.message}`);
       await load();
     } finally {
@@ -133,7 +158,7 @@ export function ModelProvidersCard() {
                       className="btn btn-ghost text-xs"
                       title="點一下測試這個模型通不通"
                     >
-                      {choice?.verified ? "✓ " : ""}{m}{testing === (choice?.ref ?? m) ? "（測試中…）" : ""}
+                      {choice?.verified ? "✓ " : ""}{choice?.vision ? "🖼️ " : ""}{m}{testing === `${choice?.ref ?? m}text` ? "（測試中…）" : ""}
                     </button>
                   );
                 })}
@@ -163,18 +188,38 @@ export function ModelProvidersCard() {
                 <label className="text-xs muted">有哪些模型代號（逗號或換行分隔）</label>
                 <input value={form.models} onChange={(e) => setForm({ ...form, models: e.target.value })} placeholder="gemma4" className="input text-sm w-full font-mono" />
               </div>
-              <label className="flex items-center gap-2 text-xs">
-                <input type="checkbox" checked={form.vision} onChange={(e) => setForm({ ...form, vision: e.target.checked })} />
-                這個來源的模型看得懂圖片（會被拿去讀截圖、驗證碼）
-              </label>
+              {/* 「看不看得懂圖片」有客觀答案，不該讓使用者用猜的打勾——實測一次就知道。
+                  尤其這個專案自己記錄過：有的模型不會說「我看不到」，而是自信地看圖亂講。 */}
+              <div className="flex flex-wrap gap-2 items-center">
+                <button
+                  type="button"
+                  onClick={() => void testForm("text")}
+                  disabled={Boolean(formTesting) || !form.baseUrl.trim() || !form.models.trim()}
+                  className="btn btn-ghost text-xs"
+                >{formTesting === "text" ? "測試中…" : "① 測連線"}</button>
+                <button
+                  type="button"
+                  onClick={() => void testForm("vision")}
+                  disabled={Boolean(formTesting) || !form.baseUrl.trim() || !form.models.trim()}
+                  className="btn btn-ghost text-xs"
+                  title="給它一張只有 4 個字元的圖，看它能不能念出來"
+                >{formTesting === "vision" ? "測試中…" : "② 測看不看得懂圖片"}</button>
+                <span className="text-xs muted">{form.vision ? "🖼️ 已標記為看得懂圖片" : "尚未確認看圖能力"}</span>
+              </div>
+              {formTest && (
+                <p className="text-xs" style={{ color: formTest.ok ? "var(--green)" : "var(--red)" }}>
+                  {formTest.ok ? "✅ " : "❌ "}{formTest.message}
+                </p>
+              )}
               <p className="text-xs faint">
-                不確定就先不要勾。平台需要讀圖時會自動改用有勾的模型；勾錯了會讓它「自信地看圖亂講」，比不能讀圖更糟。
+                看圖測試的做法：產生一張只有 4 個隨機字元的圖，請它念出來——念對才算數。
+                有些模型不會說「我看不到」，而是自信地亂講，所以不能問它「你看得到嗎」。
               </p>
               <div className="flex gap-2">
                 <button onClick={() => void save()} disabled={busy || !form.baseUrl.trim() || !form.models.trim()} className="btn btn-primary text-sm">
                   {busy ? "儲存中…" : "加入"}
                 </button>
-                <button onClick={() => { setAdding(false); setError(""); }} className="btn btn-ghost text-sm">取消</button>
+                <button onClick={() => { setAdding(false); setError(""); setFormTest(null); }} className="btn btn-ghost text-sm">取消</button>
               </div>
             </div>
           )}
