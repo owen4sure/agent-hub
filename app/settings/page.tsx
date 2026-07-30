@@ -7,6 +7,7 @@ import { PageHeader } from "@/components/ui";
 import { RevealCopyButton } from "./RevealCopyButton";
 import { GoogleAccountCard } from "./GoogleAccountCard";
 import { AuditLogCard } from "./AuditLogCard";
+import { OutputFolderCard } from "./OutputFolderCard";
 import { RetentionCard } from "./RetentionCard";
 
 interface SecretField { key: string; label: string; type: string; }
@@ -593,6 +594,7 @@ export default function SettingsPage() {
         </section>
       )}
 
+      <OutputFolderCard />
       <RetentionCard />
       <AuditLogCard />
     </div>

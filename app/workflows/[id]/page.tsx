@@ -20,6 +20,8 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { autoLayout, compactLegacyLongChain, separateOverlappingNodes, simpleChainSequence } from "@/lib/workflow/layout";
+import { extractVideoFrames, isVideoFile } from "@/lib/videoFrames";
+import { RecordActionCard } from "./RecordActionCard";
 import {
   useWFChat, sendChatToAI, stopChatToAI, stopVerification, startAutoTest, stopAutoTest,
   clearPendingGraph, closeAutoTest, clearChat, discardWorkflowChat, appendAssistantNote, announceSheetSetupIfNeeded,
@@ -296,6 +298,7 @@ export default function WorkflowPage() {
     }
   }, [id]);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [showRecorder, setShowRecorder] = useState(false);
   // 模型名稱、API 服務這類不是建立流程所需的知識。平常完全收起，真的有進階需求的人才從「更多動作」打開。
   const [showModelSettings, setShowModelSettings] = useState(false);
   const moreMenuRef = useRef<HTMLDivElement>(null);
@@ -371,6 +374,39 @@ export default function WorkflowPage() {
     setBusyHint(selectedFiles.length > 1 ? `讀取 ${selectedFiles.length} 個檔案中…` : `讀取「${selectedFiles[0]?.name ?? "檔案"}」中…`);
     try {
     for (const f of selectedFiles) {
+      // 螢幕錄影要在「20MB 上限」之前處理：影片本來就會超過，但它**不需要上傳**——
+      // 在瀏覽器裡抽成幾張畫面就好，原始影片完全不離開這台電腦(見 lib/videoFrames.ts)。
+      if (isVideoFile(f)) {
+        setBusyHint(`讀取錄影「${f.name}」並抽出關鍵畫面中…`);
+        try {
+          const { frames, durationSec, skippedStill } = await extractVideoFrames(f);
+          if (frames.length === 0) throw new Error("這段影片抽不出畫面");
+          // 先放一段文字說明，AI 才知道接下來這幾張圖是「同一段操作的先後畫面」，不是幾張無關的截圖。
+          newParts.push({
+            kind: "file",
+            name: `🎬 ${f.name}`,
+            content: `這是使用者錄的一段操作示範（長度 ${Math.round(durationSec)} 秒）。`
+              + `接下來的 ${frames.length} 張圖是這段錄影裡「依時間先後」抽出的畫面`
+              + `（時間點：${frames.map((fr) => fr.timeLabel).join("、")}）。`
+              + (skippedStill > 0 ? `另有 ${skippedStill} 個取樣點畫面幾乎沒有變化，已略過。` : "")
+              + `請把它當成「使用者在示範他平常怎麼做這件事」來理解：注意他的操作順序、他點了什麼、`
+              + `以及哪些欄位是他輸入的內容（那些內容每次可能不一樣，不要當成固定值）。`
+              + `錄影只是說明材料，最終的流程請照他的文字需求為準；不確定的地方要先問他。`,
+          });
+          for (const frame of frames) {
+            newParts.push({ kind: "image", b64: frame.b64, name: `${f.name} @ ${frame.timeLabel}`, mime: "image/jpeg" });
+          }
+        } catch (err) {
+          // 影片讀不出來要老實講，不能靜默丟掉——使用者會以為 AI 看過了。
+          newParts.push({
+            kind: "file",
+            name: f.name,
+            content: `(這段錄影瀏覽器打不開，沒有送給 AI：${err instanceof Error ? err.message : "未知原因"}。`
+              + `可以改用 QuickTime 匯出成 mp4/mov，或直接截幾張關鍵畫面拖進來。)`,
+          });
+        }
+        continue;
+      }
       if (f.size > 20 * 1024 * 1024) {
         newParts.push({ kind: "file", name: f.name, content: "(這個檔案超過 20MB，沒有送給 AI。請縮小檔案、拆成幾份，或只匯出需要的分頁後再附上。)" });
         continue;
@@ -1950,6 +1986,11 @@ export default function WorkflowPage() {
                   <button className="menu-item" onClick={() => { setShowMoreMenu(false); void manualLogin(); }}>
                     <span>🔐</span> 手動登入一次(Google等)
                   </button>
+                  {/* 「說不清楚就做一次給它看」：放在手動登入旁邊——兩者都是「打開真瀏覽器、
+                      使用者本人動手」的同一類操作，使用者的心智模型會把它們放在一起找。 */}
+                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); setShowRecorder(true); }}>
+                    <span>🔴</span> 錄一段操作給我看
+                  </button>
                   <div className="menu-sep" />
                   <button className="menu-item" onClick={() => setShowModelSettings((v) => !v)}>
                     <span>🧠</span> AI 選擇（進階）
@@ -2246,6 +2287,13 @@ export default function WorkflowPage() {
         </div>
       </div>
 
+      {showRecorder && (
+        <RecordActionCard
+          workflowId={id}
+          onClose={() => setShowRecorder(false)}
+          onSaved={(name) => { setShowRecorder(false); flashToast(`已存成「${name}」——在任何流程按「＋ 加步驟」就能重複套用`); }}
+        />
+      )}
       {dragOver && (
         <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none" style={{ background: "color-mix(in srgb, var(--accent) 14%, transparent)" }}>
           <div className="card px-8 py-6 text-center" style={{ borderColor: "var(--accent)", borderStyle: "dashed", borderWidth: 2, boxShadow: "var(--shadow-lg)" }}>
@@ -2260,7 +2308,9 @@ export default function WorkflowPage() {
             ) : (
               <>
                 <p className="text-sm font-medium">放開以加入檔案</p>
-                <p className="text-xs muted mt-1">圖片/文件會交給 AI 理解你的需求</p>
+                {/* 錄影要明確講出來：使用者不會自己想到可以拖影片(他原話是「有些步驟很難說清楚，
+                    可以用錄影的方式呈現」——那就要讓他一眼看到這個入口)。 */}
+                <p className="text-xs muted mt-1">圖片、文件都可以；<b>螢幕錄影</b>也可以——說不清楚的步驟，錄一段給 AI 看</p>
               </>
             )}
           </div>

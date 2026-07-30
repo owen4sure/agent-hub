@@ -474,7 +474,7 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
       // apply:false = 先算出修改、過完震盪檢查才真的寫進磁碟——先套用再檢查的話，
       // 「重複的壞改法」即使被攔下不重跑，也已經無聲寫進 workflow(驗證過失敗的 config 留在流程上)。
       // signal:loopSignal——這段 AI 呼叫沒有 runId 可以 cancelRun，是唯一能中斷它的辦法。
-      const repair = await aiRepairGraph(client, model, id, failedNode, errBeforeFix, result.runId, { attemptHistory, apply: false, signal: loopSignal });
+      const repair = await aiRepairGraph(client, model, id, failedNode, errBeforeFix, result.runId, { attemptHistory, apply: false, signal: loopSignal, source: "autorun" });
       edits = repair.edits;
       explanation = repair.explanation;
       structure = repair.structure;

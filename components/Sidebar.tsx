@@ -11,6 +11,7 @@ const NAV = [
   { href: "/schedules", label: "排程 & 執行", icon: "⏰" },
   { href: "/runs", label: "執行紀錄", icon: "☰" },
   { href: "/files", label: "產出檔案", icon: "▤" },
+  { href: "/reliability", label: "可靠性", icon: "◉" },
   { href: "/settings", label: "設定", icon: "⚙" },
 ];
 

@@ -976,7 +976,7 @@ async function proposeFixInBackground(workflowId: string, runId: string, nodeId:
     // 在上游沒把資料準備好的節點(見 aiRepairGraph 文件註解)。以前這裡用單節點的 aiRepairNode，
     // 手動修復跟自動監控失敗的修復能力不一致：對著錯的節點瞎改，真正的上游問題永遠修不到。
     const repair = await Promise.race([
-      aiRepairGraph(client, model, workflowId, nodeId, error, runId, { apply: false }),
+      aiRepairGraph(client, model, workflowId, nodeId, error, runId, { apply: false, source: "background" }),
       new Promise<never>((_, rej) => setTimeout(() => rej(new Error("想修法逾時")), 5 * 60 * 1000)),
     ]);
     if (repair.edits.length === 0) throw new Error("沒有找到有效的修復方案");

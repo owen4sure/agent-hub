@@ -6,6 +6,7 @@ import ExcelJS from "exceljs";
 import type { NodeDefinition } from "../types";
 import { PermanentError } from "../types";
 import { cfgStr, cfgNum, cfgBool } from "../nodeHelpers";
+import { resolveExtraSaveDir } from "../../outputFolder";
 
 /** 把日期欄的值正規化成 YYYYMMDD 數字(吃 20260701 數字、Date 物件、"2026-07-01"/"2026/7/1" 字串)；不是日期回 0 */
 function toYYYYMMDD(v: unknown): number {
@@ -269,11 +270,17 @@ export const excelProcessNode: NodeDefinition = {
     ctx.log(`已存檔：${outputPath}`);
     ctx.registerFile(filename, outputPath, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
 
+    // 另外存一份給使用者。目標資料夾由「設定 → 產出檔案要放哪」決定，沒設定過才沿用桌面
+    // (使用者原話：「不是都直接丟在桌面上」——原本這裡是寫死 ~/Desktop，他沒得選)。
+    // 欄位名稱保留 desktopPath：既有流程的下游可能引用 {{desktopPath}}，改名會讓那些流程壞掉。
     let desktopPath: string | null = null;
     try {
-      desktopPath = path.join(os.homedir(), "Desktop", filename);
-      fs.copyFileSync(outputPath, desktopPath);
-      ctx.log(`已複製到桌面：${desktopPath}`);
+      const targetDir = resolveExtraSaveDir(null, path.join(os.homedir(), "Desktop"));
+      if (targetDir) {
+        desktopPath = path.join(targetDir, filename);
+        fs.copyFileSync(outputPath, desktopPath);
+        ctx.log(`已另存一份到：${desktopPath}`);
+      }
     } catch {
       desktopPath = null;
     }

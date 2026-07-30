@@ -437,7 +437,7 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
         console.info("[workflow-autofix] asking-model", { workflowId: id, attempt, repairTarget, failedRunId: lastFailedRunId ?? null });
         // apply:false = 過完震盪檢查才寫進磁碟(重複的壞改法不能無聲留在流程上)，與 autorun 同一套。
         // signal:loopSignal——這段 AI 呼叫沒有 runId 可以 cancelRun，是唯一能中斷它的辦法。
-        const repair = await aiRepairGraph(client, model, id, repairTarget, lastError, lastFailedRunId, { attemptHistory, apply: false, signal: loopSignal, parts: repairParts });
+        const repair = await aiRepairGraph(client, model, id, repairTarget, lastError, lastFailedRunId, { attemptHistory, apply: false, signal: loopSignal, parts: repairParts, source: "autofix" });
         edits = repair.edits;
         console.info("[workflow-autofix] proposal", {
           workflowId: id,

@@ -19,6 +19,7 @@ import { syncLabelForDestinationChange, type ReplacePair } from "./textReplace";
 import { applyCodeReplacements, CODE_TRUNCATION_MARKER, type CodeReplacement } from "./codeReplace";
 import { parseUserFields } from "./userStepFields";
 import { applyGraphStructureEdits, hasStructureChanges, planGraphStructureEdits, type GraphStructureEdits, type StructureChange } from "./graphStructure";
+import { recordRepairAttempt, type RepairSource } from "./repairMetrics";
 import { probeSlidesPresentationPages } from "../googleSlidesApi";
 import { resolvePresentationId } from "./nodes/googleSlidesRefresh";
 import { parseSheetUrl } from "./nodes/googleSheet";
@@ -536,6 +537,13 @@ export interface RepairAttempt {
   outcome: string;
 }
 
+/**
+ * 對外的入口：只多做一件事——把「這次修復嘗試」記進量測表。
+ *
+ * 刻意用一層薄包裝，而不是在下面那個函式散落的十幾個 return 各記一次：
+ * 那個函式是已經在正式使用、修過很多真實 bug 的東西，為了埋量測去動它的控制流風險太高。
+ * 用 finally 也能涵蓋「修復自己拋錯」那條路(那也是一次失敗的嘗試，不能不算)。
+ */
 export async function aiRepairGraph(
   client: OpenAI,
   model: string,
@@ -543,7 +551,34 @@ export async function aiRepairGraph(
   failedNodeId: string,
   lastError: string,
   repairRunId: string | undefined,
-  opts: { apply?: boolean; attemptHistory?: RepairAttempt[]; signal?: AbortSignal; parts?: MessagePart[] } = {},
+  opts: {
+    apply?: boolean; attemptHistory?: RepairAttempt[]; signal?: AbortSignal; parts?: MessagePart[];
+    /** 這次修復是從哪裡發起的(讓儀表板分得出「點紅色節點修」跟「自動測到會跑」的成績) */
+    source?: RepairSource;
+  } = {},
+): Promise<GraphRepairResult> {
+  let edits = 0;
+  let skipped = 0;
+  try {
+    const result = await aiRepairGraphInner(client, model, workflowId, failedNodeId, lastError, repairRunId, opts);
+    edits = result.edits.length;
+    skipped = result.skipped?.length ?? 0;
+    return result;
+  } finally {
+    recordRepairAttempt({
+      workflowId, nodeId: failedNodeId, source: opts.source ?? "unknown", edits, skipped, error: lastError,
+    });
+  }
+}
+
+async function aiRepairGraphInner(
+  client: OpenAI,
+  model: string,
+  workflowId: string,
+  failedNodeId: string,
+  lastError: string,
+  repairRunId: string | undefined,
+  opts: { apply?: boolean; attemptHistory?: RepairAttempt[]; signal?: AbortSignal; parts?: MessagePart[]; source?: RepairSource } = {},
 ): Promise<GraphRepairResult> {
   const nativeSlidesMigration = migrateNativeGoogleSlidesRefresh(workflowId, failedNodeId);
   if (nativeSlidesMigration) {

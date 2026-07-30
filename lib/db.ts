@@ -370,6 +370,22 @@ function init(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at DESC);
     CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action, at DESC);
+
+    -- 修復迴圈的量測。使用者最在意的三個問題之一是「出問題 AI 修不修得了」，而平台原本
+    -- 答不出來：修復跑完就結束，沒有留下任何痕跡。這張表記每一次修復嘗試，成敗由「之後
+    -- 那條流程的下一次執行結果」推導(定義寫在 repairMetrics.ts，並且會對使用者講明)。
+    CREATE TABLE IF NOT EXISTS repair_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      at TEXT NOT NULL,
+      workflow_id TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      edits INTEGER NOT NULL DEFAULT 0,
+      skipped INTEGER NOT NULL DEFAULT 0,
+      error_signature TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_repair_attempts_at ON repair_attempts(at DESC);
+    CREATE INDEX IF NOT EXISTS idx_repair_attempts_wf ON repair_attempts(workflow_id, at);
   `);
 
   // 無痛升級：schema 有變動時對既有 DB 補欄位，永遠不需要刪 DB(才不會弄丟已存的帳密/設定)。

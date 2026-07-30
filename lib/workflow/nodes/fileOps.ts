@@ -5,6 +5,7 @@ import { PermanentError } from "../types";
 import { cfgStr } from "../nodeHelpers";
 import { extractTextFromFile } from "../../textExtract";
 import { fileSourceEvidence } from "../runtimeEvidence";
+import { resolveExtraSaveDir } from "../../outputFolder";
 
 function guessMime(filename: string): string {
   const ext = path.extname(filename).toLowerCase();
@@ -28,7 +29,7 @@ export const writeFileNode: NodeDefinition = {
   configSchema: [
     { key: "fileName", label: "檔名(含副檔名)", type: "text", default: "output.txt" },
     { key: "content", label: "檔案內容(可用 {{欄位}})", type: "textarea" },
-    { key: "extraDir", label: "額外複製到(絕對路徑資料夾，留空=只存產出資料夾)", type: "text", allowEmpty: true },
+    { key: "extraDir", label: "另存到哪個資料夾(留空=用「設定」裡指定的產出資料夾)", type: "text", allowEmpty: true },
   ],
   outputs: "savedPath(存好的檔案路徑), savedFileName(檔名)",
   retryable: false,
@@ -43,13 +44,15 @@ export const writeFileNode: NodeDefinition = {
     ctx.registerFile(fileName, savedPath, guessMime(fileName));
     ctx.log(`已寫入 ${fileName}(${content.length} 字)`);
 
-    const extraDir = cfgStr(ctx, "extraDir", "");
-    if (extraDir.trim()) {
+    // 目的地優先順序：這個節點自己填的 > 「設定 → 產出檔案要放哪」的全域設定 > 不另外複製。
+    // 沒有全域設定時行為跟以前完全一樣(留空=只留在產出資料夾)，不會有人的檔案突然跑去別的地方。
+    const extraDir = resolveExtraSaveDir(cfgStr(ctx, "extraDir", ""));
+    if (extraDir) {
       if (!fs.existsSync(extraDir) || !fs.statSync(extraDir).isDirectory()) {
-        throw new PermanentError(`額外複製的目的地不存在或不是資料夾：${extraDir}`);
+        throw new PermanentError(`要另存的資料夾不存在或不是資料夾：${extraDir}——到「設定 → 產出檔案要放哪」重新選一個。`);
       }
       fs.copyFileSync(savedPath, path.join(extraDir, fileName));
-      ctx.log(`已額外複製到 ${extraDir}`);
+      ctx.log(`已另存一份到 ${extraDir}`);
     }
     return { output: { savedPath, savedFileName: fileName } };
   },

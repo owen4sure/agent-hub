@@ -6,6 +6,7 @@ import { resolveParams } from "./relativeDate";
 import { getAutomationReadiness } from "./workflow/automationReadiness";
 import { sweepGoogleTokenHealth } from "./googleTokenHealth";
 import { sweepRetentionDaily } from "./retention";
+import { sweepStalledSchedules, warnScheduleBlocked } from "./scheduleWatchdog";
 import { sweepExpiredApprovals } from "./approvals";
 import { sweepHealthChecks } from "./workflow/healthCheck";
 
@@ -348,6 +349,14 @@ function tick() {
   const minuteKey = `${dt.year}-${pad(dt.month)}-${pad(dt.day)}T${pad(dt.hour)}:${pad(dt.minute)}`;
   const nowStr = `${dt.year}-${pad(dt.month)}-${pad(dt.day)} ${pad(dt.hour)}:${pad(dt.minute)}`;
 
+  // 排程器自己壞了的偵測(下次執行時間過期超過一天還沒被更新)。放在取排程之前，
+  // 就算下面的迴圈因為某條排程一直出錯而卡住，這個掃描仍然會先跑到。
+  try {
+    sweepStalledSchedules(nowStr);
+  } catch (err) {
+    console.error("[scheduler] 卡住偵測失敗:", err);
+  }
+
   const schedules = db.prepare(`SELECT * FROM schedules WHERE enabled = 1`).all() as ScheduleRow[];
   for (const sched of schedules) {
     try {
@@ -367,6 +376,18 @@ function tick() {
       if (!readiness.ready) {
         // 不搶佔 last_fired_minute：完成檢查後，下一個 tick 仍能補跑這次排程。
         console.warn(`[scheduler] ${wf.name}: 自動觸發檢查未通過，暫停背景排程 (${readiness.items[0]?.title ?? "未知原因"})`);
+        // **只寫 log 是不夠的**：真實踩過——一條排程開著、畫面看起來正常、每分鐘都被這裡跳過，
+        // 長期完全不執行卻沒有任何人發現。無人值守的產品裡，「安靜地不執行」比明確失敗危險得多。
+        // 只在「真的到了該跑的時間」才通知，否則一條草稿排程會每分鐘喊一次(看門狗自己也有每日節流)。
+        const dueNow = cronMatches(sched.cron, dt) || (sched.next_run_at != null && sched.next_run_at <= nowStr);
+        if (dueNow) {
+          warnScheduleBlocked({
+            scheduleId: sched.id,
+            workflowId: sched.workflow_id,
+            workflowName: wf.name,
+            reason: readiness.items[0]?.title ?? "自動觸發檢查沒通過",
+          });
+        }
         continue;
       }
 
