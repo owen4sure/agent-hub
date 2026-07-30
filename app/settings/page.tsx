@@ -47,6 +47,8 @@ export default function SettingsPage() {
   const [effort, setEffort] = useState<"low" | "medium" | "high">("high");
   const [effortSaved, setEffortSaved] = useState<"low" | "medium" | "high">("high");
   const [effortMsg, setEffortMsg] = useState(false);
+  // 使用者自己接的模型(地端/別台機器)。清單來自 /api/model-providers，不是寫死的 MODELS。
+  const [extraModels, setExtraModels] = useState<{ ref: string; model: string; providerLabel: string; verified: boolean; vision: boolean }[]>([]);
 
   useEffect(() => {
     (async () => {
@@ -68,6 +70,10 @@ export default function SettingsPage() {
       } catch {
         setLoadError(true);
       }
+      try {
+        const d = await (await fetch("/api/model-providers")).json();
+        setExtraModels((d.choices ?? []).filter((c: { providerId: string }) => c.providerId !== "default"));
+      } catch { /* 沒接自訂來源時就是空的，不算錯誤 */ }
       try {
         const d = await (await fetch("/api/workflows")).json();
         const details = await Promise.all((d.workflows ?? []).map((w: { id: string }) => fetch(`/api/workflows/${w.id}`).then((r) => r.json())));
@@ -274,6 +280,15 @@ export default function SettingsPage() {
                   const captcha = supportsCaptchaVision(m);
                   return <option key={m} value={m}>{working ? "✓ " : ""}{vision ? "🖼️ " : ""}{captcha ? "🔤 " : ""}{m}</option>;
                 })}
+                {/* 使用者自己接的模型也要出現在這裡，否則他永遠只看得到內建那幾個，
+                    會以為平台就是只能用這些(真實回饋：「我沒看到還能填別的模型」)。 */}
+                {extraModels.length > 0 && (
+                  <optgroup label="你自己接的">
+                    {extraModels.map((c) => (
+                      <option key={c.ref} value={c.ref}>{c.verified ? "✓ " : ""}{c.vision ? "🖼️ " : ""}{c.model}（{c.providerLabel}）</option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             )}
             <button
@@ -288,6 +303,11 @@ export default function SettingsPage() {
           </div>
         </div>
       </section>
+
+      {/* 「我沒看到還能填別的模型」——這張卡片原本排在整頁 87% 的位置(所有帳密後面)，
+          而使用者要找「能不能用別的模型」時，眼睛看的是上面那個「模型 API」區塊。
+          功能找不到就等於不存在，所以搬到它正下方。 */}
+      <ModelProvidersCard />
 
       <section className="card p-5 space-y-3">
         <div>
@@ -595,7 +615,6 @@ export default function SettingsPage() {
         </section>
       )}
 
-      <ModelProvidersCard />
       <OutputFolderCard />
       <RetentionCard />
       <AuditLogCard />

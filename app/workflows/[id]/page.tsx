@@ -312,6 +312,7 @@ export default function WorkflowPage() {
   // 開源可攜性缺口)。預設仍是下拉(對用內建免費服務的人最省事)，但可以切換成文字輸入自訂代號；
   // 目前存的 model 若本來就不在清單裡(表示已經自訂過)，直接視覺上以自訂模式呈現。
   const [showCustomModel, setShowCustomModel] = useState(false);
+  const [extraModels, setExtraModels] = useState<{ ref: string; model: string; providerLabel: string }[]>([]);
   const [sidePanelWidth, setSidePanelWidth] = useState(440);
   const [panelWidthReady, setPanelWidthReady] = useState(false);
   const [chainStepIndex, setChainStepIndex] = useState(0);
@@ -622,6 +623,17 @@ export default function WorkflowPage() {
     },
     [id, setWf, flashToast],
   );
+
+  // 使用者自己接的模型來源(設定頁加的)。掛載時抓一次，讓流程的模型選單也列得出來。
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => {
+    void (async () => {
+      try {
+        const d = await (await fetch("/api/model-providers")).json();
+        setExtraModels((d.choices ?? []).filter((c: { providerId: string }) => c.providerId !== "default"));
+      } catch { /* 沒接自訂來源時就是空的，不算錯誤 */ }
+    })();
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -2024,6 +2036,15 @@ export default function WorkflowPage() {
                           {MODELS.filter((m) => (KNOWN_WORKING_MODELS as readonly string[]).includes(m) || m.startsWith("claude-code")).map((m) => (
                             <option key={m} value={m}>{m}</option>
                           ))}
+                          {/* 使用者自己接的模型(地端/別台機器)也要在這裡選得到，
+                              否則他加完來源之後在流程裡還是找不到它(真實回饋：「我沒看到還能填別的模型」)。 */}
+                          {extraModels.length > 0 && (
+                            <optgroup label="你自己接的">
+                              {extraModels.map((c) => (
+                                <option key={c.ref} value={c.ref}>{c.model}（{c.providerLabel}）</option>
+                              ))}
+                            </optgroup>
+                          )}
                         </select>
                       )}
                       <button onClick={() => setShowCustomModel((v) => !v)} className="text-xs faint hover:text-[var(--text)]">
