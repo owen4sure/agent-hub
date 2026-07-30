@@ -19,7 +19,7 @@ interface Provider {
   id: string; label: string; baseUrl: string; models: string[];
   vision: boolean; builtin: boolean; hasKey: boolean;
 }
-interface Choice { ref: string; model: string; providerLabel: string; verified: boolean; vision: boolean }
+interface Choice { ref: string; model: string; providerLabel: string; verified: boolean; vision: boolean; visionTested: "yes" | "no" | null }
 
 export function ModelProvidersCard() {
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -146,20 +146,39 @@ export function ModelProvidersCard() {
                 )}
               </div>
               <p className="text-xs muted font-mono break-all">{p.baseUrl || "(還沒設定 Base URL)"}</p>
-              <div className="flex flex-wrap gap-1">
+              {/* 每個模型一行，兩個測試分開——原本只有「點模型代號測連線」，
+                  已經存起來的來源**完全沒有地方測看圖能力**(使用者回饋：「我想測試我的
+                  gemma4 能不能看圖片沒地方能測啊」)。看圖是每個模型各自的能力，
+                  不是整個來源的，所以按鈕也要在每個模型旁邊。 */}
+              <div className="space-y-1">
                 {p.models.map((m) => {
                   const choice = choices.find((c) => c.model === m && c.providerLabel === p.label);
+                  const ref = choice?.ref ?? m;
                   return (
-                    <button
-                      key={m}
-                      type="button"
-                      disabled={Boolean(testing)}
-                      onClick={() => void test(choice?.ref ?? m)}
-                      className="btn btn-ghost text-xs"
-                      title="點一下測試這個模型通不通"
-                    >
-                      {choice?.verified ? "✓ " : ""}{choice?.vision ? "🖼️ " : ""}{m}{testing === `${choice?.ref ?? m}text` ? "（測試中…）" : ""}
-                    </button>
+                    <div key={m} className="flex items-center gap-2 flex-wrap text-xs">
+                      <span className="font-mono">{m}</span>
+                      <span className="muted">
+                        {choice?.verified ? "✓ 連線正常" : "尚未測連線"}
+                        {" · "}
+                        {choice?.visionTested === "yes" ? "🖼️ 實測看得懂圖片"
+                          : choice?.visionTested === "no" ? "🚫 實測不能讀圖"
+                            : choice?.vision ? "🖼️ 標記為看得懂（未實測）" : "看圖能力未測"}
+                      </span>
+                      <span className="ml-auto flex gap-1">
+                        <button type="button" disabled={Boolean(testing)} onClick={() => void test(ref, "text")} className="btn btn-ghost text-xs">
+                          {testing === `${ref}text` ? "測試中…" : "測連線"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={Boolean(testing)}
+                          onClick={() => void test(ref, "vision")}
+                          className="btn btn-ghost text-xs"
+                          title="給它一張只有 4 個字元的圖，看它能不能念出來"
+                        >
+                          {testing === `${ref}vision` ? "測試中…" : "🖼️ 測看圖"}
+                        </button>
+                      </span>
+                    </div>
                   );
                 })}
               </div>

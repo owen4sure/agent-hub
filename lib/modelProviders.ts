@@ -28,6 +28,7 @@ import { CLAUDE_CODE_MODEL } from "./claudeCodeShared";
 export const DEFAULT_PROVIDER_ID = "default";
 const SETTING_KEY = "modelProviders";
 const VERIFIED_KEY = "verifiedModels";
+const VISION_VERIFIED_KEY = "visionVerifiedModels";
 export const REF_SEPARATOR = "::";
 
 export interface ModelProvider {
@@ -143,10 +144,16 @@ export function resolveModel(ref: string): { provider: ModelProvider; model: str
 }
 
 /** 給 UI 用：所有來源的模型攤平成一份清單(附來源標籤與是否實測過)。 */
-export interface ModelChoice { ref: string; model: string; providerId: string; providerLabel: string; verified: boolean; vision: boolean }
+export interface ModelChoice {
+  ref: string; model: string; providerId: string; providerLabel: string;
+  /** 文字連線實測通過 */ verified: boolean;
+  /** 目前判定看不看得懂圖片(實測優先) */ vision: boolean;
+  /** 看圖能力是不是「真的測過」——沒測過要在畫面上跟「測過不行」分開講 */ visionTested: "yes" | "no" | null;
+}
 
 export function listModelChoices(): ModelChoice[] {
   const verified = getVerifiedModels();
+  const visionTested = getVisionVerified();
   const out: ModelChoice[] = [];
   const seen = new Set<string>();
   for (const provider of listProviders()) {
@@ -160,7 +167,8 @@ export function listModelChoices(): ModelChoice[] {
         providerId: provider.id,
         providerLabel: provider.label,
         verified: verified.includes(ref) || verified.includes(model),
-        vision: provider.builtin ? (VISION_MODELS as readonly string[]).includes(model) || model === CLAUDE_CODE_MODEL : provider.vision,
+        vision: modelSupportsVision(ref),
+        visionTested: visionTested[ref] ?? null,
       });
     }
   }
@@ -194,10 +202,41 @@ export function markModelVerified(ref: string, ok: boolean): void {
 }
 
 /**
+ * 逐個模型記「看圖實測結果」。
+ *
+ * 為什麼要逐個模型而不是逐個來源：同一個來源(同一台機器、同一個網址)底下常常同時有
+ * 看得懂圖跟純文字的模型，用來源層級的一個布林值一定會有一半是錯的。
+ * 值是 "yes"/"no"——**沒測過**跟**測過但不行**是兩件事，不能都用「沒有這一筆」表示。
+ */
+export function getVisionVerified(): Record<string, "yes" | "no"> {
+  const row = getDb().prepare(`SELECT value FROM settings WHERE key = ?`).get(VISION_VERIFIED_KEY) as { value: string } | undefined;
+  try {
+    const parsed: unknown = JSON.parse(row?.value ?? "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, "yes" | "no"> : {};
+  } catch {
+    return {};
+  }
+}
+
+export function markVisionVerified(ref: string, ok: boolean): void {
+  const current = getVisionVerified();
+  current[ref] = ok ? "yes" : "no";
+  getDb()
+    .prepare(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+    .run(VISION_VERIFIED_KEY, JSON.stringify(current));
+}
+
+/**
  * 這個模型看不看得懂圖片。
- * 內建來源沿用實測清單；自訂來源用使用者自己勾的(平台不可能知道別人地端模型的能力)。
+ *
+ * 優先順序刻意是「**實測結果 > 任何預設值**」：實際在這台機器上測過的答案，
+ * 永遠比一份寫死的清單或使用者當初隨手勾的核取方塊可信。
+ * 沒測過才退回：內建的實測清單 / 自訂來源使用者宣告的值。
  */
 export function modelSupportsVision(ref: string): boolean {
+  const tested = getVisionVerified()[ref];
+  if (tested === "yes") return true;
+  if (tested === "no") return false;
   const { provider, model } = resolveModel(ref);
   if (!provider.builtin) return provider.vision;
   return (VISION_MODELS as readonly string[]).includes(model) || model === CLAUDE_CODE_MODEL;

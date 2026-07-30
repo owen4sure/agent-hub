@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { callAIWithRetry } from "@/lib/aiRetry";
 import { checkVisionAnswer, makeVisionProbe } from "@/lib/modelVisionProbe";
-import { markModelVerified, resolveModel } from "@/lib/modelProviders";
+import { markModelVerified, markVisionVerified, resolveModel } from "@/lib/modelProviders";
 import { denyIfNotLocal } from "@/lib/requireLocal";
 
 /**
@@ -104,6 +104,8 @@ export async function POST(req: Request) {
       { label: `測試看圖(${model})`, maxAttempts: 2 },
     );
     const verdict = checkVisionAnswer(content, probe.expected);
+    // 實測結果要存起來：之後平台要挑「看得懂圖的模型」時，以這個為準而不是預設清單。
+    if (typeof body.ref === "string" && body.ref) markVisionVerified(body.ref, verdict.ok);
     return NextResponse.json({ ok: verdict.ok, kind, message: verdict.message });
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
