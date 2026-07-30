@@ -353,6 +353,23 @@ function init(): Database.Database {
       approved_at TEXT NOT NULL,
       PRIMARY KEY (workflow_id, node_id)
     );
+
+    -- 稽核軌跡：「人做了什麼」，跟 runs/node_runs/run_logs 記的「系統做了什麼」是兩件事。
+    -- 稽核指出的缺口：人工核准閘是這個產品的賣點，但核准這個動作本身沒留下任何紀錄——
+    -- 核准無法歸屬到「哪一次、從哪個管道、附帶什麼備註」，在稽核上等於不存在。
+    -- actor 目前只能記到「管道」等級(local-ui/script/telegram/…)，因為這個產品沒有使用者概念；
+    -- 這是刻意先把結構與寫入點建起來，之後真的有身分層時直接把 actor 換成人就好。
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      at TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      action TEXT NOT NULL,
+      target TEXT,
+      detail TEXT,
+      source TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action, at DESC);
   `);
 
   // 無痛升級：schema 有變動時對既有 DB 補欄位，永遠不需要刪 DB(才不會弄丟已存的帳密/設定)。

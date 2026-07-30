@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { deleteSharedSecrets, getSharedSecrets, setSharedSecrets } from "@/lib/settingsStore";
+import { denyIfNotLocal } from "@/lib/requireLocal";
+import { recordAuditFromRequest } from "@/lib/auditLog";
 
 /** 全域共用帳密(依欄位名稱)：回傳哪些 key 已設定(不回傳明碼值)。 */
 export async function GET() {
@@ -10,24 +12,33 @@ export async function GET() {
 
 /** 存共用帳密：{ secrets: { key: value } }，空字串的欄位略過(不清空既有值)。 */
 export async function POST(req: Request) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const body = (await req.json().catch(() => ({}))) as { secrets?: Record<string, unknown> };
   const raw = body.secrets && typeof body.secrets === "object" ? body.secrets : {};
   const clean: Record<string, string> = {};
   for (const [k, v] of Object.entries(raw)) {
     if (typeof v === "string" && v.length > 0) clean[k] = v;
   }
-  if (Object.keys(clean).length > 0) setSharedSecrets(clean);
+  if (Object.keys(clean).length > 0) {
+    setSharedSecrets(clean);
+    // 只記欄位名稱，永遠不記值。
+    recordAuditFromRequest(req, "secret.write", null, { keys: Object.keys(clean) });
+  }
   const secrets = getSharedSecrets();
   return NextResponse.json({ ok: true, set: Object.fromEntries(Object.keys(secrets).map((k) => [k, true])) });
 }
 
 /** 撤銷已保存值：{ keys: ["telegramBotToken", ...] }。不接受「清空全部」的模糊操作。 */
 export async function DELETE(req: Request) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const body = await req.json().catch(() => null) as { keys?: unknown } | null;
   if (!body || !Array.isArray(body.keys) || body.keys.length === 0 || body.keys.length > 100 || !body.keys.every((k) => typeof k === "string")) {
     return NextResponse.json({ error: "keys 必須是 1–100 個帳密欄位名稱" }, { status: 400 });
   }
   deleteSharedSecrets(body.keys);
+  recordAuditFromRequest(req, "secret.delete", null, { keys: body.keys });
   const secrets = getSharedSecrets();
   return NextResponse.json({ ok: true, set: Object.fromEntries(Object.keys(secrets).map((k) => [k, true])) });
 }

@@ -1,6 +1,7 @@
 import { getSharedSecrets, setSharedSecrets } from "@/lib/settingsStore";
 import { claimOAuthState, exchangeGoogleCode, googleAuthErrorMessage } from "@/lib/googleOAuth";
 import { recordGoogleTokenHealth } from "@/lib/googleTokenHealth";
+import { recordAudit } from "@/lib/auditLog";
 
 /**
  * Google 同意完之後導回這裡。授權碼由**後端**換成 refresh token 再存起來——
@@ -37,6 +38,10 @@ export async function GET(req: Request) {
   recordGoogleTokenHealth({ ok: true, scope: exchanged.scope });
   const granted = exchanged.scope.split(/\s+/).filter(Boolean);
   const missing = claimed.scopes.filter((scope) => !granted.includes(scope));
+  // 連結 Google 帳號會給這台機器一組長期有效的授權，屬於「人做的重要決定」，要留在稽核軌跡。
+  // actor 是 approve-link 同類的情境(Google 把瀏覽器導回來，不是使用者在 UI 裡按的請求)，
+  // 所以直接記 local-ui 會不準確——這裡老實記成 webhook(外部服務導回)。
+  recordAudit({ actor: "webhook", action: "google.connect", detail: { grantedScopes: granted.length, missing } });
   return resultPage(
     true,
     missing.length > 0

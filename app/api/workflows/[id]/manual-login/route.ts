@@ -2,10 +2,14 @@ import { NextResponse } from "next/server";
 import { getWorkflow, isValidWorkflowId } from "@/lib/workflow/store";
 import { closeManualLogin, isManualLoginOpen, openManualLogin } from "@/lib/workflow/manualLogin";
 import { isPrivateHost, privateUrlsAllowed } from "@/lib/urlGuard";
+import { denyIfNotLocal } from "@/lib/requireLocal";
+import { recordAuditFromRequest } from "@/lib/auditLog";
 
 /** 開一個有頭瀏覽器讓使用者本人手動登入(Google 等會擋自動化登入的網站)；
  * cookies 每幾秒存回這條流程的 browser session，之後自動化執行直接是已登入狀態。 */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const { id } = await params;
   if (!isValidWorkflowId(id) || !getWorkflow(id)) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
   const body = (await req.json().catch(() => ({}))) as { url?: unknown };
@@ -23,6 +27,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   }
   try {
     const { usingRealChrome } = await openManualLogin(id, parsed.toString());
+    recordAuditFromRequest(req, "workflow.manual-login", id, { host: parsed.hostname });
     return NextResponse.json({
       ok: true,
       message: `已開啟${usingRealChrome ? " Chrome" : "瀏覽器"}視窗——請在裡面親手完成登入，登入成功後直接關掉那個視窗即可。登入狀態會自動存進這條流程，之後執行不會再經過登入頁。`,
@@ -33,7 +38,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 }
 
 /** 關掉這條流程開著的手動登入視窗(最後狀態已在背景持續存檔) */
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const { id } = await params;
   if (!isValidWorkflowId(id)) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
   const closed = await closeManualLogin(id);

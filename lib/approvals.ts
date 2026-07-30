@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { getDb } from "./db";
 import { notifyDesktop } from "./notify";
+import { recordAudit, type AuditActor } from "./auditLog";
 
 /**
  * 等人簽核的資料層：流程跑到「等人簽核」節點會暫停(run 標 waiting)並建一筆 pending 簽核，
@@ -74,6 +75,13 @@ export async function decideApproval(
   ref: { token?: string; id?: string },
   action: "approve" | "reject",
   note?: string,
+  /**
+   * 這個決定是從哪個管道進來的(本機 UI / 簽核連結 / Telegram 按鈕)。
+   * 稽核指出：人工核准閘是產品賣點，但核准這個動作原本完全沒有留下紀錄——核准無法歸屬，
+   * 在稽核上等於不存在。這裡是唯一的決定入口，所以稽核紀錄寫在這裡就涵蓋所有管道，
+   * 不會有某條路徑漏記(而漏記的稽核軌跡比沒有更危險：它看起來是完整的)。
+   */
+  actor: AuditActor = "system",
 ): Promise<{ ok: boolean; error?: string; approval?: ApprovalRow }> {
   const db = getDb();
   const existing = ref.token ? getApprovalByToken(ref.token) : ref.id ? getApprovalById(ref.id) : null;
@@ -88,6 +96,15 @@ export async function decideApproval(
     const label: Record<string, string> = { approved: "已核准", rejected: "已拒絕", expired: "已逾時", cancelled: "已取消(執行被停止)" };
     return { ok: false, error: `這筆簽核${label[now?.status ?? ""] ?? "已處理過"}，不能再決定一次。`, approval: now ?? undefined };
   }
+
+  // 決定已經原子寫進 DB(這一刻起不可回滾)，稽核就要在這裡記——記在後面的話，
+  // 「決定成功但續跑失敗」那條路徑會漏掉一筆真的發生過的核准。
+  recordAudit({
+    actor,
+    action: action === "approve" ? "approval.approve" : "approval.reject",
+    target: existing.workflow_id,
+    detail: { approvalId: existing.id, runId: existing.run_id, nodeId: existing.node_id, note: (note ?? "").slice(0, 200) },
+  });
 
   // 讓流程從簽核節點帶著結果續跑(動態 import 破循環相依，見檔頭)
   const { resumeRun } = await import("./workflow/engine");

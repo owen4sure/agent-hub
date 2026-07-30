@@ -7,8 +7,12 @@ import { claimPreviewReplay, releasePreviewReplay } from "@/lib/workflow/preview
 import { EvidenceDriftError } from "@/lib/workflow/evidencePassport";
 import { n8nMigrationReviewState } from "@/lib/workflow/n8nMigration";
 import { AcceptanceSpecOutdatedError } from "@/lib/workflow/acceptanceSpec";
+import { denyIfNotLocal } from "@/lib/requireLocal";
+import { recordAuditFromRequest } from "@/lib/auditLog";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const { id } = await params;
   // id 不合法時 getWorkflow 會直接 throw(擋路徑穿越)，這裡先擋下來回 404 而不是 500
   if (!isValidWorkflowId(id)) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
@@ -104,6 +108,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       dryRun: body.dryRun === true,
       scenarioApprovalDecisions: body.dryRun === true ? body.approvalDecisions : undefined,
     });
+    recordAuditFromRequest(req, "workflow.run", id, { runId, dryRun: body.dryRun === true, onlyNodeIds: body.onlyNodeIds ?? null });
     return NextResponse.json({ runId });
   } catch (err) {
     if (replay) releasePreviewReplay(replay.token);

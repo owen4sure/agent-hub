@@ -7,6 +7,8 @@ import { getDb } from "@/lib/db";
 import { autorunActive } from "@/lib/workflow/busyLocks";
 import { hasActiveRepairSession } from "@/lib/workflow/repairSessions";
 import type { MessagePart } from "@/lib/workflow/builder";
+import { denyIfNotLocal } from "@/lib/requireLocal";
+import { recordAuditFromRequest } from "@/lib/auditLog";
 
 function isValidPart(p: unknown): p is MessagePart {
   if (!p || typeof p !== "object") return false;
@@ -21,6 +23,8 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string; nid: string }> },
 ) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const { id, nid } = await params;
   const wf = getWorkflow(id);
   if (!wf) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
@@ -79,6 +83,7 @@ export async function POST(
     const result = await editNode(client, model, id, nid, parts, {
       repairRunId, signal: req.signal,
     });
+    recordAuditFromRequest(req, "workflow.node.update", id, { nodeId: nid });
     return NextResponse.json({ ...result, ...(droppedImages > 0 ? { droppedImages } : {}), ...(droppedFiles > 0 ? { droppedFiles } : {}) });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 });

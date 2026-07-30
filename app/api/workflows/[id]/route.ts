@@ -19,6 +19,8 @@ import { hasActiveRepairSession } from "@/lib/workflow/repairSessions";
 import { importedScheduleConsent } from "@/lib/workflow/importedScheduleConsent";
 import { listSchedules } from "@/lib/scheduler";
 import { describeSuggestedSchedule } from "@/lib/workflow/builder";
+import { denyIfNotLocal } from "@/lib/requireLocal";
+import { recordAuditFromRequest } from "@/lib/auditLog";
 
 const PARAM_TYPES = new Set(["text", "number", "date-or-token", "select", "boolean", "secret", "code", "textarea"]);
 
@@ -88,6 +90,8 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 }
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const { id } = await params;
   const wf = getWorkflow(id);
   if (!wf) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
@@ -447,10 +451,13 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     });
     return NextResponse.json({ ok: true, ...(promotionWarning ? { warning: promotionWarning } : {}) });
   }
+  recordAuditFromRequest(req, "workflow.update", id, { fields: Object.keys(body ?? {}) });
   return NextResponse.json({ ok: true });
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const { id } = await params;
   const wf = getWorkflow(id);
   if (!wf) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
@@ -459,5 +466,6 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     return NextResponse.json({ error: "這條流程的自動測試／修復正在進行中，等它跑完再刪除流程" }, { status: 409 });
   }
   deleteWorkflow(id);
+  recordAuditFromRequest(req, "workflow.delete", id, { name: wf.name });
   return NextResponse.json({ ok: true });
 }

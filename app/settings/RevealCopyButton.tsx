@@ -7,7 +7,7 @@ import { useState } from "react";
  * 明碼常駐在回應裡風險比較高)；這裡改成使用者主動點「顯示」才打專門的明碼端點，且複製完按
  * 「隱藏」會把明碼從畫面狀態清掉，不會一直留在 React state 裡。
  */
-export function RevealCopyButton({ endpoint }: { endpoint: string }) {
+export function RevealCopyButton({ endpoint, secretKey }: { endpoint: string; secretKey?: string }) {
   const [value, setValue] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -17,7 +17,13 @@ export function RevealCopyButton({ endpoint }: { endpoint: string }) {
     setLoading(true);
     setError(false);
     try {
-      const res = await fetch(endpoint);
+      // POST 而不是 GET：欄位名稱不進 URL(不會留在 access log/瀏覽器歷史)，
+      // 而且 proxy.ts 的 Origin 檢查只套用在非 GET 方法上——GET 版本等於少了一層防護。
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(secretKey ? { key: secretKey } : {}),
+      });
       const data = (await res.json().catch(() => ({}))) as { value?: unknown };
       if (!res.ok || typeof data.value !== "string") throw new Error();
       setValue(data.value);

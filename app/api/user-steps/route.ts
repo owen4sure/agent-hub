@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { deleteUserStep, listUserSteps, saveUserStep, type UserStepParam } from "@/lib/workflow/userSteps";
+import { denyIfNotLocal } from "@/lib/requireLocal";
+import { recordAuditFromRequest } from "@/lib/auditLog";
 
 /** 「我的步驟」清單。加步驟面板與節點面板都從這裡讀。 */
 export async function GET() {
@@ -16,6 +18,8 @@ export async function GET() {
 
 /** 存成「我的步驟」。程式碼與參數都由呼叫端(節點面板的存檔流程)驗證過才送來，這裡再驗一次。 */
 export async function POST(req: Request) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const body = (await req.json().catch(() => null)) as {
     name?: unknown; description?: unknown; intent?: unknown; code?: unknown; params?: unknown;
     sourceWorkflowId?: unknown; sourceNodeId?: unknown;
@@ -31,6 +35,7 @@ export async function POST(req: Request) {
       ...(typeof body.sourceWorkflowId === "string" ? { sourceWorkflowId: body.sourceWorkflowId } : {}),
       ...(typeof body.sourceNodeId === "string" ? { sourceNodeId: body.sourceNodeId } : {}),
     });
+    recordAuditFromRequest(req, "user-step.save", step.id, { name: step.name, paramCount: step.params.length });
     return NextResponse.json({ ok: true, step });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "存檔失敗" }, { status: 400 });
@@ -38,7 +43,11 @@ export async function POST(req: Request) {
 }
 
 export async function DELETE(req: Request) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const id = new URL(req.url).searchParams.get("id") ?? "";
   if (!id) return NextResponse.json({ error: "缺少 id" }, { status: 400 });
-  return NextResponse.json({ ok: deleteUserStep(id) });
+  const removed = deleteUserStep(id);
+  if (removed) recordAuditFromRequest(req, "user-step.delete", id);
+  return NextResponse.json({ ok: removed });
 }

@@ -6,6 +6,7 @@ import { listWorkflowFileIssues, listWorkflows } from "@/lib/workflow/store";
 import { lintGraph } from "@/lib/workflow/graphLint";
 import { getComponentHealth } from "@/lib/systemHealth";
 import { latestDataBackup } from "@/lib/dataBackup";
+import { APP_VERSION } from "@/lib/version";
 
 export async function GET() {
   try {
@@ -31,6 +32,8 @@ export async function GET() {
     // 一條正式(official)流程缺著它自己宣告需要的帳密，排程一到就會確定失敗，這不該被算成「健康」。
     return NextResponse.json({
       ok: invalid.length === 0 && workflowFileIssues.length === 0 && failedComponents.length === 0 && permissionsPrivate && missingSecretKeys.length === 0,
+      // 版本要能從執行中的服務問出來，不是只能看原始碼——「現在跑的是哪一版」是稽核必問的第一題。
+      version: APP_VERSION,
       process: { pid: process.pid, uptimeSeconds: Math.round(process.uptime()) },
       components,
       failedComponents,

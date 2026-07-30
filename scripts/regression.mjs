@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { request as httpRequest } from "node:http";
+import { readFileSync } from "node:fs";
 /**
  * 複雜需求回歸庫(GPT 體檢 #8):代表性白話需求,每個都真的讓 AI 建圖,
  * 驗「有沒有建出該有的結構」(節點型別/分支 port/觸發設定/需求核對清單全 ✅)。
@@ -40,11 +41,20 @@ const CASES = [
 // Node 內建 fetch/Undici 另有約 5 分鐘的 headers timeout；就算 AbortController
 // 設 10 分鐘，它仍會先把正在做第二輪修正的 builder 切斷。回歸庫要真的能等滿宣告的
 // 預算，改用本機 HTTP request 並明確控制 socket timeout。
+// proxy.ts 現在要求所有 /api 請求帶本機存取權杖(見 lib/localToken.ts)。腳本不是瀏覽器、
+// 拿不到那個 httpOnly cookie，所以直接讀 data/local-token 用 header 帶上。
+// 讀不到就送空字串——那會拿到 401 並附上清楚的說明，比靜默失敗好。
+const LOCAL_TOKEN = (() => {
+  if (process.env.AGENT_HUB_LOCAL_TOKEN) return process.env.AGENT_HUB_LOCAL_TOKEN.trim();
+  try { return readFileSync(new URL("../data/local-token", import.meta.url), "utf8").trim(); } catch { return ""; }
+})();
+const authHeaders = { "x-agent-hub-token": LOCAL_TOKEN };
+
 const api = async (m, p, b, timeout = 600000) => new Promise((resolve, reject) => {
   const payload = b ? JSON.stringify(b) : "";
   const req = httpRequest(BASE + p, {
     method: m,
-    headers: payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : undefined,
+    headers: payload ? { ...authHeaders, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : authHeaders,
   }, (res) => {
     const chunks = [];
     let size = 0;

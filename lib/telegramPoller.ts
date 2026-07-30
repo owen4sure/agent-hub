@@ -179,7 +179,7 @@ async function loop() {
         const m = cb?.data?.match(/^ah:([a-f0-9]{48}):(ok|no)$/);
         if (!cb || !m) continue;
         const action = m[2] === "ok" ? "approve" : "reject";
-        const result = await decideApproval({ token: m[1] }, action, "(由 Telegram 按鈕決定)");
+        const result = await decideApproval({ token: m[1] }, action, "(由 Telegram 按鈕決定)", "telegram");
         const feedback = result.ok ? (action === "approve" ? "已核准 ✅ 流程繼續跑了" : "已拒絕 ❌") : (result.error ?? "處理失敗").slice(0, 190);
         await tgApi(botToken, "answerCallbackQuery", { callback_query_id: cb.id, text: feedback }).catch(() => {});
         // 把原訊息的按鈕收掉+附上結果，之後再看這則訊息不會誤以為還能按

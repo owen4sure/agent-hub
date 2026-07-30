@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { decideApproval } from "@/lib/approvals";
+import { actorFromRequest } from "@/lib/auditLog";
 
 /** 本機 UI(首頁簽核卡/紀錄面板)按核准/拒絕用；遠端簽核走 /approve/<token> 網頁或 Telegram 按鈕 */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -14,7 +15,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ error: "action 要是 approve 或 reject" }, { status: 400 });
   }
   try {
-    const r = await decideApproval({ id }, body.action, typeof body.note === "string" ? body.note : undefined);
+    const r = await decideApproval({ id }, body.action, typeof body.note === "string" ? body.note : undefined, actorFromRequest(req));
     if (!r.ok) return NextResponse.json({ error: r.error }, { status: 409 });
     return NextResponse.json({ ok: true });
   } catch (err) {

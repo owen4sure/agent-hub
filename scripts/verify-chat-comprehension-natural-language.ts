@@ -29,8 +29,12 @@ import { DEFAULT_MODEL } from "../lib/models";
 import { buildWorkflow, type ChatMessage } from "../lib/workflow/builder";
 import { createWorkflow, saveWorkflow, deleteWorkflow, getWorkflow } from "../lib/workflow/store";
 import { listSchedules, deleteSchedule } from "../lib/scheduler";
+import { readLocalToken } from "../lib/localToken";
 
 const API_BASE = "http://127.0.0.1:3000";
+// proxy.ts 要求所有 /api 請求帶本機存取權杖(見 lib/localToken.ts)；這支腳本不是瀏覽器，
+// 所以自己讀 data/local-token 用 header 帶上。
+const LOCAL_TOKEN_HEADERS = { "x-agent-hub-token": readLocalToken() ?? "" };
 const report: Record<string, unknown> = { startedAt: new Date().toISOString(), model: DEFAULT_MODEL };
 
 async function testAttachmentRoleComprehension(): Promise<boolean> {
@@ -74,7 +78,7 @@ async function testHypotheticalQuestionDoesNotTriggerEdit(): Promise<boolean> {
     const text = "如果我把讀取那個 Google 試算表節點的分頁名稱從「月報週會」改成「業務週會」，後面寄出的通知內容需要跟著改嗎？我還在想要不要換，先跟我說說看會有什麼影響就好。";
     const res = await fetch(`${API_BASE}/api/workflows/${wf.id}/build`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...LOCAL_TOKEN_HEADERS, "Content-Type": "application/json" },
       body: JSON.stringify({ history: [{ role: "user", parts: [{ kind: "text", text }] }] }),
     });
     const body = await res.json();
@@ -117,7 +121,7 @@ async function testCopyThenPartialModifyPreservesLogic(): Promise<boolean> {
     });
     const res = await fetch(`${API_BASE}/api/workflows/${wf.id}/build`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...LOCAL_TOKEN_HEADERS, "Content-Type": "application/json" },
       body: JSON.stringify({ history: [{ role: "user", parts: [{ kind: "text", text: "把自動執行時間改成每天早上九點就好，其他都不要動。" }] }] }),
     });
     const body = await res.json();

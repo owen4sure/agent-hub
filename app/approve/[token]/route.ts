@@ -65,7 +65,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ token: 
     return page("送出失敗", `<h1>送出失敗</h1><p class="sub">沒有收到核准/拒絕的選擇，請回上一頁再按一次。</p>`);
   }
   const note = typeof form?.get("note") === "string" ? String(form.get("note")) : "";
-  const r = await decideApproval({ token }, action, note);
+  const r = await decideApproval({ token }, action, note, "approve-link");
   const wfName = getWorkflow(a.workflow_id)?.name ?? a.workflow_id;
   if (!r.ok) {
     return page("沒有完成", `<h1>沒有完成</h1><p class="sub">${esc(r.error ?? "未知原因")}</p>`);

@@ -6,6 +6,7 @@ import { readGoogleDoc, parseGoogleDocUrl } from "@/lib/googleExport";
 import { saveChatAttachment } from "@/lib/chatAttachments";
 import { getWorkflow, isValidWorkflowId } from "@/lib/workflow/store";
 import { compactVisibleWebText, looksLikeLoginPage } from "@/lib/urlContent";
+import { denyIfNotLocal } from "@/lib/requireLocal";
 
 const URL_READ_TIMEOUT_MS = 50_000;
 
@@ -18,6 +19,8 @@ function abortError(signal: AbortSignal): Error {
  * 回傳給對話。只允許 http/https，並對入口、轉址和子資源全部做 SSRF 防護。
  */
 export async function POST(req: Request) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const startedAt = Date.now();
   const requestId = crypto.randomUUID().slice(0, 8);
   const controller = new AbortController();

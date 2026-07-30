@@ -1,0 +1,61 @@
+name: 🐞 回報問題 / Bug report
+description: 某個功能壞了、行為跟預期不同
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **請不要在這裡回報安全漏洞** —— 見 [SECURITY.md](../blob/main/SECURITY.md)，走 GitHub Security Advisory。
+
+        **請不要貼真實的公司名稱、客戶名稱、內部系統名稱或帳密**。
+        需要示範資料時用中性名稱（公司A、專案X、report.xlsx）。
+        平台內建的「一鍵安全診斷包」已經幫你排除原始輸入、輸出與帳密，可以直接附上。
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 打開 http://127.0.0.1:3000/api/health 看 `version` 欄位（或貼 `git rev-parse --short HEAD`）
+      placeholder: "0.2.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 發生了什麼
+      description: 你做了什麼動作、預期看到什麼、實際看到什麼
+      placeholder: |
+        我按了「▶ 執行」之後…
+        我以為會…
+        結果畫面…
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 怎麼重現
+      description: 一步一步寫，包含「從哪一頁開始」
+      placeholder: |
+        1. 打開首頁
+        2. 按「＋ 建立新流程」
+        3. 輸入「…」
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostic
+    attributes:
+      label: 診斷資料（選填但很有幫助）
+      description: |
+        執行紀錄頁的「一鍵安全診斷包」下載下來的 JSON，或終端機／`~/Library/Logs/Agent Hub/` 的錯誤訊息。
+      render: text
+
+  - type: input
+    id: env
+    attributes:
+      label: 環境
+      placeholder: "macOS 15 / Node 24.3 / 用 npm run dev"
+    validations:
+      required: true

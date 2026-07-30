@@ -5,6 +5,7 @@ import { getWorkflow } from "./workflow/store";
 import { resolveParams } from "./relativeDate";
 import { getAutomationReadiness } from "./workflow/automationReadiness";
 import { sweepGoogleTokenHealth } from "./googleTokenHealth";
+import { sweepRetentionDaily } from "./retention";
 import { sweepExpiredApprovals } from "./approvals";
 import { sweepHealthChecks } from "./workflow/healthCheck";
 
@@ -280,6 +281,13 @@ function tick() {
     sweepGoogleTokenHealth();
   } catch (err) {
     console.error("[scheduler] Google 授權保活失敗:", err);
+  }
+  // 資料保留期限：既有的 pruneRuns 是「每流程留最近 20 筆」的**筆數**上限，回答不了
+  // 「登入後的截圖最多留多久」這個資料保護問題(每月跑一次的流程，20 筆等於快兩年)。
+  try {
+    sweepRetentionDaily();
+  } catch (err) {
+    console.error("[scheduler] 資料保留期限清理失敗:", err);
   }
   const dt = taipeiParts(now);
   const minuteKey = `${dt.year}-${pad(dt.month)}-${pad(dt.day)}T${pad(dt.hour)}:${pad(dt.minute)}`;

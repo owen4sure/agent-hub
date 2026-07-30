@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { request as httpRequest } from "node:http";
+import { readFileSync } from "node:fs";
 
 /**
  * 拿使用者「真的在用」的每一條流程做一次安全試跑(dryRun:true，絕不寫入真實資料/發送真實通知)，
@@ -19,11 +20,20 @@ const BASE = process.env.AGENT_HUB_URL ?? "http://127.0.0.1:3000";
 const POLL_INTERVAL_MS = 2000;
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 
+// proxy.ts 現在要求所有 /api 請求帶本機存取權杖(見 lib/localToken.ts)。腳本不是瀏覽器、
+// 拿不到那個 httpOnly cookie，所以直接讀 data/local-token 用 header 帶上。
+// 讀不到就送空字串——那會拿到 401 並附上清楚的說明，比靜默失敗好。
+const LOCAL_TOKEN = (() => {
+  if (process.env.AGENT_HUB_LOCAL_TOKEN) return process.env.AGENT_HUB_LOCAL_TOKEN.trim();
+  try { return readFileSync(new URL("../data/local-token", import.meta.url), "utf8").trim(); } catch { return ""; }
+})();
+const authHeaders = { "x-agent-hub-token": LOCAL_TOKEN };
+
 const api = async (m, p, b, timeout = 30000) => new Promise((resolve, reject) => {
   const payload = b ? JSON.stringify(b) : "";
   const req = httpRequest(BASE + p, {
     method: m,
-    headers: payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : undefined,
+    headers: payload ? { ...authHeaders, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : authHeaders,
   }, (res) => {
     const chunks = [];
     let size = 0;

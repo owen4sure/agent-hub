@@ -2,7 +2,31 @@
 
 所有項目依 `CHANGE_CONTROL.md` 記錄，並以使用者結果與可重現驗證為核心。
 
+版本號與 git tag 一一對應（`v0.2.0` = `## [0.2.0]`），`/api/health` 會回報執行中服務的版本——
+「現在跑的是哪一版、出事回滾到哪、這個修補在哪一版進來」這三題要能從執行中的服務答得出來。
+
 ## Unreleased
+
+## [0.2.0] - 2026-07-30
+
+企業級稽核（外部 AI 稽核 36 項）的第一批處理：相依漏洞、存取控制、稽核軌跡、資料保留期限、
+備份還原、版本發布，以及把隱私掃描這個安全網從「有人記得手動跑」變成「不跑就過不了」。
+
+### Added
+
+- Added｜本機存取權杖，讓「連得到 127.0.0.1」不再等於「能驅動整個引擎」｜87 支 API 原本沒有任何一支檢查呼叫者是誰，而 `proxy.ts` 的設計刻意放行「沒有 Origin 的請求」(curl/腳本/同機工具)——在企業機器上「本機行程都可信」這個假設不成立(MDM agent、防毒、公司內部工具、套件的 postinstall 都在跑)，同一台機器也可能有其他 OS 帳號。現在 proxy 對所有 /api 驗權杖(`data/local-token`，0600)，瀏覽器透過 httpOnly + SameSite=Strict cookie 自動帶上、使用者完全無感；webhook／Google 導回／健康檢查在白名單內(各自有自己的認證)。最危險的那幾支(帳密、流程增刪改、執行、匯入、開瀏覽器、抓網址)在 handler 內再驗一次——proxy 整層被繞過是真實發生過的漏洞類別，唯一的門不能只放在可能被跳過的地方。誠實邊界：**擋不住以同一個 OS 使用者身分執行的惡意程式**(它讀得到權杖檔，也本來就讀得到 .env 與 DB)，見 `SECURITY.md`｜`lib/localToken.ts`、`lib/requireLocal.ts`、`proxy.ts`｜驗證：權杖長度／檔案權限 0600／常數時間比對／白名單正反例共 4 個測試、瀏覽器實際操作一輪、腳本改用 header
+- Added｜稽核軌跡（誰、什麼時候、對什麼做了什麼）｜原本只有「系統做了什麼」的執行紀錄，沒有「人做了什麼」。最關鍵的缺口是**人工核准閘**——它是產品賣點，但核准這個動作本身沒留下任何紀錄，核准無法歸屬在稽核上等於不存在。新增 `audit_log` 表與寫入點：核准／拒絕(所有管道共用同一個入口，不會有路徑漏記)、流程增刪改與匯入、步驟設定修改、手動觸發、帳密讀寫、查看明碼、全域設定、排程增刪改、我的步驟、保留期限清理。誠實限制：這個產品沒有使用者概念，所以 actor 記到「管道」等級(本機瀏覽器／腳本／Telegram／簽核連結)，不是哪個人；結構先建好，之後接上身分層直接換 actor 即可｜`lib/auditLog.ts`、`app/settings/AuditLogCard.tsx`、`/api/audit-log`｜驗證：寫入／查詢／細節不含帳密值／寫入失敗不影響主線／行為者判斷共 3 個測試 + 設定頁實際查看
+- Added｜資料保留期限｜既有的 `pruneRuns` 是「每流程留最近 20 筆」的**筆數**上限(所以磁碟本來就不會無限長大)，但筆數回答不了「登入後的截圖最多留多久」——一條每月跑一次的流程，20 筆等於快兩年的截圖、名單、金額留在磁碟上。新增可設定的**時間**上限：除錯截圖與頁面內容預設 90 天(PII 最密集、過期價值趨近於零)，執行紀錄與產出檔預設不按時間刪(那是使用者的成果，要不要丟由他決定)。改設定不會立刻刪東西，畫面永遠先顯示「現在按清理會刪掉多少」｜`lib/retention.ts`、`app/settings/RetentionCard.tsx`、`/api/retention`、scheduler 每天一次｜驗證：設定值夾取／預設值不對稱／預覽跑兩次結果相同(證明真的沒動到東西)共 3 個測試
+- Added｜備份還原路徑與自動化演練｜原本只有「建立備份」，還原全靠說明文字——未經演練的備份等於沒有備份。新增 `restoreDataBackup()` 與 `npm run restore:backup`：還原前確認服務沒在跑(不然會得到一半舊一半新)、**不刪任何現有資料**(既有檔案改名成 `.before-restore-<時間>` 留著)、**一定連舊的 `-wal`/`-shm` 一起移開**(手動還原最常踩的坑：舊日誌會套在還原後的資料庫上，看起來成功資料卻是舊的)、`.env` 只另存不覆蓋(現有的可能比備份新)、還原後跑 `integrity_check` 並讀出關鍵表列數驗證｜`lib/dataBackup.ts`、`scripts/restore-backup.mjs`｜驗證：完整演練測試(建立備份→清空資料庫→刪流程 JSON→留一份過期 WAL→還原→逐項比對內容一致)＋非備份 zip 要老實拒絕且不留半套檔案
+- Added｜相依漏洞閘門與 Dependabot｜21 個 high 等級漏洞(含 Next.js 的 middleware/proxy bypass 公告——正好是擋「任何網頁隔空 RCE」的那一層)默默存在到有人專門稽核才被發現。列出來不等於會被處理，只有「不處理就卡住 CI」才會：新增 `npm run check:audit` 並加進 CI，另加 Dependabot 每週送修補 PR。閘門以**漏洞公告**為單位判斷而不是套件名(一個 brace-expansion 公告會列出 16 個套件，全是同一條傳遞相依鏈)，已接受的風險必須寫理由與**重新評估日期**，過期自動失敗｜`scripts/audit-gate.mjs`、`.github/dependabot.yml`、CI｜驗證：實際升級 next 16.2.10→16.2.12、postcss→8.5.25、sharp→0.35.3、adm-zip 0.5→0.6，**5 個公告中 4 個真的修掉**(含 Next.js 那條)，`npm audit` 21 high → 16 high 且全部來自剩下那一個公告；956 個測試、lint、build 全過
+- Added｜剩下那一個漏洞：老實記成「已接受的風險」而不是硬修｜brace-expansion 的 DoS 只有 5.0.8 修好，但**兩條升級路實測都會弄壞工具鏈**：用 overrides 拉到 5.0.8 → minimatch 2/3 用 `require()` 當函式呼叫、v5 改具名匯出，eslint 直接 `TypeError: expand is not a function`；升 eslint 10 → eslint-config-next 16.2.12 內附的 eslint-plugin-react 在 eslint 10 下 crash。兩者都實際跑過才下結論(不是看版本號推測)。剩下的消費者(開發期的 eslint、寫 xlsx 的 archiver)glob pattern 都是程式碼寫死的，沒有攻擊者可控的觸發路徑；例外設 2026-10-31 到期，屆時強制重新評估
+- Added｜服務會回報自己的版本｜`/api/health` 新增 `version`，版本號與 git tag 一一對應。「現在跑的是哪一版」要能從執行中的服務問出來，看原始碼回答的是另一個問題｜`lib/version.ts`｜驗證：實際打 /api/health 確認版本字串
+
+### Changed
+
+- Changed｜帳密／API Key 明碼端點由 GET 改 POST｜三個問題疊加：`proxy.ts` 的 Origin 檢查只套用在非 GET/HEAD 方法上(所以 GET 版本完全不過 Origin 檢查)、欄位名稱會進 access log 與瀏覽器歷史、以及「跨站讀不到回應」是靠瀏覽器的 CORS 行為——那是把自己的授權檢查外包給瀏覽器。改 POST 後自動獲得 Origin 檢查、key 走 body、加上本機權杖與稽核紀錄｜`/api/secrets/reveal`、`/api/settings/reveal`、`app/settings/RevealCopyButton.tsx`｜驗證：設定頁「顯示並複製」實際點過
+- Changed｜隱私黑名單掃描不再靜默略過｜兩個缺口疊加讓這個安全網實質上沒在運作：黑名單被 gitignore(只存在作者那台機器)、CI 根本沒跑 change-guard。最惡劣的是**靜默略過看起來像通過**——別的 AI 工具在別的環境跑完看到 ✅，會合理相信隱私掃描掃過了。現在缺清單會大聲說「這一項沒有掃」且結尾訊息明確寫「略過，未檢查」；CI 從 GitHub Secret 還原清單再掃；另加 pre-commit hook 只跑隱私掃描(毫秒級，不會有人想用 --no-verify 繞過)｜`scripts/change-guard.mjs`、`scripts/install-hooks.mjs`、CI｜驗證：有清單／無清單兩種情況都實跑過，hook 實際安裝並在 commit 時執行
+- Changed｜`package.json` 宣告 `engines: node >= 24`｜CI 鎖 Node 24 且註解自己記錄了 npm 10/11 lock 格式混用會假報 out-of-sync，但沒有 `engines`——用 Node 20/22 的人 clone 下來會踩同一個雷且沒有任何提示，這對「貼個 repo 網址給 AI 就自動裝好」的定位傷害特別大
 
 ### Added
 

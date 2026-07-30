@@ -24,3 +24,19 @@ jobs:
       - run: npm run lint
       - run: npm run test
       - run: npm run build
+      # 相依漏洞閘門：真實狀況是 21 個 high(含 Next.js 的 middleware/proxy bypass——正好是擋
+      # 「任何網頁隔空 RCE」的那一層)默默存在到有人專門稽核才被發現。列出來不等於會被處理，
+      # 只有「不處理就卡住 CI」才會。已接受的風險要在 scripts/audit-gate.mjs 寫理由與到期日。
+      - run: npm run check:audit
+      # 治理底線 + 隱私黑名單掃描。黑名單是私人清單(gitignore 掉、不進公開 repo)，所以在 CI
+      # 從 Secret 還原成檔案再掃；沒設 Secret 時腳本會大聲說「這一項沒有掃」而不是靜默通過
+      # (fork 的人沒有這個 Secret，不該因此無法跑 CI)。
+      - name: 治理底線與隱私掃描
+        env:
+          PRIVACY_BLOCKLIST: ${{ secrets.PRIVACY_BLOCKLIST }}
+        run: |
+          if [ -n "$PRIVACY_BLOCKLIST" ]; then
+            mkdir -p data
+            printf '%s\n' "$PRIVACY_BLOCKLIST" > data/privacy-blocklist.txt
+          fi
+          npm run check:change-guard

@@ -9,6 +9,8 @@ import { DEFAULT_MODEL } from "@/lib/models";
 import { lintGraph } from "@/lib/workflow/graphLint";
 import type { Workflow, WorkflowNode, WorkflowEdge, ParamField } from "@/lib/workflow/types";
 import { importPortableScenarios } from "@/lib/workflow/scenarioTests";
+import { denyIfNotLocal } from "@/lib/requireLocal";
+import { recordAuditFromRequest } from "@/lib/auditLog";
 
 function bad() {
   return NextResponse.json({ error: "匯入的檔案格式不正確" }, { status: 400 });
@@ -80,6 +82,8 @@ function sanitizeConfig(type: string, config: Record<string, unknown>, counters:
 }
 
 export async function POST(req: Request) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== "object" || !Array.isArray(body.nodes)) {
     return bad();
@@ -195,6 +199,7 @@ export async function POST(req: Request) {
   const saved = getWorkflow(newId);
   const secretsSet = getWorkflowSecrets(newId);
   const missingSecrets = (saved?.requiresSecrets ?? []).filter((f) => !secretsSet[f.key]?.length);
+  recordAuditFromRequest(req, "workflow.import", newId, { name: saved?.name ?? null, clearedCodeCount: counters.clearedCodeCount });
   return NextResponse.json({
     id: newId,
     missingSecrets: missingSecrets.map((f) => ({ key: f.key, label: f.label, type: f.type })),

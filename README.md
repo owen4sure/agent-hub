@@ -4,7 +4,7 @@
 
 [繁體中文](./README.zh-TW.md) | **English**
 
-A single-user, local-first visual workflow automation platform built toward enterprise workflow reliability — **like n8n**, your task becomes a graph of nodes on a canvas, but **you build and modify everything by chatting with AI in plain language. You never write or read code.** It is not currently a multi-tenant cloud product and does not provide RBAC, SSO, or team administration; its goal is to bring validation, retries, auditability, and rollback to workflows running on one person's machine.
+A single-user, local-first visual workflow automation platform with **production-grade reliability for personal and small-team automation** — **like n8n**, your task becomes a graph of nodes on a canvas, but **you build and modify everything by chatting with AI in plain language. You never write or read code.** Where it invests: deterministic validation, retries, self-repair loops, evidence you can audit, and one-click rollback. Where it deliberately stops: it is not a multi-tenant cloud product, has no user accounts, RBAC or SSO, and by design **executes AI-written code on your machine**. Read [SECURITY.md](./SECURITY.md) before running it on a shared or company-managed host.
 
 ![Live demo: a node graph executing step by step — each node lights up as it runs, with the plain-language AI chat on the right](docs/screenshots/demo.gif)
 
@@ -15,7 +15,8 @@ A single-user, local-first visual workflow automation platform built toward ente
 - **A workflow is a node graph**: every step is visible on the canvas (login → find email → download → process → save), and data flows between nodes.
 - **Built by talking**: describe what you want in the AI chat panel → the AI asks clarifying questions first → then draws the node graph for you.
 - **Reliable building blocks + an escape hatch**: login, email search, downloads, Excel, HTTP calls, conditions, AI decisions… are all pre-tested blocks. Only when no block fits does the AI write a "custom code" node — and you still never have to read the code.
-- **Self-hosted, per person**: clone and run it on your own machine. Credentials and API keys live only in your local `data/` directory (gitignored).
+- **Self-hosted, per person**: clone and run it on your own machine. Credentials and API keys live only in your local `data/` directory (gitignored) and are never sent to the model API.
+- **What "local-first" does and doesn't mean**: workflow execution is local. But whenever AI is involved — building a graph, generating a custom-code step, `llm-decide`, or "let AI fix it" — the relevant runtime data (node inputs, page HTML, failure screenshots) is sent to whatever endpoint `AGENT_HUB_BASE_URL` points at. Point it at a local model if data must not leave the machine. Full data-flow table in [SECURITY.md](./SECURITY.md#42-執行現場資料會送到外部-ai-api).
 
 ## Quick start
 

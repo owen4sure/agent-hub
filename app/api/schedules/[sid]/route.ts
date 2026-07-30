@@ -3,6 +3,7 @@ import { updateSchedule, deleteSchedule, isValidCron } from "@/lib/scheduler";
 import { getDb } from "@/lib/db";
 import { getWorkflow } from "@/lib/workflow/store";
 import { automationReadinessResponse, getAutomationReadiness } from "@/lib/workflow/automationReadiness";
+import { recordAuditFromRequest } from "@/lib/auditLog";
 
 export async function PATCH(
   req: Request,
@@ -36,14 +37,16 @@ export async function PATCH(
     }
   }
   if (!updateSchedule(sid, body)) return NextResponse.json({ error: "找不到這個排程" }, { status: 404 });
+  recordAuditFromRequest(req, "schedule.update", sid, { fields: Object.keys(body ?? {}) });
   return NextResponse.json({ ok: true });
 }
 
 export async function DELETE(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ sid: string }> },
 ) {
   const { sid } = await params;
   if (!deleteSchedule(sid)) return NextResponse.json({ error: "找不到這個排程" }, { status: 404 });
+  recordAuditFromRequest(req, "schedule.delete", sid);
   return NextResponse.json({ ok: true });
 }

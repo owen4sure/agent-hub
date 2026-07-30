@@ -5,6 +5,8 @@ import { listRuns } from "@/lib/workflow/engine";
 import { getWebhookToken } from "@/lib/webhookStore";
 import { getLineToken } from "@/lib/lineHook";
 import { getDb } from "@/lib/db";
+import { denyIfNotLocal } from "@/lib/requireLocal";
+import { recordAuditFromRequest } from "@/lib/auditLog";
 
 export async function GET() {
   const db = getDb();
@@ -58,6 +60,8 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return NextResponse.json({ error: "請求內容必須是 JSON 物件" }, { status: 400 });
@@ -70,5 +74,6 @@ export async function POST(req: Request) {
   const wf = createWorkflow(name);
   // 確保 settings 有 seed（getGlobalSettings 觸發 init）
   getGlobalSettings();
+  recordAuditFromRequest(req, "workflow.create", wf.id, { name: wf.name });
   return NextResponse.json({ id: wf.id });
 }

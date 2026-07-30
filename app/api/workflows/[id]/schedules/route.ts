@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { listSchedules, createSchedule, isValidCron } from "@/lib/scheduler";
 import { getWorkflow } from "@/lib/workflow/store";
 import { automationReadinessResponse, getAutomationReadiness } from "@/lib/workflow/automationReadiness";
+import { recordAuditFromRequest } from "@/lib/auditLog";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -31,5 +32,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (!readiness.ready) return NextResponse.json(automationReadinessResponse(readiness), { status: 409 });
   }
   const sid = createSchedule(id, body.cron, body.params ?? {});
+  recordAuditFromRequest(req, "schedule.create", sid, { workflowId: id });
   return NextResponse.json({ id: sid });
 }

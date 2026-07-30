@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { getGlobalSettings, setGlobalSettings, getMaxConcurrent, setMaxConcurrent, getBuilderPrefs, setBuilderPrefs, getBuilderEffort, setBuilderEffort, type BuilderEffort } from "@/lib/settingsStore";
 import { defaultMaxConcurrent } from "@/lib/workflow/engine";
+import { denyIfNotLocal } from "@/lib/requireLocal";
+import { recordAuditFromRequest } from "@/lib/auditLog";
 
 const BUILDER_EFFORT_VALUES = new Set<BuilderEffort>(["low", "medium", "high"]);
 
@@ -17,6 +19,8 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
   const body = (await req.json().catch(() => null)) as { baseUrl?: unknown; apiKey?: unknown; maxConcurrent?: unknown; builderPrefs?: unknown; builderEffort?: unknown } | null;
   if (!body || typeof body !== "object" || Array.isArray(body)) return NextResponse.json({ error: "請求格式不正確" }, { status: 400 });
   if (body.baseUrl !== undefined && (typeof body.baseUrl !== "string" || body.baseUrl.length > 2_000)) {
@@ -41,5 +45,6 @@ export async function POST(req: Request) {
   // 偏好跟金鑰不同:清空是合法操作(「我不要這些偏好了」),所以吃空字串;undefined 才是不改
   if (typeof body.builderPrefs === "string") setBuilderPrefs(body.builderPrefs);
   if (typeof body.builderEffort === "string") setBuilderEffort(body.builderEffort as BuilderEffort);
+  recordAuditFromRequest(req, "settings.update", null, { fields: Object.keys(body ?? {}) });
   return NextResponse.json({ ok: true });
 }
