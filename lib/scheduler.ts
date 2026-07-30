@@ -208,6 +208,61 @@ export function updateSchedule(id: string, patch: { enabled?: boolean; cron?: st
   return true;
 }
 
+/**
+ * 一次暫停全部排程（出門、放假、或正在改東西不想被背景執行打斷時用）。
+ *
+ * **關鍵設計：記下「這次是我暫停了哪幾筆」。**
+ * 不記的話，之後按「恢復」只能把所有排程都打開——包含使用者幾週前刻意關掉的那幾筆。
+ * 那是最惡劣的一種副作用：他以為自己只是還原剛才的動作，實際上把一條他早就不想跑的
+ * 流程放回背景執行（而排程執行是會真的寄信、寫試算表、動外部系統的）。
+ */
+export function pauseAllSchedules(): { paused: string[] } {
+  const db = getDb();
+  const rows = db.prepare(`SELECT id FROM schedules WHERE enabled = 1`).all() as { id: string }[];
+  const ids = rows.map((r) => r.id);
+  db.transaction(() => {
+    for (const id of ids) db.prepare(`UPDATE schedules SET enabled = 0 WHERE id = ?`).run(id);
+  })();
+  setPausedBatch(ids);
+  return { paused: ids };
+}
+
+/** 上次「全部暫停」實際關掉的那幾筆（只有這些會被「恢復」打開）。 */
+export function getPausedBatch(): string[] {
+  const row = getDb().prepare(`SELECT value FROM settings WHERE key = 'schedulePausedBatch'`).get() as { value: string } | undefined;
+  try {
+    const parsed: unknown = JSON.parse(row?.value ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function setPausedBatch(ids: string[]) {
+  getDb()
+    .prepare(`INSERT INTO settings (key, value) VALUES ('schedulePausedBatch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+    .run(JSON.stringify(ids.slice(0, 500)));
+}
+
+/**
+ * 把上次「全部暫停」關掉的那幾筆打開（其他的一律不動）。
+ * 已被刪掉的排程自動跳過；恢復後 next_run_at 由 updateSchedule 重算，
+ * 不會因為停用期間留下的舊時間而被補跑邏輯誤判成「錯過了、立刻跑一次」。
+ */
+export function resumePausedBatch(): { resumed: string[]; missing: number } {
+  const db = getDb();
+  const ids = getPausedBatch();
+  const resumed: string[] = [];
+  let missing = 0;
+  for (const id of ids) {
+    if (!db.prepare(`SELECT 1 FROM schedules WHERE id = ?`).get(id)) { missing++; continue; }
+    updateSchedule(id, { enabled: true });
+    resumed.push(id);
+  }
+  setPausedBatch([]);
+  return { resumed, missing };
+}
+
 export function deleteSchedule(id: string): boolean {
   const db = getDb();
   return db.prepare(`DELETE FROM schedules WHERE id = ?`).run(id).changes > 0;

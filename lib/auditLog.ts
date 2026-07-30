@@ -131,6 +131,8 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   "schedule.create": "新增排程",
   "schedule.update": "修改排程",
   "schedule.delete": "刪除排程",
+  "schedule.pause-all": "暫停全部排程",
+  "schedule.resume-batch": "恢復剛才暫停的排程",
   "secret.write": "儲存帳密",
   "secret.delete": "刪除帳密",
   "secret.reveal": "查看帳密明碼",

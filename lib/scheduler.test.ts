@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { isValidCron, mergeScheduleOrder } from "./scheduler";
+import * as schedulerModule from "./scheduler";
+import { getDb } from "./db";
 import type { ScheduleRow } from "./scheduler";
+
+const db = () => getDb();
+const enabledOf = (id: string) =>
+  (getDb().prepare(`SELECT enabled FROM schedules WHERE id = ?`).get(id) as { enabled: number } | undefined)?.enabled;
 
 function row(id: string, opts: { enabled?: boolean; nextRunAt?: string | null } = {}): ScheduleRow {
   return {
@@ -70,4 +76,55 @@ test("isValidCron：拒絕永遠不會觸發的越界值與反向範圍", () => 
   assert.equal(isValidCron("0 9 * 13 *"), false);
   assert.equal(isValidCron("0 9 * * 8"), false);
   assert.equal(isValidCron("0 9 * * 5-1"), false);
+});
+
+/**
+ * 「全部暫停 → 恢復」最危險的地方不是暫停，是恢復：如果恢復是「把所有排程都打開」，
+ * 就會把使用者幾週前刻意關掉的排程一起放回背景執行——而背景執行會真的寄信、寫試算表、
+ * 動外部系統。所以恢復必須只動「這次被全部暫停關掉的那幾筆」。
+ *
+ * 這裡刻意**不**呼叫 pauseAllSchedules()：測試跑在真實的 data/ 上，那個函式會掃全表，
+ * 等於把使用者真正在用的排程全部關掉；萬一測試中途掛掉就留在關閉狀態。
+ * 所以改成直接驗證「選擇性恢復」這段真正有風險的邏輯，全域掃描那段用真實操作驗證。
+ */
+test("恢復只打開「這次被全部暫停關掉的」，不會動到使用者原本就暫停的排程", () => {
+  const { createSchedule, deleteSchedule, updateSchedule, resumePausedBatch } = schedulerModule;
+  const mine = createSchedule("wf-test-pause-batch", "0 9 * * *", {});
+  const untouched = createSchedule("wf-test-pause-batch", "0 10 * * *", {});
+  try {
+    // 兩筆都關掉，但只有 mine 是「這次全部暫停」關的
+    updateSchedule(mine, { enabled: false });
+    updateSchedule(untouched, { enabled: false });
+    db().prepare(`INSERT INTO settings (key, value) VALUES ('schedulePausedBatch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+      .run(JSON.stringify([mine]));
+
+    const result = resumePausedBatch();
+
+    assert.deepEqual(result.resumed, [mine]);
+    assert.equal(enabledOf(mine), 1, "被全部暫停關掉的那筆要恢復");
+    assert.equal(enabledOf(untouched), 0, "使用者原本就關掉的那筆絕對不能被打開");
+    // 恢復後清空批次，避免第二次按「恢復」又把同一批打開一次
+    assert.deepEqual(schedulerModule.getPausedBatch(), []);
+  } finally {
+    deleteSchedule(mine);
+    deleteSchedule(untouched);
+    db().prepare(`DELETE FROM settings WHERE key = 'schedulePausedBatch'`).run();
+  }
+});
+
+test("恢復時遇到已經被刪掉的排程要跳過並回報，不能整批失敗", () => {
+  const { createSchedule, deleteSchedule, updateSchedule, resumePausedBatch } = schedulerModule;
+  const alive = createSchedule("wf-test-pause-batch", "0 9 * * *", {});
+  try {
+    updateSchedule(alive, { enabled: false });
+    db().prepare(`INSERT INTO settings (key, value) VALUES ('schedulePausedBatch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+      .run(JSON.stringify([alive, "已經不存在的排程 id"]));
+    const result = resumePausedBatch();
+    assert.deepEqual(result.resumed, [alive]);
+    assert.equal(result.missing, 1);
+    assert.equal(enabledOf(alive), 1);
+  } finally {
+    deleteSchedule(alive);
+    db().prepare(`DELETE FROM settings WHERE key = 'schedulePausedBatch'`).run();
+  }
 });

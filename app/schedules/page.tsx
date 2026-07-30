@@ -6,7 +6,12 @@ import { useRouter } from "next/navigation";
 import { PageHeader, EmptyState, formatScheduleNextRun, humanizeCron } from "@/components/ui";
 import { SCHEDULE_MODES, WEEKDAY_NAMES, buildCron, parseCron, timeValid, type ScheduleForm } from "@/lib/cron";
 
-interface ScheduleRow { id: string; workflowId: string; workflowName: string; enabled: number; cron: string; nextRunAt: string | null; orphan: boolean }
+interface ScheduleRow {
+  id: string; workflowId: string; workflowName: string; enabled: number;
+  cron: string; nextRunAt: string | null; orphan: boolean;
+  /** 開著、但排程器每次都會跳過它的原因(草稿/缺帳密…)。null = 真的會跑 */
+  blockedReason?: string | null;
+}
 interface WorkflowRow { id: string; name: string; status: string; nodeCount: number; needsRunInput?: boolean; triggers?: { schedule: boolean; watch: boolean; webhook: boolean } }
 
 export default function SchedulesPage() {
@@ -22,16 +27,42 @@ export default function SchedulesPage() {
   // 手動排過的順序會存伺服器、優先於時間排序(見 /api/schedules 的合併邏輯)。
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  // 上次按「全部暫停」實際關掉的那幾筆。有值才顯示「恢復」按鈕，而且恢復只動這幾筆
+  // (不是打開全部——否則會把使用者早就刻意關掉的排程一起放回背景執行)。
+  const [pausedBatch, setPausedBatch] = useState<string[]>([]);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkNote, setBulkNote] = useState("");
 
   async function load() {
-    const [s, w, settings] = await Promise.all([
+    const [s, w, settings, bulk] = await Promise.all([
       fetch("/api/schedules").then((r) => r.json()),
       fetch("/api/workflows").then((r) => r.json()),
       fetch("/api/settings").then((r) => r.json()),
+      fetch("/api/schedules/bulk").then((r) => r.json()).catch(() => ({ pausedBatch: [] })),
     ]);
     setSchedules(s.schedules ?? []);
     setWorkflows(w.workflows ?? []);
     setMaxConcurrent(settings.maxConcurrent ?? 1);
+    setPausedBatch(bulk.pausedBatch ?? []);
+  }
+
+  async function bulkAction(action: "pause-all" | "resume") {
+    setBulkBusy(true);
+    setBulkNote("");
+    try {
+      const res = await fetch("/api/schedules/bulk", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { paused?: number; resumed?: number; missing?: number; error?: string };
+      if (!res.ok) { setActionError(data.error ?? "操作失敗"); return; }
+      setActionError(null);
+      setBulkNote(action === "pause-all"
+        ? `已暫停 ${data.paused ?? 0} 個排程，背景不會再自己執行。原本就已暫停的沒有被動到。`
+        : `已恢復 ${data.resumed ?? 0} 個排程${data.missing ? `（有 ${data.missing} 個已經被刪掉，跳過）` : ""}。只恢復剛才被「全部暫停」關掉的那幾個。`);
+      await load();
+    } finally {
+      setBulkBusy(false);
+    }
   }
   useEffect(() => {
     // Initial client-side synchronization with the local API.
@@ -157,8 +188,34 @@ export default function SchedulesPage() {
 
       {/* 所有排程 */}
       <section className="space-y-3">
-        <h2 className="font-medium">所有排程</h2>
-        <p className="text-xs faint">預設依「下次執行時間」由近到遠排序；拖曳左側「⠿」可以手動調整順序。</p>
+        <div className="flex items-center gap-2 flex-wrap">
+          <h2 className="font-medium">所有排程</h2>
+          {(schedules?.length ?? 0) > 0 && (
+            <span className="text-xs muted">
+              {schedules!.filter((s) => s.enabled && !s.blockedReason).length} 個會自動執行
+              {schedules!.some((s) => !s.enabled) && ` · ${schedules!.filter((s) => !s.enabled).length} 個已暫停`}
+            </span>
+          )}
+          <div className="ml-auto flex items-center gap-1.5">
+            {pausedBatch.length > 0 && (
+              <button onClick={() => bulkAction("resume")} disabled={bulkBusy} className="btn btn-ghost text-xs">
+                ▶ 恢復剛才暫停的 {pausedBatch.length} 個
+              </button>
+            )}
+            {(schedules?.some((s) => s.enabled) ?? false) && (
+              <button
+                onClick={() => { if (confirm("要暫停全部排程嗎？\n\n背景就不會再自己執行任何流程，你仍然可以手動按「立即執行」。\n之後按「恢復」只會打開這次被關掉的，不會動到你原本就已經暫停的。")) void bulkAction("pause-all"); }}
+                disabled={bulkBusy}
+                className="btn btn-ghost text-xs"
+                title="出門、放假、或正在改東西不想被背景執行打斷時用"
+              >
+                ⏸ 全部暫停
+              </button>
+            )}
+          </div>
+        </div>
+        {bulkNote && <p className="text-xs" style={{ color: "var(--green)" }}>{bulkNote}</p>}
+        <p className="text-xs faint">預設依「下次執行時間」由近到遠排序；拖曳左側「⠿」可以手動調整順序。暫停只是停掉「背景自動執行」，設定都會留著，隨時可以恢復。</p>
         {schedules === null && <p className="text-sm muted">載入中…</p>}
         {schedules !== null && schedules.length === 0 && (
           <EmptyState icon="⏰" title="還沒有任何排程" hint="到任一個流程按「⏰ 排程」設定時間，就會出現在這裡集中管理。" />
@@ -186,14 +243,30 @@ export default function SchedulesPage() {
               >
                 ⠿
               </span>
-              <button onClick={() => toggle(s)} aria-label={s.enabled ? "暫停" : "啟用"} title={s.enabled ? "執行中，點一下暫停" : "已暫停，點一下啟用"} className="text-lg shrink-0">{s.enabled ? "🟢" : "⏸"}</button>
+              {/* 暫停/恢復刻意帶文字，不是只有一顆 emoji：原本是裸的 🟢 夾在拖曳把手跟名稱中間，
+                  使用者根本看不出那是可以按的東西(他直接來問「能不能做暫停排程的功能」，
+                  而功能其實一直都在)。找不到的功能等於不存在。 */}
+              <button
+                onClick={() => toggle(s)}
+                className="btn btn-ghost text-xs shrink-0"
+                title={s.enabled ? "暫停後背景不會再自己執行，設定會留著" : "恢復背景自動執行"}
+                style={s.enabled ? undefined : { color: "var(--accent)" }}
+              >
+                {s.enabled ? "⏸ 暫停" : "▶ 恢復"}
+              </button>
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   {s.orphan ? <span className="text-sm font-medium faint">{s.workflowName}</span>
                     : <Link href={`/workflows/${s.workflowId}`} className="text-sm font-medium hover:underline truncate">{s.workflowName}</Link>}
                   {!s.enabled && <span className="badge badge-neutral">已暫停</span>}
+                  {s.enabled && s.blockedReason && <span className="badge" style={{ color: "var(--red)" }}>不會執行</span>}
                 </div>
-                <div className="text-xs muted mt-0.5">{humanizeCron(s.cron)}{s.nextRunAt && s.enabled && <span className="faint"> · 下次 {formatScheduleNextRun(s.nextRunAt)}</span>}</div>
+                <div className="text-xs muted mt-0.5">{humanizeCron(s.cron)}{s.nextRunAt && s.enabled && !s.blockedReason && <span className="faint"> · 下次 {formatScheduleNextRun(s.nextRunAt)}</span>}</div>
+                {/* 「開著」不等於「真的會跑」。原本這種排程畫面上跟正常的一模一樣(綠燈+下次執行時間)，
+                    但排程器每分鐘都會跳過它、只寫一行終端機警告——使用者永遠等不到那次執行也不知道為什麼。 */}
+                {s.enabled && s.blockedReason && (
+                  <p className="text-xs mt-1" style={{ color: "var(--red)" }}>⚠️ 這個排程時間到了也不會執行：{s.blockedReason}</p>
+                )}
               </div>
               {!s.orphan && (
                 <button onClick={() => runNow(s.workflowId)} disabled={running[s.workflowId]} className="btn btn-ghost text-xs shrink-0" title="需要填資料時會先帶你到執行設定">{running[s.workflowId] ? "已開始" : workflows.find((w) => w.id === s.workflowId)?.needsRunInput ? "填資料執行" : "▶ 立即執行"}</button>
