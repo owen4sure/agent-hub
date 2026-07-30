@@ -74,6 +74,12 @@ export interface Workflow {
   onFailureWorkflow?: string;
   /** 群組(工作/私人…)——首頁按群組分區顯示。空/未設定=未分組。 */
   group?: string;
+  /**
+   * 這條流程產出的檔案要另外存去哪個資料夾。
+   * 未設定 = 用「設定」頁的全域資料夾；`"none"` = 不另外存，只留在平台的「產出檔案」裡。
+   * (使用者原話：「我每個要放的資料夾不一定一樣，也有可能不用放資料夾直接放在『產出檔案』裡面就好」)
+   */
+  outputFolder?: string;
   /** 外部檔案匯入後，第一次執行前必須由使用者明確確認其本機讀檔／外送能力。 */
   importedUntrusted?: boolean;
   n8nMigration?: N8nMigrationSummary;
@@ -134,6 +140,8 @@ export interface NodeContext {
   vars: Record<string, unknown>;
   model: string;
   baseUrl: string;
+  /** 這條流程設定的產出資料夾(未設定=用全域設定；"none"=不另外存，只留在平台的產出檔案裡) */
+  workflowOutputFolder?: string;
   apiKey: string;
   headed: boolean;
   outputDir: string;

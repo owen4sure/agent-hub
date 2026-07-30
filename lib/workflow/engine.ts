@@ -6,6 +6,7 @@ import { chromium, type Browser, type Page, type BrowserContextOptions } from "p
 import { getDb } from "../db";
 import { decryptSecret, encryptSecret } from "../secretVault";
 import { getGlobalSettings, getWorkflowModel, getWorkflowSecretsForKeys, getMaxConcurrent } from "../settingsStore";
+import { resolveModel } from "../modelProviders";
 import { resolveValue, DATE_TOKENS } from "../relativeDate";
 import { notifyDesktop } from "../notify";
 import { getClient } from "../modelClient";
@@ -970,8 +971,8 @@ async function proposeFixInBackground(workflowId: string, runId: string, nodeId:
   const wf = getWorkflow(workflowId);
   if (!wf) return;
   try {
-    const client = getClient();
     const model = getWorkflowModel(workflowId, wf.defaultModel);
+    const client = getClient(model);
     // 改用整圖感知修復(跟手動按「讓 AI 修」同一套)，不是只改回報失敗的那個節點——真正原因常常
     // 在上游沒把資料準備好的節點(見 aiRepairGraph 文件註解)。以前這裡用單節點的 aiRepairNode，
     // 手動修復跟自動監控失敗的修復能力不一致：對著錯的節點瞎改，真正的上游問題永遠修不到。
@@ -1114,8 +1115,11 @@ async function executeWorkflow(item: QueueItem) {
   // 只讀試跑要放行「使用者確認過的唯讀 POST」時，先一次查好整張圖的確認狀態——dryRunSkipKind 是
   // 純函式碰不到 DB。確認綁 method/url/headers/body 指紋，AI 改過設定就自動失效(見 httpReadOnlyApproval)。
   const readOnlyApprovedNodeIds = approvedReadOnlyNodeIds(workflowId, wf.nodes);
-  const { baseUrl, apiKey } = getGlobalSettings();
   const model = getWorkflowModel(workflowId, wf.defaultModel);
+  // 端點與金鑰要跟著「這條流程選的模型」走，不是永遠用全域那組——平台可以有多個模型來源
+  // (內建 gateway + 使用者自己接的地端模型)，寫死全域會把地端模型的請求送到錯的端點。
+  const { provider: modelProvider } = resolveModel(model);
+  const { baseUrl, apiKey } = { baseUrl: modelProvider.baseUrl, apiKey: modelProvider.apiKey };
   const requiredSecretKeys = new Set((deriveRequiresSecrets(wf) ?? []).map((field) => field.key));
   const approvedOverrides = Object.fromEntries(
     Object.entries(item.secretOverrides ?? {}).filter(([key]) => requiredSecretKeys.has(key)),
@@ -1377,6 +1381,7 @@ async function executeWorkflow(item: QueueItem) {
       vars,
       model,
       baseUrl,
+      workflowOutputFolder: wf.outputFolder,
       apiKey,
       headed,
       outputDir,

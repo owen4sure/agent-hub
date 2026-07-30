@@ -22,6 +22,7 @@ import "@xyflow/react/dist/style.css";
 import { autoLayout, compactLegacyLongChain, separateOverlappingNodes, simpleChainSequence } from "@/lib/workflow/layout";
 import { extractVideoFrames, isVideoFile } from "@/lib/videoFrames";
 import { RecordActionCard } from "./RecordActionCard";
+import { OutputFolderPanel } from "./OutputFolderPanel";
 import {
   useWFChat, sendChatToAI, stopChatToAI, stopVerification, startAutoTest, stopAutoTest,
   clearPendingGraph, closeAutoTest, clearChat, discardWorkflowChat, appendAssistantNote, announceSheetSetupIfNeeded,
@@ -299,6 +300,7 @@ export default function WorkflowPage() {
   }, [id]);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [showRecorder, setShowRecorder] = useState(false);
+  const [showOutputFolder, setShowOutputFolder] = useState(false);
   // 模型名稱、API 服務這類不是建立流程所需的知識。平常完全收起，真的有進階需求的人才從「更多動作」打開。
   const [showModelSettings, setShowModelSettings] = useState(false);
   const moreMenuRef = useRef<HTMLDivElement>(null);
@@ -1991,6 +1993,10 @@ export default function WorkflowPage() {
                   <button className="menu-item" onClick={() => { setShowMoreMenu(false); setShowRecorder(true); }}>
                     <span>🔴</span> 錄一段操作給我看
                   </button>
+                  {/* 每條流程各自指定產出資料夾——使用者原話「我每個要放的資料夾不一定一樣」 */}
+                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); setShowOutputFolder(true); }}>
+                    <span>📁</span> 這條流程的檔案要放哪
+                  </button>
                   <div className="menu-sep" />
                   <button className="menu-item" onClick={() => setShowModelSettings((v) => !v)}>
                     <span>🧠</span> AI 選擇（進階）
@@ -2287,6 +2293,14 @@ export default function WorkflowPage() {
         </div>
       </div>
 
+      {showOutputFolder && (
+        <OutputFolderPanel
+          workflowId={id}
+          value={wf.outputFolder}
+          onClose={() => setShowOutputFolder(false)}
+          onSaved={(_next, label) => { setShowOutputFolder(false); flashToast(`這條流程的產出檔：${label}`); void load(); }}
+        />
+      )}
       {showRecorder && (
         <RecordActionCard
           workflowId={id}

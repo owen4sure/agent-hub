@@ -114,8 +114,22 @@ export function createFolder(parentKey: string, name: string): { dir: string } {
  * 順序：節點自己設定的 > 全域設定的 > 呼叫端的預設(通常是桌面，維持舊行為)。
  * 回 null 代表不要另外複製。
  */
-export function resolveExtraSaveDir(nodeConfigured: string | null | undefined, fallback: string | null = null): string | null {
+export const NO_EXTRA_SAVE = "none";
+
+export function resolveExtraSaveDir(
+  nodeConfigured: string | null | undefined,
+  fallback: string | null = null,
+  workflowConfigured?: string | null,
+): string | null {
+  // ① 這個步驟自己填的最優先(同一條流程裡也可能有一兩步要放去別的地方)
   const fromNode = nodeConfigured?.trim();
+  if (fromNode === NO_EXTRA_SAVE) return null;
   if (fromNode) return homeContains(fromNode) ? path.resolve(fromNode) : null;
+  // ② 這條流程自己的設定。"none" = 明確表示「不要另外存，只留在平台的產出檔案裡」，
+  //    這是使用者要的第三種選擇，不能被下面的全域設定或預設值蓋掉。
+  const fromWorkflow = workflowConfigured?.trim();
+  if (fromWorkflow === NO_EXTRA_SAVE) return null;
+  if (fromWorkflow) return homeContains(fromWorkflow) ? path.resolve(fromWorkflow) : null;
+  // ③ 全域設定 ④ 呼叫端的預設(通常是桌面，維持舊行為)
   return getOutputFolder() ?? fallback;
 }

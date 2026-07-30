@@ -363,7 +363,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   }
 
   const changesManifest =
-    body.name !== undefined || body.longDescription !== undefined || body.status !== undefined ||
+    body.name !== undefined || body.longDescription !== undefined || body.status !== undefined || body.outputFolder !== undefined ||
     body.requiresSecrets !== undefined ||
     body.triggerParams !== undefined || body.onFailureWorkflow !== undefined || body.group !== undefined || body.acceptanceSpec !== undefined || body.acknowledgeN8nMigration !== undefined || body.n8nMigrationReview !== undefined;
   if (changesManifest) {
@@ -445,6 +445,8 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
       triggerParams: body.triggerParams ?? cur.triggerParams,
       onFailureWorkflow: onFailure,
       group,
+      outputFolder: body.outputFolder === null ? undefined
+        : typeof body.outputFolder === "string" ? body.outputFolder : cur.outputFolder,
       acceptanceSpec: body.acceptanceSpec === null ? undefined : body.acceptanceSpec !== undefined ? normalizeAcceptanceSpec(body.acceptanceSpec) ?? undefined : cur.acceptanceSpec,
       n8nMigrationAcknowledgedAt: body.acknowledgeN8nMigration === true ? new Date().toISOString() : cur.n8nMigrationAcknowledgedAt,
       n8nMigrationReviews: Object.keys(migrationReviews).length > 0 ? migrationReviews : cur.n8nMigrationReviews,

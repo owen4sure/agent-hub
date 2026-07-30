@@ -91,8 +91,8 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     // 跟 autorun/autofix 同一套防污染標準：結構層(varWarnings)乾淨還不夠，全綠後再過一次語意驗收——
     // 這裡以前只看 status==='success' 就記學習庫，是三個記錄入口裡把關最鬆的一個，
     // 「表面成功但輸出是垃圾」的修法會被記進去、往後每次修復都被當「優先參考」誤導(污染會自我繁殖)。
-    const client = getClient();
     const model = getWorkflowModel(proposal.workflow_id, wf.defaultModel);
+    const client = getClient(model);
     const verdict = await checkRunSemantics(client, model, proposal.workflow_id, result.runId);
     if (!verdict.suspicious) {
       recordFix({ nodeType: node.type, error: proposal.error ?? "", before, after, note: "AI看守正式流程時的修法提案，使用者確認套用" });

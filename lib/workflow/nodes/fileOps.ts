@@ -46,7 +46,7 @@ export const writeFileNode: NodeDefinition = {
 
     // 目的地優先順序：這個節點自己填的 > 「設定 → 產出檔案要放哪」的全域設定 > 不另外複製。
     // 沒有全域設定時行為跟以前完全一樣(留空=只留在產出資料夾)，不會有人的檔案突然跑去別的地方。
-    const extraDir = resolveExtraSaveDir(cfgStr(ctx, "extraDir", ""));
+    const extraDir = resolveExtraSaveDir(cfgStr(ctx, "extraDir", ""), null, ctx.workflowOutputFolder);
     if (extraDir) {
       if (!fs.existsSync(extraDir) || !fs.statSync(extraDir).isDirectory()) {
         throw new PermanentError(`要另存的資料夾不存在或不是資料夾：${extraDir}——到「設定 → 產出檔案要放哪」重新選一個。`);

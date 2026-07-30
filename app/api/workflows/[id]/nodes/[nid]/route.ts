@@ -76,8 +76,8 @@ export async function POST(
   }
 
   try {
-    const client = getClient();
     const model = getWorkflowModel(id, wf.defaultModel);
+    const client = getClient(model);
     // 使用者離開畫面／取消 request 時，連同模型重試、SDK 呼叫與 Claude Code 備援一起中止；
     // 否則一次白話微調可能在瀏覽器早已不要結果後仍於背景耗到 90 秒逾時。
     const result = await editNode(client, model, id, nid, parts, {

@@ -8,6 +8,7 @@ import { RevealCopyButton } from "./RevealCopyButton";
 import { GoogleAccountCard } from "./GoogleAccountCard";
 import { AuditLogCard } from "./AuditLogCard";
 import { OutputFolderCard } from "./OutputFolderCard";
+import { ModelProvidersCard } from "./ModelProvidersCard";
 import { RetentionCard } from "./RetentionCard";
 
 interface SecretField { key: string; label: string; type: string; }
@@ -594,6 +595,7 @@ export default function SettingsPage() {
         </section>
       )}
 
+      <ModelProvidersCard />
       <OutputFolderCard />
       <RetentionCard />
       <AuditLogCard />

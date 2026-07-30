@@ -142,7 +142,7 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
 
   const db = getDb();
   const model = getWorkflowModel(id, wf.defaultModel);
-  const client = getClient();
+  const client = getClient(model);
   const triggerParams = resolveParams(wf.triggerParams ?? [], rawParams, new Date());
   const steps: Step[] = [];
   // 只要其中一項輸入是系統虛構的，這輪最多只能證明「接線／基本邏輯」；絕不能讓 UI 誤導成

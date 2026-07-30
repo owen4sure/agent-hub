@@ -9,6 +9,7 @@ import { callAIWithRetry } from "../aiRetry";
 import { isClaudeCodeModel } from "../claudeCodeClient";
 import { VISION_MODELS, supportsCaptchaVision } from "../models";
 import { PermanentError, type NodeContext } from "./types";
+import { pickVisionModel } from "../modelProviders";
 
 /**
  * 通知/寄信類節點缺帳密時的統一指引措辭——以前 sendEmail.ts 跟 notify.ts 的 telegram/slack/line
@@ -197,7 +198,7 @@ async function tryLocalCaptchaOcr(buffer: Buffer, ctx: NodeContext): Promise<str
 
 /** 驗證碼最多只用一個主力視覺模型加一個備援，不能把整份模型清單逐一試完。 */
 export function captchaVisionPlan(selectedModel: string): { primary: string; backup?: string; rerouted: boolean } {
-  const primary = supportsCaptchaVision(selectedModel) ? selectedModel : VISION_MODELS[0];
+  const primary = supportsCaptchaVision(selectedModel) ? selectedModel : (pickVisionModel(selectedModel, { excludeClaudeCode: true }) ?? VISION_MODELS[0]);
   return {
     primary,
     backup: VISION_MODELS.find((model) => model !== primary),

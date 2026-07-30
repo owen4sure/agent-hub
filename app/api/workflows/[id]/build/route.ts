@@ -414,7 +414,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       };
     }
 
-    const client = getClient();
     const configuredModel = getWorkflowModel(id, wf.defaultModel);
     const { apiKey } = getGlobalSettings();
     let model = configuredModel;
@@ -432,6 +431,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         code: "MODEL_API_NOT_CONFIGURED",
       }, { status: 400 });
     }
+    // client 要在 model 最終定案之後才建：上面可能把模型換成備援模型，
+    // 而不同模型可能屬於不同的來源(端點與金鑰都不一樣，見 lib/modelProviders.ts)。
+    const client = getClient(model);
     // 快速通道剛替換過的話,模型看到的圖必須是「替換後的最新版」,不能用函式開頭那份過期快照
     const cur = pairs.length > 0 ? (getWorkflow(id) ?? wf) : wf;
     const build = beginBuild(id, req.signal);

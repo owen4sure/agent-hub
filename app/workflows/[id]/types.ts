@@ -24,6 +24,8 @@ export interface Workflow {
   name: string;
   status: "draft" | "official";
   builtin: boolean;
+  /** 這條流程產出的檔案要另外存去哪：undefined=跟設定頁一樣、"none"=不另外存、其他=指定資料夾 */
+  outputFolder?: string;
   importedUntrusted?: boolean;
   n8nMigration?: {
     sourceName: string;

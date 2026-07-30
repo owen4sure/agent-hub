@@ -25,6 +25,7 @@ import { resolvePresentationId } from "./nodes/googleSlidesRefresh";
 import { parseSheetUrl } from "./nodes/googleSheet";
 import type { ParamField, WorkflowNode } from "./types";
 import type { MessagePart } from "./builder";
+import { pickVisionModel } from "../modelProviders";
 
 export interface NodeEdit {
   nodeId: string;
@@ -738,13 +739,13 @@ edits 可以有一個或多個節點。config 要是那個節點「改好後的�
     ? `${mainText}\n\n【使用者針對這次失敗補的證據】\n${evidenceText}`
     : mainText;
   const effectiveModel = (opts.parts ?? []).some((part) => part.kind === "image") && !supportsVision(model)
-    ? VISION_MODELS[0]
+    ? (pickVisionModel(model) ?? VISION_MODELS[0])
     : model;
   // 使用者選了本機 Claude Code 並不代表必須接受「CLI 完全沒有回應」；修復是要把流程救回來，
   // 不是測試某一個模型的可用性。CLI 的無心跳逾時後，改用一個確定存在的 gateway 模型接手。
   // 截圖場景要保留視覺能力，文字場景則用產品預設模型，避免把內部代號 claude-code 送給 gateway。
   const gatewayModel = isClaudeCodeModel(effectiveModel)
-    ? ((opts.parts ?? []).some((part) => part.kind === "image") || screenshotPath ? VISION_MODELS[0] : DEFAULT_MODEL)
+    ? ((opts.parts ?? []).some((part) => part.kind === "image") || screenshotPath ? (pickVisionModel(model) ?? VISION_MODELS[0]) : DEFAULT_MODEL)
     : effectiveModel;
 
   // 失敗頁面落地成暫存檔——修復大腦是 Claude Code 時直接 Read/Grep 這份真實頁面驗證選擇器,

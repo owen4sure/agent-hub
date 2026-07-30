@@ -275,7 +275,7 @@ export const excelProcessNode: NodeDefinition = {
     // 欄位名稱保留 desktopPath：既有流程的下游可能引用 {{desktopPath}}，改名會讓那些流程壞掉。
     let desktopPath: string | null = null;
     try {
-      const targetDir = resolveExtraSaveDir(null, path.join(os.homedir(), "Desktop"));
+      const targetDir = resolveExtraSaveDir(null, path.join(os.homedir(), "Desktop"), ctx.workflowOutputFolder);
       if (targetDir) {
         desktopPath = path.join(targetDir, filename);
         fs.copyFileSync(outputPath, desktopPath);

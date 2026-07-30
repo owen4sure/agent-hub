@@ -145,6 +145,8 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   "approval.reject": "拒絕",
   "user-step.save": "儲存我的步驟",
   "user-step.delete": "刪除我的步驟",
+  "model-provider.save": "新增/修改模型來源",
+  "model-provider.delete": "移除模型來源",
   "output-folder.set": "設定產出檔案的資料夾",
   "output-folder.clear": "取消產出資料夾設定",
   "retention.update": "修改資料保留期限",

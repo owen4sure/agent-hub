@@ -149,7 +149,7 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
     return NextResponse.json({ ok: false, code: "SCENARIO_OUTDATED", error: "這個情境屬於舊版流程，請先更新情境後再修復" }, { status: 409 });
   }
   const model = getWorkflowModel(id, wf.defaultModel);
-  const client = getClient();
+  const client = getClient(model);
   let rawParams: Record<string, unknown>;
   try {
     rawParams = scenario
