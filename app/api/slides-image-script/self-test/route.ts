@@ -50,6 +50,20 @@ export async function POST(req: Request) {
     try {
       reply = JSON.parse(text);
     } catch {
+      // 403/存取遭拒 = 腳本還沒被本人授權過。平台用 API 建的腳本沒經過「按允許」那一步，
+      // 而沒授權的網頁應用程式對外一律 403——看起來像部署失敗，其實只差點一次網址。
+      // 這兩種原因的處理方式完全不同，不能混成同一句話(上一版就是混在一起，害使用者去改部署設定)。
+      if (res.status === 403 || /存取遭拒|Access denied|Unauthorized/i.test(text)) {
+        return NextResponse.json({
+          ok: false,
+          needsAuthorize: true,
+          authorizeUrl: scriptUrl,
+          message: "腳本已經部署好了，但還差最後一步：它從來沒有被你本人授權過，所以 Google 擋住所有呼叫。"
+            + "用你自己的瀏覽器打開下面這個網址一次、按「允許」（中間可能出現「Google 尚未驗證這個應用程式」，"
+            + "點「進階」→「前往…（不安全）」——那是因為這段腳本是你自己剛建的、沒送審，不是它有問題）。"
+            + "看到「已就緒」那行字就完成了，回來再按一次這顆。",
+        });
+      }
       return NextResponse.json({
         ok: false,
         message: "腳本沒有回傳預期的結果——最常見的原因是部署時「誰可以存取」沒有選成「任何人」。請回 Apps Script 用「管理部署作業 → 編輯 → 新版本」重新部署一次。",

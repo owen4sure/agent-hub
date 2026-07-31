@@ -31,6 +31,21 @@ export function googleSlidesImageScriptTemplate(token: string): string {
 // 這組驗證碼要跟 Agent Hub 裡的設定一模一樣，不要外流、不要自己改。
 var AGENT_HUB_TOKEN = "${safe}";
 
+/**
+ * 用瀏覽器打開這個網址時會走到這裡。
+ *
+ * 它存在的唯一理由是**觸發授權**：平台用 API 幫使用者建好並部署腳本之後，這個腳本
+ * 其實還沒有被他本人授權過(手動部署時那個「Google 尚未驗證這個應用程式」的畫面就是在授權)，
+ * 而沒授權的網頁應用程式對外一律回 403 存取遭拒——看起來像部署失敗，其實只差按一次「允許」。
+ * 有了 doGet，使用者只要用自己的瀏覽器打開這個網址一次、按允許，之後平台就叫得動它了。
+ * 順便也當成「這個網址到底通不通」的肉眼檢查。
+ */
+function doGet() {
+  return ContentService.createTextOutput(
+    "Agent Hub 換圖腳本已就緒。看到這行字就代表授權完成了，可以關掉這個分頁，回 Agent Hub 按「實際換一次圖給我看」。"
+  ).setMimeType(ContentService.MimeType.TEXT);
+}
+
 function doPost(e) {
   try {
     var body = JSON.parse(e.postData.contents);

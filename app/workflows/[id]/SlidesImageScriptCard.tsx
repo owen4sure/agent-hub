@@ -35,7 +35,7 @@ export function SlidesImageScriptCard({ workflowId, onClose }: { workflowId: str
   const [deployResult, setDeployResult] = useState<{ ok: boolean; message: string; webAppUrl?: string; actionUrl?: string | null; actionLabel?: string | null; raw?: string } | null>(null);
   const [filledInto, setFilledInto] = useState<string[]>([]);
   const [proving, setProving] = useState(false);
-  const [proof, setProof] = useState<{ ok: boolean; message: string; presentationUrl?: string | null; thumbnailBase64?: string | null } | null>(null);
+  const [proof, setProof] = useState<{ ok: boolean; message: string; presentationUrl?: string | null; thumbnailBase64?: string | null; needsAuthorize?: boolean; authorizeUrl?: string } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -386,6 +386,11 @@ export function SlidesImageScriptCard({ workflowId, onClose }: { workflowId: str
               <p className="text-xs leading-relaxed" style={{ color: proof.ok ? "var(--green)" : "var(--red)" }}>
                 {proof.ok ? "✅ " : "⚠️ "}{proof.message}
               </p>
+              {proof.needsAuthorize && proof.authorizeUrl && (
+                <a className="btn btn-primary text-xs inline-block" href={proof.authorizeUrl} target="_blank" rel="noreferrer">
+                  打開腳本網址完成授權 ↗
+                </a>
+              )}
               {proof.thumbnailBase64 && (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
