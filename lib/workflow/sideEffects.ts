@@ -82,9 +82,14 @@ export const NODE_SIDE_EFFECTS: Readonly<Record<string, NodeSideEffectSpec>> = {
   // 處理方式不同 ≠ 沒有副作用——這正是這次 P0 的成因。
   "google-slides-create": { effects: ["remote-write"], dryRun: "self-guard" },
   "google-slides-refresh": { effects: ["remote-write"], dryRun: "self-guard" },
+  // 真的會改到使用者拿去開會的簡報，跟寫進別人的試算表同一級。
+  "google-slides-replace-image": { effects: ["remote-write"], dryRun: "self-guard" },
 
   // ── 只寫本次執行的工作區(把輸入抓進來)，不是使用者資料的變更 ──
   "download-attachment": { effects: ["workspace-file"], dryRun: "none" },
+  // 只把圖片寫進本次執行的工作區(debugDir)，不碰使用者的檔案，也不送出去——
+  // 所以只讀試跑照跑：讓使用者在安全排練時就看得到「圖會長什麼樣」。
+  "excel-range-image": { effects: ["workspace-file"], dryRun: "none" },
   unzip: { effects: ["workspace-file"], dryRun: "none" },
   "browser-login": { effects: ["workspace-file"], dryRun: "none" },
 

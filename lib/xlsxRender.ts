@@ -1,4 +1,5 @@
 import ExcelJS from "exceljs";
+import { cellRawValue, colNum, cssColor, esc } from "./xlsxCellStyle";
 
 /**
  * 把 Excel 渲染成「一張圖片」，讓 dashboard 的 AI 像人一樣「真的看到」這個檔案長什麼樣——
@@ -7,63 +8,13 @@ import ExcelJS from "exceljs";
  * (只需要 chromium，不用 LibreOffice 之類的重依賴，開源給別人用時開箱即可跑)
  */
 
-// Office 佈景主題標準配色(theme 索引 → RGB)。Excel 的白字/主題配色是用 theme 存的，一定要對應回真實顏色。
-const THEME_PALETTE: Record<number, string> = {
-  0: "FFFFFF", // 背景1(白)
-  1: "000000", // 文字1(黑)
-  2: "E7E6E6", // 背景2(淺灰)
-  3: "44546A", // 文字2(深藍灰)
-  4: "4472C4", // 輔色1
-  5: "ED7D31", // 輔色2
-  6: "A5A5A5", // 輔色3
-  7: "FFC000", // 輔色4
-  8: "5B9BD5", // 輔色5
-  9: "70AD47", // 輔色6
-};
-
-function applyTint(hex: string, tint: number): string {
-  let r = parseInt(hex.slice(0, 2), 16);
-  let g = parseInt(hex.slice(2, 4), 16);
-  let b = parseInt(hex.slice(4, 6), 16);
-  if (tint < 0) {
-    const f = 1 + tint; // 變暗
-    r = Math.round(r * f); g = Math.round(g * f); b = Math.round(b * f);
-  } else if (tint > 0) {
-    r = Math.round(r * (1 - tint) + 255 * tint); // 變亮
-    g = Math.round(g * (1 - tint) + 255 * tint);
-    b = Math.round(b * (1 - tint) + 255 * tint);
-  }
-  const h = (n: number) => Math.max(0, Math.min(255, n)).toString(16).padStart(2, "0");
-  return `${h(r)}${h(g)}${h(b)}`;
-}
-
-/** 把 exceljs 的顏色(argb 或 theme+tint)轉成 CSS #rrggbb；認不得就回 null */
-function cssColor(raw: unknown): string | null {
-  const col = raw as { argb?: string; theme?: number; tint?: number } | undefined;
-  if (!col) return null;
-  if (col.argb && /^[0-9A-Fa-f]{8}$/.test(col.argb)) return `#${col.argb.slice(2)}`; // 去掉透明度前兩碼
-  if (typeof col.theme === "number" && THEME_PALETTE[col.theme]) {
-    return `#${applyTint(THEME_PALETTE[col.theme], col.tint ?? 0)}`;
-  }
-  return null;
-}
-
-function esc(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
+// 顏色/文字/欄位代號的解讀邏輯跟 `xlsxRangeImage`(把範圍畫成圖貼進簡報)共用一份——
+// 各寫一份必然漂移，而症狀是「AI 看到的樣子」跟「貼進簡報的樣子」不一致，非常難查。
 function cellText(v: unknown): string {
-  if (v === null || v === undefined) return "";
-  if (v instanceof Date) return v.toISOString().slice(0, 10);
-  if (typeof v === "object") {
-    const o = v as Record<string, unknown>;
-    if ("result" in o) return String(o.result ?? "");
-    if ("richText" in o) return (o.richText as { text: string }[]).map((t) => t.text).join("");
-    if ("text" in o) return String(o.text);
-    if ("error" in o) return String(o.error);
-    return "";
-  }
-  return String(v);
+  const { value } = cellRawValue(v);
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value);
 }
 
 const MAX_ROWS = 80;
@@ -131,11 +82,7 @@ function sheetToHtml(sheet: ExcelJS.Worksheet): string {
   return `<div class="sheet"><div class="title">分頁「${esc(sheet.name)}」</div><table><colgroup>${cols.join("")}</colgroup>${rows.join("")}</table></div>`;
 }
 
-function colNum(letters: string): number {
-  let n = 0;
-  for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64);
-  return n;
-}
+
 
 /**
  * 渲染成 base64 PNG。失敗(chromium 沒裝、檔案壞…)回 null，讓上傳流程照樣走文字版，不要整個掛掉。

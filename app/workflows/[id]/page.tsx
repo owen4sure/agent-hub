@@ -23,6 +23,7 @@ import { autoLayout, compactLegacyLongChain, separateOverlappingNodes, simpleCha
 import { extractVideoFrames, isVideoFile } from "@/lib/videoFrames";
 import { RecordActionCard } from "./RecordActionCard";
 import { OutputFolderPanel } from "./OutputFolderPanel";
+import { SlidesImageScriptCard } from "./SlidesImageScriptCard";
 import {
   useWFChat, sendChatToAI, stopChatToAI, stopVerification, startAutoTest, stopAutoTest,
   clearPendingGraph, closeAutoTest, clearChat, discardWorkflowChat, appendAssistantNote, announceSheetSetupIfNeeded,
@@ -300,6 +301,7 @@ export default function WorkflowPage() {
   }, [id]);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [showRecorder, setShowRecorder] = useState(false);
+  const [showSlidesImageScript, setShowSlidesImageScript] = useState(false);
   const [showOutputFolder, setShowOutputFolder] = useState(false);
   // 模型名稱、API 服務這類不是建立流程所需的知識。平常完全收起，真的有進階需求的人才從「更多動作」打開。
   const [showModelSettings, setShowModelSettings] = useState(false);
@@ -2009,6 +2011,10 @@ export default function WorkflowPage() {
                   <button className="menu-item" onClick={() => { setShowMoreMenu(false); setShowOutputFolder(true); }}>
                     <span>📁</span> 這條流程的檔案要放哪
                   </button>
+                  {/* 換簡報圖片需要一次性部署一小段 Apps Script——沒有入口就等於沒有這個功能 */}
+                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); setShowSlidesImageScript(true); }}>
+                    <span>🖼️</span> 讓流程能換簡報上的圖片
+                  </button>
                   <div className="menu-sep" />
                   <button className="menu-item" onClick={() => setShowModelSettings((v) => !v)}>
                     <span>🧠</span> AI 選擇（進階）
@@ -2322,6 +2328,7 @@ export default function WorkflowPage() {
           onSaved={(_next, label) => { setShowOutputFolder(false); flashToast(`這條流程的產出檔：${label}`); void load(); }}
         />
       )}
+      {showSlidesImageScript && <SlidesImageScriptCard onClose={() => setShowSlidesImageScript(false)} />}
       {showRecorder && (
         <RecordActionCard
           workflowId={id}

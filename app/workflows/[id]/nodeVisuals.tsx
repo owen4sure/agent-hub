@@ -5,7 +5,7 @@ import { Handle, Position, type NodeProps } from "@xyflow/react";
 
 export const ICONS: Record<string, string> = {
   trigger: "⏰", "browser-login": "🔐", "find-email": "🔍", "download-attachment": "📥",
-  "excel-process": "📊", "pdf-read": "📄", unzip: "🗜️", "http-request": "🌐", "template-text": "📝", "set-variable": "🔧",
+  "excel-process": "📊", "excel-range-image": "🖼️", "google-slides-replace-image": "🖼️", "pdf-read": "📄", unzip: "🗜️", "http-request": "🌐", "template-text": "📝", "set-variable": "🔧",
   "if-condition": "🔀", "llm-decide": "🧠", "custom-code": "⚙️", "repeat-steps": "🔁",
   "telegram-notify": "✈️", "line-notify": "💬",
   "write-file": "💾", "read-file": "📂", "web-page": "🕸️", "desktop-notify": "🔔", "send-email": "✉️", "webmail-send": "📧",
@@ -24,6 +24,8 @@ export const TYPE_META: Record<string, { cat: string; label: string }> = {
   "find-email": { cat: "browser", label: "找信件" },
   "download-attachment": { cat: "browser", label: "下載附件" },
   "excel-process": { cat: "data", label: "Excel 處理" },
+  "excel-range-image": { cat: "data", label: "Excel 範圍截圖" },
+  "google-slides-replace-image": { cat: "integration", label: "換掉簡報上的圖片" },
   "pdf-read": { cat: "data", label: "讀取 PDF" },
   "template-text": { cat: "data", label: "組文字" },
   unzip: { cat: "file", label: "解壓縮" },
