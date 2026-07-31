@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       # Node 24(npm 11)要跟產生 package-lock.json 的版本一致——npm 10/11 對
       # 「平台限定可選包的 bundled 依賴」寫進 lock 的格式不同，混用會在 npm ci 假報 out-of-sync
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
