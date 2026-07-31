@@ -83,7 +83,16 @@ export async function POST(req: Request) {
         : "已經把既有的那份腳本更新到最新版（網址沒有變，流程裡填的設定不用改）。",
     });
   } catch (err) {
-    const message = err instanceof AppsScriptDeployError ? err.message : err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ ok: false, message });
+    // 錯誤要連「下一步點哪裡」一起送到畫面上——只給一段文字，使用者還是不知道要去哪。
+    if (err instanceof AppsScriptDeployError) {
+      return NextResponse.json({
+        ok: false,
+        message: err.info.message,
+        actionUrl: err.info.actionUrl ?? null,
+        actionLabel: err.info.actionLabel ?? null,
+        raw: err.info.raw.slice(0, 400),
+      });
+    }
+    return NextResponse.json({ ok: false, message: err instanceof Error ? err.message : String(err) });
   }
 }

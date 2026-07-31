@@ -16,7 +16,25 @@
 
 const BASE = "https://script.googleapis.com/v1";
 
-export class AppsScriptDeployError extends Error {}
+/**
+ * 錯誤要能帶著「下一步該點哪裡」——只有訊息字串的話，使用者看到一段話還是不知道要去哪。
+ */
+export interface ApiErrorInfo {
+  message: string;
+  /** 有明確可以點的目的地時帶上(例如 Google 自己回的「去這裡啟用」網址，裡面含專案編號) */
+  actionUrl?: string;
+  actionLabel?: string;
+  /** Google 的原始訊息，永遠保留——判斷式一旦分類錯，這是使用者/我唯一能對照的東西 */
+  raw: string;
+}
+
+export class AppsScriptDeployError extends Error {
+  readonly info: ApiErrorInfo;
+  constructor(info: ApiErrorInfo) {
+    super(info.message);
+    this.info = info;
+  }
+}
 
 async function call<T>(
   accessToken: string,
@@ -36,31 +54,54 @@ async function call<T>(
   try {
     return JSON.parse(text) as T;
   } catch {
-    throw new AppsScriptDeployError(`Apps Script API 回了看不懂的內容：${text.slice(0, 160)}`);
+    throw new AppsScriptDeployError({ message: `Apps Script API 回了看不懂的內容：${text.slice(0, 160)}`, raw: text });
   }
 }
 
 /**
  * 把 Google 的錯誤翻成「使用者下一步該做什麼」。
  *
- * 這裡的每一種都對應一個**使用者自己動手才能解決**的前置條件；講不清楚的話他只會看到
- * 一串英文然後回來問，那這個「自動化」等於沒有省到事。
+ * ⚠️ **「Apps Script API 沒開」有兩個完全不同的東西，指錯地方比不指還糟**(真實踩過：
+ * 使用者照著訊息去把帳號層的開關打開了，再按一次還是同一句話，等於卡死)：
+ * ①**帳號層的個人開關**(script.google.com/home/usersettings)——Google 的訊息是
+ *   「User has not enabled the Apps Script API」。
+ * ②**Cloud 專案層的 API 啟用**——訊息是「Apps Script API has not been used in project 12345
+ *   before or it is disabled」，而且 Google 會**在訊息裡附上含專案編號的啟用網址**。
+ * 這兩者要分開判斷，而且第二種一定要把 Google 給的那個網址原樣交給使用者——
+ * 那串網址帶著他的專案編號，我們自己組不出來。
  */
-export function friendlyApiError(status: number, body: string): string {
-  if (/User has not enabled the Apps Script API|Apps Script API.*(not enabled|disabled)/i.test(body)) {
-    return "你的 Google 帳號還沒打開「Apps Script API」這個總開關（預設是關的，而且只有你本人能開，沒有任何程式可以代勞）。"
-      + "請到 https://script.google.com/home/usersettings 把它打開，再回來按一次。";
+export function friendlyApiError(status: number, body: string): ApiErrorInfo {
+  const raw = body;
+  // Google 在訊息裡附的啟用網址(帶專案編號)，有的話一律直接給使用者點
+  const enableUrl = body.match(/https:\/\/console\.(?:developers|cloud)\.google\.com\/[^\s"'\\)]+/)?.[0];
+
+  if (/has not been used in project|is disabled.*project|SERVICE_DISABLED/i.test(body)) {
+    return {
+      message: "這是另一個開關（不是你剛才開的那個）：你的 Google Cloud 專案裡還沒啟用 Apps Script API。"
+        + "（跟 script.google.com 那個帳號層開關是兩回事，兩個都要開。）"
+        + "點下面的按鈕會直接開到你那個專案的啟用頁，按「啟用」再回來按一次即可；剛啟用可能要等 1 分鐘才生效。",
+      actionUrl: enableUrl ?? "https://console.cloud.google.com/apis/library/script.googleapis.com",
+      actionLabel: "去啟用 Apps Script API",
+      raw,
+    };
+  }
+  if (/User has not enabled the Apps Script API/i.test(body)) {
+    return {
+      message: "你的 Google 帳號還沒打開「Apps Script API」這個個人開關（預設是關的，只有你本人能開）。"
+        + "打開之後回來再按一次。",
+      actionUrl: "https://script.google.com/home/usersettings",
+      actionLabel: "去打開那個開關",
+      raw,
+    };
   }
   if (status === 403 && /insufficient|scope/i.test(body)) {
-    return "目前的 Google 授權沒有包含「建立與部署 Apps Script」這兩項權限——請先按下面的「重新授權 Google」拿一組新的授權，再回來按一次。";
+    return { message: "目前的 Google 授權沒有包含「建立與部署 Apps Script」這兩項權限——請先完成第 1 步的重新授權，再回來按一次。", raw };
   }
-  if (status === 401) {
-    return "Google 授權過期或無效，請重新授權一次。";
-  }
+  if (status === 401) return { message: "Google 授權過期或無效，請重新授權一次。", raw };
   if (status === 429 || status === 503) {
-    return "Google 這邊暫時忙不過來（配額或服務忙碌），過一下再試一次；不是設定有問題。";
+    return { message: "Google 這邊暫時忙不過來（配額或服務忙碌），過一下再試一次；不是設定有問題。", raw };
   }
-  return `Apps Script API 失敗（HTTP ${status}）：${body.replace(/\s+/g, " ").slice(0, 200)}`;
+  return { message: `Apps Script API 失敗（HTTP ${status}）：${body.replace(/\s+/g, " ").slice(0, 200)}`, raw };
 }
 
 /**
@@ -126,7 +167,7 @@ export async function deployWebApp(input: {
   const created = !scriptId;
   if (!scriptId) {
     const project = await call<{ scriptId?: string }>(accessToken, "POST", "/projects", { title: input.title }, signal);
-    if (!project.scriptId) throw new AppsScriptDeployError("Google 建立了專案卻沒有回傳 scriptId，無法繼續。");
+    if (!project.scriptId) throw new AppsScriptDeployError({ message: "Google 建立了專案卻沒有回傳 scriptId，無法繼續。", raw: "" });
     scriptId = project.scriptId;
   }
 
@@ -141,7 +182,7 @@ export async function deployWebApp(input: {
     accessToken, "POST", `/projects/${scriptId}/versions`,
     { description: `Agent Hub ${new Date().toISOString().slice(0, 19)}` }, signal,
   );
-  if (!version.versionNumber) throw new AppsScriptDeployError("建立版本失敗：Google 沒有回傳版本號。");
+  if (!version.versionNumber) throw new AppsScriptDeployError({ message: "建立版本失敗：Google 沒有回傳版本號。", raw: "" });
 
   const config = {
     versionNumber: version.versionNumber,
@@ -155,10 +196,11 @@ export async function deployWebApp(input: {
 
   const webAppUrl = webAppUrlOf(deployment);
   if (!deployment.deploymentId || !webAppUrl) {
-    throw new AppsScriptDeployError(
-      "部署完成了，但 Google 沒有給網頁應用程式網址——通常代表清單檔沒有被當成網頁應用程式。"
-      + "可以改用下面的手動步驟部署一次。",
-    );
+    throw new AppsScriptDeployError({
+      message: "部署完成了，但 Google 沒有給網頁應用程式網址——通常代表清單檔沒有被當成網頁應用程式。"
+        + "可以改用手動步驟部署一次。",
+      raw: JSON.stringify(deployment).slice(0, 300),
+    });
   }
   return { scriptId, deploymentId: deployment.deploymentId, webAppUrl, created };
 }

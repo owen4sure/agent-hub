@@ -9,6 +9,15 @@
 
 ### Fixed
 
+- Fixed｜「你還沒打開 Apps Script API」——但使用者明明打開了｜實測截圖：他照訊息去 script.google.com 把開關打開，再按一次還是同一句話，等於卡死。根因是**「Apps Script API 沒開」其實有兩個完全不同的東西**，而我的判斷式把它們混在一起：①帳號層的個人開關（script.google.com/home/usersettings，訊息是 `User has not enabled the Apps Script API`）；②**Cloud 專案層的 API 啟用**（訊息是 `Apps Script API has not been used in project 12345 before or it is disabled`）。真正擋住他的是第二種，而我的 regex `Apps Script API.*(not enabled|disabled)` 會誤命中它、然後指去第一種的畫面。**指錯地方比不指還糟**——照著做卻沒有用，使用者會以為是產品壞了。修法：兩種分開判斷；第二種一律把 **Google 自己在錯誤訊息裡附的啟用網址**原樣交給使用者（那串網址帶著他的專案編號，我們自己組不出來），並在畫面上做成一顆可以直接點的按鈕；另外一律附上 Google 的原始訊息（摺疊）——判斷式再分類錯時，那是唯一能對照的東西｜`friendlyApiError` 改回傳 `{message, actionUrl, actionLabel, raw}`｜驗證：用真實帳號重現，正確辨識成 Cloud 專案那種並取出含專案編號的網址；2 個測試分別盯住兩種不可混淆
+
+- Fixed｜設定卡把「自動」當主打、「手動」收進摺疊區——**對新手是反的**｜使用者原話：「你要有辦法讓第一次或是剛開始用的人都看得懂要怎麼做！」。自動那條需要 Google Cloud 專案 + OAuth 用戶端 + 登記重新導向網址 + 重新授權 + 開兩個 API 開關，五個前置條件全是新手沒看過的東西；**手動那條一個都不用**，只要有 Google 帳號。現在依「這台機器有沒有設定好 Google 授權」決定誰排前面：沒有 → 手動當主要路徑（標題直接寫「不用申請任何東西」）；有 → 自動當主要路徑。手動步驟也照新手重寫：每一步講清楚會看到什麼畫面、要點哪幾個字，並**預先安撫 Google 那個「尚未驗證這個應用程式」的嚇人畫面**（新手幾乎都停在那裡）｜驗證：瀏覽器實測兩種狀態的畫面
+
+### Added
+
+- Added｜自我測試通過後，網址自動填進流程的「換掉簡報上的圖片」那一步｜原本畫面上寫「我會自動填進去」但程式碼根本沒做——那是這個 repo 最不能接受的那種假承諾。現在真的做了，而且**只有在自我測試通過之後才填**（沒驗證就先填等於把一個不確定會動的設定塞進正式流程）。寫入走 `nodeConfig` 只改那一個欄位，不整包送 nodes（AGENTS.md 鐵則 1）
+
+
 - Fixed｜按「前往 Google 授權」直接被 Google 擋下來（redirect_uri_mismatch），而畫面上完全沒提到要先做什麼｜使用者實測截圖：`Access blocked: This app's request is invalid / Error 400: redirect_uri_mismatch`。根因是**兩條授權路徑用不同的重新導向網址**：既有的 Google 憑證是照「OAuth Playground」那條設定流程建的，登記的是 `https://developers.google.com/oauthplayground`；新加的一鍵授權是由 Agent Hub 自己接收結果（`http://127.0.0.1:3000/api/oauth/google/callback`），那一行憑證裡沒有，所以必被擋。**設定頁的 Google 卡片其實早就把這行網址連同複製按鈕做好了，是我新做的卡片沒有把它帶過來**——功能存在但不在使用者當下的動線上，等於不存在（同一類問題的第四次）。現在第 1 步直接顯示那一行 + 複製按鈕 + 「到憑證頁 → 點你的 OAuth 用戶端 → 已授權的重新導向 URI → 新增 → 儲存」的逐步指路，並說明為什麼會多這一步（原本那行不用刪，兩行可以並存）；按鈕下方另外寫明「出現 redirect_uri_mismatch = 上面那行還沒加或還沒存」｜`SlidesImageScriptCard` 改讀 `/api/oauth/google/status` 的 `redirectUri`
 
 ### Added

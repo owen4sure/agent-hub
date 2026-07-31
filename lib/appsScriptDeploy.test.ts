@@ -15,15 +15,26 @@ test("清單檔一定要有 webapp 區段，否則部署會成功卻拿不到 /e
   assert.equal(manifest.runtimeVersion, "V8");
 });
 
-test("錯誤訊息要指到「只有你本人能做」的那件事", () => {
-  assert.match(
-    friendlyApiError(403, '{"error":{"message":"User has not enabled the Apps Script API"}}'),
-    /usersettings/,
-    "API 總開關沒開時要直接給他那個網址",
-  );
-  assert.match(friendlyApiError(403, "Request had insufficient authentication scopes."), /重新授權/);
-  assert.match(friendlyApiError(429, "quota"), /過一下再試/);
-  assert.match(friendlyApiError(500, "boom"), /HTTP 500/);
+test("「Apps Script API 沒開」的兩種要分清楚——指錯地方比不指還糟", () => {
+  // 真實踩過：使用者照訊息去把帳號層開關打開了，再按一次還是同一句話，等於卡死。
+  // 因為真正擋住他的是 Cloud 專案層那個，是完全不同的畫面。
+  const project = friendlyApiError(403, JSON.stringify({ error: { message:
+    "Apps Script API has not been used in project 123456789 before or it is disabled. "
+    + "Enable it by visiting https://console.developers.google.com/apis/api/script.googleapis.com/overview?project=123456789 then retry." } }));
+  assert.match(project.message, /Cloud 專案/);
+  assert.equal(project.actionUrl, "https://console.developers.google.com/apis/api/script.googleapis.com/overview?project=123456789",
+    "一定要用 Google 自己給的那個網址——它帶著使用者的專案編號，我們組不出來");
+
+  const personal = friendlyApiError(403, '{"error":{"message":"User has not enabled the Apps Script API"}}');
+  assert.match(personal.message, /個人開關/);
+  assert.equal(personal.actionUrl, "https://script.google.com/home/usersettings");
+  assert.doesNotMatch(personal.message, /Cloud 專案/, "不能跟另一種混在一起");
+
+  assert.match(friendlyApiError(403, "Request had insufficient authentication scopes.").message, /重新授權/);
+  assert.match(friendlyApiError(429, "quota").message, /過一下再試/);
+  assert.match(friendlyApiError(500, "boom").message, /HTTP 500/);
+  // 原始訊息永遠保留：判斷式分類錯的時候，這是唯一能對照的東西
+  assert.equal(friendlyApiError(500, "boom").raw, "boom");
 });
 
 function fakeFetch(steps: Record<string, unknown>) {
@@ -102,7 +113,7 @@ test("部署了卻沒拿到網頁應用程式網址，要老實報錯並指路�
   try {
     await assert.rejects(
       () => deployWebApp({ accessToken: "t", title: "T", code: "x", oauthScopes: ["s"] }),
-      (err: unknown) => err instanceof AppsScriptDeployError && /手動步驟/.test((err as Error).message),
+      (err: unknown) => err instanceof AppsScriptDeployError && /手動步驟/.test(err.message),
     );
   } finally {
     globalThis.fetch = original;

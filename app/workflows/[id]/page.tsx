@@ -2377,7 +2377,7 @@ export default function WorkflowPage() {
           onSaved={(_next, label) => { setShowOutputFolder(false); flashToast(`這條流程的產出檔：${label}`); void load(); }}
         />
       )}
-      {showSlidesImageScript && <SlidesImageScriptCard onClose={() => setShowSlidesImageScript(false)} />}
+      {showSlidesImageScript && <SlidesImageScriptCard workflowId={id} onClose={() => { setShowSlidesImageScript(false); void load(); }} />}
       {showRecorder && (
         <RecordActionCard
           workflowId={id}
