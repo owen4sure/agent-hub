@@ -21,6 +21,8 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [deployStatus, setDeployStatus] = useState<{ hasClient: boolean; missingScopes: string[]; webAppUrl: string | null; deployed: boolean } | null>(null);
+  const [redirectUri, setRedirectUri] = useState("");
+  const [copiedUri, setCopiedUri] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [deployResult, setDeployResult] = useState<{ ok: boolean; message: string; webAppUrl?: string } | null>(null);
   const [proving, setProving] = useState(false);
@@ -35,6 +37,13 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
         if (d.token) { setToken(d.token); setScript(d.script); } else setLoadError(d.error ?? "拿不到腳本內容");
       })
       .catch((e) => alive && setLoadError(String(e)));
+    // 授權要用的重新導向網址：使用者的 Google 憑證裡必須有登記這一行，否則按下去只會拿到
+    // 「Access blocked / redirect_uri_mismatch」。真實踩過——舊的設定流程是走 OAuth Playground，
+    // 登記的是 playground 的網址，所以第一次按新的授權按鈕一定會被擋。
+    fetch("/api/oauth/google/status")
+      .then((r) => r.json())
+      .then((d) => { if (alive && d.redirectUri) setRedirectUri(d.redirectUri); })
+      .catch(() => { /* 拿不到就不顯示這一段，授權按鈕照樣可用 */ });
     fetch("/api/slides-image-script/deploy")
       .then((r) => r.json())
       .then((d) => {
@@ -46,6 +55,14 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
       .catch(() => { /* 拿不到就當作沒部署過，手動步驟照樣可用 */ });
     return () => { alive = false; };
   }, []);
+
+  async function copyRedirectUri() {
+    try {
+      await navigator.clipboard.writeText(redirectUri);
+      setCopiedUri(true);
+      setTimeout(() => setCopiedUri(false), 2500);
+    } catch { /* 複製不了就讓使用者自己選取，網址本來就顯示在畫面上 */ }
+  }
 
   async function autoDeploy() {
     setDeploying(true);
@@ -151,9 +168,35 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
               {needsScopes ? (
                 <>
                   <p className="text-xs muted leading-relaxed">
-                    你之前的 Google 授權還沒包含「建立與部署 Apps Script」，點下去會跳到 Google 的同意畫面，按同意就好。
+                    你之前的 Google 授權還沒包含「建立與部署 Apps Script」，要重新授權一次。
                   </p>
+                  {redirectUri && (
+                    <div className="rounded-md p-2 space-y-1" style={{ background: "var(--surface)" }}>
+                      <p className="text-xs leading-relaxed">
+                        <b>先做這件事，不然按下去會被 Google 擋下來</b>：把下面這一行加到你的 Google 憑證裡。
+                        到{" "}
+                        <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
+                          Google Cloud Console 的「憑證」頁 ↗
+                        </a>{" "}
+                        → 點你那個 <b>OAuth 2.0 用戶端 ID</b> → 找到<b>「已授權的重新導向 URI」</b>
+                        → 按「+ 新增 URI」→ 貼上 → 儲存。（原本那一行不用刪，兩行可以並存）
+                      </p>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <code className="text-xs break-all flex-1 min-w-48">{redirectUri}</code>
+                        <button type="button" className="btn btn-ghost text-xs" onClick={copyRedirectUri}>
+                          {copiedUri ? "✅ 已複製" : "複製"}
+                        </button>
+                      </div>
+                      <p className="text-xs faint">
+                        為什麼要多這一步：你當初的 Google 憑證是用「OAuth Playground」那條路設定的，
+                        登記的是 Playground 的網址；現在改成由 Agent Hub 自己接收授權結果，網址不一樣，要多登記一行。
+                      </p>
+                    </div>
+                  )}
                   <a className="btn btn-primary text-xs inline-block" href="/api/oauth/google/start">前往 Google 授權</a>
+                  <p className="text-xs faint">
+                    按了出現「Access blocked：redirect_uri_mismatch」= 上面那一行還沒加進去，或是加了還沒按儲存。
+                  </p>
                 </>
               ) : (
                 <p className="text-xs muted">已完成，不用再做。</p>
