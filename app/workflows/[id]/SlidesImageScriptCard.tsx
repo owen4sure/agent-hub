@@ -20,6 +20,8 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
   const [scriptUrl, setScriptUrl] = useState("");
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [proving, setProving] = useState(false);
+  const [proof, setProof] = useState<{ ok: boolean; message: string; presentationUrl?: string | null; thumbnailBase64?: string | null } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -58,6 +60,23 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
       setCheckResult({ ok: false, message: `檢查失敗：${e instanceof Error ? e.message : String(e)}` });
     } finally {
       setChecking(false);
+    }
+  }
+
+  async function prove() {
+    setProving(true);
+    setProof(null);
+    try {
+      const res = await fetch("/api/slides-image-script/self-test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scriptUrl }),
+      });
+      setProof(await res.json());
+    } catch (e) {
+      setProof({ ok: false, message: `測試失敗：${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setProving(false);
     }
   }
 
@@ -127,7 +146,40 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
             )}
           </li>
           <li>
-            通了之後，把這個網址填進流程裡「換掉簡報上的圖片」那一步的設定。
+            通了之後，按這顆看它<b>真的換一次圖</b>——腳本會自己開一份用完即棄的測試簡報示範，
+            <b>你的正式簡報一個字都不會動</b>。
+            <div className="mt-1.5">
+              <button type="button" className="btn btn-primary text-xs" onClick={prove} disabled={proving || !scriptUrl.trim()}>
+                {proving ? "測試中…（約 10-30 秒）" : "🧪 實際換一次圖給我看"}
+              </button>
+            </div>
+            {proof && (
+              <div className="mt-2 space-y-1.5">
+                <p className="text-xs leading-relaxed" style={{ color: proof.ok ? "var(--green)" : "var(--red)" }}>
+                  {proof.ok ? "✅ " : "⚠️ "}{proof.message}
+                </p>
+                {proof.thumbnailBase64 && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={`data:image/png;base64,${proof.thumbnailBase64}`}
+                    alt="測試簡報換圖後的畫面"
+                    className="rounded-md border w-full"
+                    style={{ borderColor: "var(--border)" }}
+                  />
+                )}
+                {proof.presentationUrl && (
+                  <p className="text-xs">
+                    <a href={proof.presentationUrl} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
+                      開啟那份測試簡報
+                    </a>
+                    <span className="faint">（看完可以直接刪掉，它跟你的正式簡報無關）</span>
+                  </p>
+                )}
+              </div>
+            )}
+          </li>
+          <li>
+            確認沒問題後，把這個網址填進流程裡「換掉簡報上的圖片」那一步的設定。
           </li>
         </ol>
 

@@ -167,3 +167,20 @@ export function negativeIsRed(numFmt: string | undefined): boolean {
   const sections = (numFmt ?? "").split(";");
   return sections.length > 1 && /\[Red\]/i.test(sections[1]);
 }
+
+/**
+ * 從 PNG 檔頭讀出像素寬高。
+ *
+ * 為什麼需要：把圖貼進簡報時要「保持比例縮進原本的框」，而算比例就得知道圖多大。
+ * PNG 的 IHDR 一定是第一個區塊，寬高就在固定位置(第 16~24 byte)，不需要任何影像函式庫。
+ * 不是 PNG 或檔案被截斷就回 null，讓呼叫端退回「直接沿用原本的框」而不是算出一個錯的比例。
+ */
+export function pngPixelSize(buffer: Buffer): { width: number; height: number } | null {
+  const PNG_MAGIC = "89504e470d0a1a0a";
+  if (buffer.length < 24) return null;
+  if (buffer.subarray(0, 8).toString("hex") !== PNG_MAGIC) return null;
+  if (buffer.subarray(12, 16).toString("ascii") !== "IHDR") return null;
+  const width = buffer.readUInt32BE(16);
+  const height = buffer.readUInt32BE(20);
+  return width > 0 && height > 0 ? { width, height } : null;
+}

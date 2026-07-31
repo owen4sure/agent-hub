@@ -3,6 +3,7 @@ import type { NodeDefinition } from "../types";
 import { PermanentError } from "../types";
 import { cfgStr } from "../nodeHelpers";
 import { resolvePresentationId } from "./googleSlidesRefresh";
+import { pngPixelSize } from "../../xlsxCellStyle";
 
 /**
  * 把簡報某一頁上的那張圖換成本機產生的新圖(通常來自「Excel 範圍截圖」)。
@@ -64,7 +65,11 @@ export const googleSlidesReplaceImageNode: NodeDefinition = {
       );
     }
 
-    const imageBase64 = fs.readFileSync(imagePath).toString("base64");
+    const imageBuffer = fs.readFileSync(imagePath);
+    const imageBase64 = imageBuffer.toString("base64");
+    // 把圖片的真實像素尺寸一起送過去：腳本要靠它把圖「保持比例縮進原本的框」。
+    // 沒讀到(不是 PNG)就不送，腳本會退回直接沿用原框——寧可用舊行為，也不要用猜的比例把表格拉歪。
+    const pixels = pngPixelSize(imageBuffer);
     ctx.log(`準備把「${pageTitleContains}」那一頁的圖換成 ${Math.round(imageBase64.length / 1024)}KB 的新圖`);
 
     // 安全試跑：不送出換圖請求。這一步會真的改到使用者給主管看的簡報，
@@ -79,7 +84,10 @@ export const googleSlidesReplaceImageNode: NodeDefinition = {
       const res = await fetch(scriptUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token, action: "replaceSlideImage", presentationId, pageTitleContains, imageBase64 }),
+        body: JSON.stringify({
+          token, action: "replaceSlideImage", presentationId, pageTitleContains, imageBase64,
+          imageWidthPx: pixels?.width, imageHeightPx: pixels?.height,
+        }),
         signal: ctx.cancelSignal,
         redirect: "follow", // Apps Script 的 /exec 一定會 302 到 googleusercontent
       });

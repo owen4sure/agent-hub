@@ -38,9 +38,10 @@ function doPost(e) {
       return out({ ok: false, error: "驗證碼不對——請確認 Agent Hub 設定裡的驗證碼跟腳本裡的 AGENT_HUB_TOKEN 一致" });
     }
     if (body.action === "capabilities") {
-      return out({ ok: true, agentHubVersion: 1, actions: ["replaceSlideImage"] });
+      return out({ ok: true, agentHubVersion: 2, actions: ["replaceSlideImage", "selfTest"] });
     }
     if (body.action === "replaceSlideImage") return replaceSlideImage(body);
+    if (body.action === "selfTest") return selfTest(body);
     return out({ ok: false, error: "不認得的動作: " + body.action });
   } catch (err) {
     return out({ ok: false, error: String(err && err.message ? err.message : err) });
@@ -48,9 +49,15 @@ function doPost(e) {
 }
 
 function replaceSlideImage(body) {
-  if (!body.presentationId) return out({ ok: false, error: "沒有指定要改哪一份簡報(presentationId)" });
-  if (!body.imageBase64) return out({ ok: false, error: "沒有收到圖片內容" });
-  if (!body.pageTitleContains) return out({ ok: false, error: "沒有指定要用哪個標題找頁面(pageTitleContains)" });
+  return out(replaceSlideImageResult(body));
+}
+
+// 回傳「純物件」而不是 ContentService 的輸出，selfTest 才能直接拿結果判斷成敗——
+// 讓內部呼叫去解析自己剛包好的 JSON 是自找麻煩(而且兩邊會不小心走不同路徑)。
+function replaceSlideImageResult(body) {
+  if (!body.presentationId) return { ok: false, error: "沒有指定要改哪一份簡報(presentationId)" };
+  if (!body.imageBase64) return { ok: false, error: "沒有收到圖片內容" };
+  if (!body.pageTitleContains) return { ok: false, error: "沒有指定要用哪個標題找頁面(pageTitleContains)" };
 
   var presentation = SlidesApp.openById(String(body.presentationId));
   var needle = String(body.pageTitleContains);
@@ -77,10 +84,10 @@ function replaceSlideImage(body) {
   }
   var matched = exact.length > 0 ? exact : loose;
   var how = exact.length > 0 ? "標題剛好是" : "頁面上含有";
-  if (matched.length === 0) return out({ ok: false, error: "找不到標題是「" + needle + "」的頁面" });
+  if (matched.length === 0) return ({ ok: false, error: "找不到標題是「" + needle + "」的頁面" });
   if (matched.length > 1) {
     var pages = matched.map(function (m) { return m.index + 1; }).join("、");
-    return out({
+    return ({
       ok: false,
       error: how + "「" + needle + "」的頁面不只一頁(第 " + pages + " 頁)，無法安全判斷要改哪一頁——"
         + "請改填一段只有目標那一頁才有的標題文字",
@@ -89,21 +96,93 @@ function replaceSlideImage(body) {
 
   // 「這一頁剛好有一張圖」是安全閘：多於一張就不知道該換哪張，猜錯會把別的圖覆蓋掉。
   var images = matched[0].slide.getImages();
-  if (images.length === 0) return out({ ok: false, error: "第 " + (matched[0].index + 1) + " 頁上沒有任何圖片可以替換" });
+  if (images.length === 0) return ({ ok: false, error: "第 " + (matched[0].index + 1) + " 頁上沒有任何圖片可以替換" });
   if (images.length > 1) {
-    return out({ ok: false, error: "第 " + (matched[0].index + 1) + " 頁上有 " + images.length + " 張圖片，無法安全判斷要換哪一張" });
+    return ({ ok: false, error: "第 " + (matched[0].index + 1) + " 頁上有 " + images.length + " 張圖片，無法安全判斷要換哪一張" });
   }
 
   var before = { w: images[0].getWidth(), h: images[0].getHeight(), x: images[0].getLeft(), y: images[0].getTop() };
   var blob = Utilities.newBlob(Utilities.base64Decode(body.imageBase64), "image/png", "range.png");
   var replaced = images[0].replaceImage(blob);
-  // replaceImage 會沿用原本的位置與大小，但新舊圖比例不同時高度可能被拉伸——
-  // 明確設回原本的位置與尺寸，簡報版面才不會每週偏移一點點。
-  replaced.setLeft(before.x).setTop(before.y).setWidth(before.w).setHeight(before.h);
+  var box = fitInBox(before, body.imageWidthPx, body.imageHeightPx);
+  replaced.setLeft(box.x).setTop(box.y).setWidth(box.w).setHeight(box.h);
   presentation.saveAndClose();
 
-  return out({ ok: true, page: matched[0].index + 1, width: before.w, height: before.h });
+  return ({ ok: true, page: matched[0].index + 1, width: box.w, height: box.h, boxWidth: before.w, boxHeight: before.h });
 }
+
+/**
+ * 新圖要放在原本那張圖的框裡——但**不能直接撐滿**。
+ *
+ * 實測：簡報上原本那張圖的框是 2.541:1，平台產生的表格圖是 2.483:1，直接設成框的寬高
+ * 會把整張表橫向拉伸約 2%(字會變胖)。反過來「保持比例、以寬度為準」則會讓圖變高，
+ * 表格列數一多就會往下撞到「資料日期」那一行。
+ *
+ * 所以用「保持比例、縮到完全放得進原框、並在框內置中」：不變形、也永遠不會超出原本的版面，
+ * 就算之後表格多了幾列也一樣安全。拿不到圖片像素尺寸時退回原本的框(維持舊行為)。
+ */
+function fitInBox(box, imageWidthPx, imageHeightPx) {
+  var w = Number(imageWidthPx), h = Number(imageHeightPx);
+  if (!(w > 0) || !(h > 0)) return { x: box.x, y: box.y, w: box.w, h: box.h };
+  var aspect = w / h;
+  var boxAspect = box.w / box.h;
+  var outW, outH;
+  if (aspect > boxAspect) { outW = box.w; outH = box.w / aspect; }
+  else { outH = box.h; outW = box.h * aspect; }
+  return { x: box.x + (box.w - outW) / 2, y: box.y + (box.h - outH) / 2, w: outW, h: outH };
+}
+
+/**
+ * 端到端自我測試：**自己建一份全新的簡報**，放一張暫時的圖上去，
+ * 然後用上面那個一模一樣的 replaceSlideImage 把它換掉。
+ *
+ * 為什麼需要這個：使用者沒辦法從「程式碼看起來對」得到信心，而拿正式簡報來試又有風險
+ * (「我怎麼知道你真的會做？」——這是使用者真正問的問題)。這個動作全程真的打 Google、
+ * 走完全相同的程式碼路徑，但碰的是一份用完即棄的簡報，正式簡報一個字都不會動。
+ *
+ * 測試簡報會留在使用者的雲端硬碟(這支腳本刻意不要雲端硬碟的刪除權限——為了「跑一次測試」
+ * 就索取「能刪你任何檔案」的權限完全不成比例)，所以檔名直接寫「可以直接刪」。
+ */
+function selfTest(body) {
+  if (!body.imageBase64) return out({ ok: false, error: "沒有收到測試圖片" });
+  var needle = "AgentHub 換圖測試頁";
+  var presentation = SlidesApp.create("Agent Hub 換圖測試（測完可以直接刪）");
+  var slide = presentation.getSlides()[0];
+  // 清掉版型自帶的預留位置，確保這一頁「剛好一個標題 + 剛好一張圖」，跟正式情境一致
+  var existing = slide.getPageElements();
+  for (var i = 0; i < existing.length; i++) existing[i].remove();
+
+  slide.insertTextBox(needle, 20, 20, 300, 30);
+  // 先放一張「替換前」的圖：用同一張圖沒有意義(換完看不出來有沒有換)，所以放一塊純色佔位圖，
+  // 換完之後畫面上出現的是表格 = 真的換過了。
+  var placeholder = Utilities.newBlob(Utilities.base64Decode(BEFORE_PNG_BASE64), "image/png", "before.png");
+  slide.insertImage(placeholder, 20, 70, 600, 236);
+  // 網址與 ID 要在 saveAndClose 之前拿——關掉之後這個物件就不保證還能問了。
+  var presentationId = presentation.getId();
+  var presentationUrl = presentation.getUrl();
+  presentation.saveAndClose();
+
+  var result = replaceSlideImageResult({
+    presentationId: presentationId,
+    pageTitleContains: needle,
+    imageBase64: body.imageBase64,
+    imageWidthPx: body.imageWidthPx,
+    imageHeightPx: body.imageHeightPx,
+  });
+  if (!result.ok) return out({ ok: false, error: "測試簡報建好了，但換圖那一步失敗：" + result.error });
+
+  return out({
+    ok: true,
+    presentationId: presentationId,
+    presentationUrl: presentationUrl,
+    pageObjectId: SlidesApp.openById(presentationId).getSlides()[0].getObjectId(),
+    width: result.width,
+    height: result.height,
+  });
+}
+
+// 一張 8x3 的深灰佔位 PNG，放大後就是一塊灰色 —— 換成表格圖之後對比非常明顯。
+var BEFORE_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAADCAYAAABEQ1VxAAAAF0lEQVQImWNkYGD4z0AEYCJG0aiCoaMAAG9gAR8Y1O0uAAAAAElFTkSuQmCC";
 
 // 回傳這一頁「每一個文字方塊各自的文字」(不是合併成一大段)——要分得出「標題剛好等於」
 // 跟「內文提到」，就不能先把整頁的文字接成一條字串。
