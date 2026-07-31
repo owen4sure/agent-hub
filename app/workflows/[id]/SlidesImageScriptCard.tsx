@@ -107,6 +107,9 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
     }
   }
 
+  // 還沒授權過就沒辦法自動部署——這個判斷同時決定第 1 步的樣子跟第 3 步能不能按。
+  const needsScopes = Boolean(deployStatus && deployStatus.missingScopes.length > 0);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.35)" }} onClick={onClose}>
       <div
@@ -132,33 +135,63 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
           </p>
         </div>
 
-        <div className="card p-3 space-y-2" style={{ borderColor: "var(--accent)", background: "var(--accent-soft)" }}>
-          <p className="text-sm font-medium">最快的方式：讓它自己建好、自己部署</p>
-          {deployStatus && deployStatus.missingScopes.length > 0 ? (
-            <>
+        <div className="card p-3 space-y-3" style={{ borderColor: "var(--accent)", background: "var(--accent-soft)" }}>
+          <p className="text-sm font-medium">照著做，三步就好</p>
+
+          {/* 每一步都長成「編號 + 這一步在講什麼 + 一顆真的可以點的東西」。
+              使用者原話：「我看不懂要去哪裡操作」——所以不能只用文字描述位置，
+              要嘛給按鈕、要嘛給可以直接點開的連結，不要叫他自己去某個畫面裡找。 */}
+          <div className="flex gap-2.5">
+            <span className="shrink-0 w-5 h-5 rounded-full text-xs flex items-center justify-center font-semibold"
+                  style={{ background: needsScopes ? "var(--accent)" : "var(--green)", color: "#fff" }}>
+              {needsScopes ? "1" : "✓"}
+            </span>
+            <div className="min-w-0 flex-1 space-y-1">
+              <p className="text-sm font-medium">讓 Agent Hub 有權限幫你建腳本</p>
+              {needsScopes ? (
+                <>
+                  <p className="text-xs muted leading-relaxed">
+                    你之前的 Google 授權還沒包含「建立與部署 Apps Script」，點下去會跳到 Google 的同意畫面，按同意就好。
+                  </p>
+                  <a className="btn btn-primary text-xs inline-block" href="/api/oauth/google/start">前往 Google 授權</a>
+                </>
+              ) : (
+                <p className="text-xs muted">已完成，不用再做。</p>
+              )}
+            </div>
+          </div>
+
+          <div className="flex gap-2.5">
+            <span className="shrink-0 w-5 h-5 rounded-full text-xs flex items-center justify-center font-semibold"
+                  style={{ background: "var(--accent)", color: "#fff" }}>2</span>
+            <div className="min-w-0 flex-1 space-y-1">
+              <p className="text-sm font-medium">打開 Google 的「Apps Script API」開關</p>
               <p className="text-xs muted leading-relaxed">
-                你目前的 Google 授權還沒包含「建立與部署 Apps Script」這兩項，所以要先重新授權一次（一次就好）。
+                點下面的連結會開一個 Google 的設定頁，畫面上會有一個叫
+                <b>「Google Apps Script API」</b>的開關，把它切成<b>「開啟」</b>就好，不用改別的。
+                （這個開關預設是關的，而且<b>只有你本人開得了</b>，沒有任何程式可以代勞。）
               </p>
-              <a className="btn btn-primary text-xs inline-block" href="/api/oauth/google/start">重新授權 Google</a>
-            </>
-          ) : (
-            <>
+              <a className="btn btn-ghost text-xs inline-block" href="https://script.google.com/home/usersettings" target="_blank" rel="noreferrer">
+                開啟那個設定頁 ↗
+              </a>
+            </div>
+          </div>
+
+          <div className="flex gap-2.5">
+            <span className="shrink-0 w-5 h-5 rounded-full text-xs flex items-center justify-center font-semibold"
+                  style={{ background: needsScopes ? "var(--border-strong)" : "var(--accent)", color: "#fff" }}>3</span>
+            <div className="min-w-0 flex-1 space-y-1">
+              <p className="text-sm font-medium">按這顆，剩下的它自己做完</p>
               <p className="text-xs muted leading-relaxed">
-                按一下，平台會用你的 Google 帳號建一個 Apps Script 專案、貼好程式碼、部署成網頁應用程式，
-                網址直接填好。以後腳本有更新也是按這顆，<b>網址不會變</b>。
+                建專案、貼程式碼、部署、填好網址，全部自動。以後腳本有更新也是按這顆，<b>網址不會變</b>。
               </p>
-              <button type="button" className="btn btn-primary text-xs" onClick={autoDeploy} disabled={deploying}>
+              <button type="button" className="btn btn-primary text-xs" onClick={autoDeploy} disabled={deploying || needsScopes}>
                 {deploying ? "建立中…（約 10-30 秒）" : deployStatus?.deployed ? "🔄 更新腳本到最新版" : "🚀 幫我自動建好並部署"}
               </button>
-              <p className="text-xs faint leading-relaxed">
-                第一次用要先到{" "}
-                <a href="https://script.google.com/home/usersettings" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
-                  Apps Script 設定頁
-                </a>{" "}
-                把「Google Apps Script API」打開（預設是關的，只有你本人開得了，沒有任何程式可以代勞）。
-              </p>
-            </>
-          )}
+              {needsScopes && <p className="text-xs faint">先完成第 1 步，這顆才會亮起來。</p>}
+            </div>
+          </div>
+
           {deployResult && (
             <p className="text-xs leading-relaxed" style={{ color: deployResult.ok ? "var(--green)" : "var(--red)" }}>
               {deployResult.ok ? "✅ " : "⚠️ "}{deployResult.message}

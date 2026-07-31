@@ -24,6 +24,7 @@ import { extractVideoFrames, isVideoFile } from "@/lib/videoFrames";
 import { RecordActionCard } from "./RecordActionCard";
 import { OutputFolderPanel } from "./OutputFolderPanel";
 import { SlidesImageScriptCard } from "./SlidesImageScriptCard";
+import { setupNeedsFor } from "@/lib/workflow/setupNeeds";
 import {
   useWFChat, sendChatToAI, stopChatToAI, stopVerification, startAutoTest, stopAutoTest,
   clearPendingGraph, closeAutoTest, clearChat, discardWorkflowChat, appendAssistantNote, announceSheetSetupIfNeeded,
@@ -302,6 +303,7 @@ export default function WorkflowPage() {
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [showRecorder, setShowRecorder] = useState(false);
   const [showSlidesImageScript, setShowSlidesImageScript] = useState(false);
+  const [setupBannerDismissed, setSetupBannerDismissed] = useState(false);
   const [showOutputFolder, setShowOutputFolder] = useState(false);
   // 模型名稱、API 服務這類不是建立流程所需的知識。平常完全收起，真的有進階需求的人才從「更多動作」打開。
   const [showModelSettings, setShowModelSettings] = useState(false);
@@ -2130,6 +2132,53 @@ export default function WorkflowPage() {
               </div>
             </div>
           )}
+          {/* 「還沒設定好就跑不起來」的步驟一進頁面就講——真實回饋：「我看不懂要去哪裡操作，
+              這也會是大家會遇到的問題」。原本只有套用流程圖的當下會在對話裡推一張卡，
+              對「已經存在的流程」等於永遠不會出現，功能就這樣藏在 ⋯ 選單裡沒人找得到。 */}
+          {!setupBannerDismissed && (() => {
+            const needs = setupNeedsFor(wf.nodes);
+            if (needs.length === 0) return null;
+            return (
+              <div
+                className="absolute left-4 right-4 top-3 z-30 rounded-xl border px-4 py-3 shadow-sm"
+                style={{ background: "color-mix(in srgb, var(--amber) 12%, var(--panel-bg))", borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))" }}
+                role="status"
+                aria-label="還沒完成的一次性設定"
+              >
+                <div className="flex items-start gap-2">
+                  <span aria-hidden="true">🔧</span>
+                  <div className="min-w-0 text-sm leading-relaxed flex-1">
+                    <div className="font-semibold">這條流程有 {needs.reduce((n, need) => n + need.nodeLabels.length, 0)} 步還沒設定好，現在執行會失敗</div>
+                    <div className="mt-2 space-y-2">
+                      {needs.map((need) => (
+                        <div key={need.kind} className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs">
+                            <b>{need.nodeLabels.join("」「")}</b>
+                            <span className="muted">：{need.reason}</span>
+                          </span>
+                          <button
+                            className="btn btn-primary text-xs"
+                            onClick={() => {
+                              // 換簡報圖片有自己的設定視窗；試算表寫入沿用既有的「對話裡推一張卡」機制
+                              // (同一份腳本範本，不要為了這顆按鈕再做第二個入口)。
+                              if (need.kind === "slides-image-script") { setShowSlidesImageScript(true); return; }
+                              announceSheetSetupIfNeeded(id, wf.nodes);
+                              flashToast("設定卡已經放到右邊的對話裡了");
+                            }}
+                          >
+                            {need.actionLabel}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <button className="btn btn-ghost text-xs shrink-0" onClick={() => setSetupBannerDismissed(true)} title="先關掉，重新整理後還會再出現">
+                    先關掉
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
           {readOnlyImpact.length > 0 && (
             <div
               className="absolute left-4 right-4 top-3 z-20 rounded-xl border px-4 py-3 shadow-sm"
