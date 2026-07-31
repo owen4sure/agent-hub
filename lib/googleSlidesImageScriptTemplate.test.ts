@@ -27,7 +27,9 @@ function loadScript(token: string, slides: FakeSlide[]) {
     const api = {
       getWidth: () => img.width, getHeight: () => img.height,
       getLeft: () => img.left, getTop: () => img.top,
-      replaceImage: (blob: unknown) => {
+      // 名稱必須跟 Apps Script 的 Image 服務一致(replace，不是 REST API 的 replaceImage)——
+      // 假環境寫錯的話，測試只是在驗證我的誤解，真的跑才會爆。
+      replace: (blob: unknown) => {
         img.blob = blob;
         return {
           setLeft(v: number) { img.left = v; return this; },
@@ -225,7 +227,7 @@ test("換圖腳本：圖比框「寬」時改以寬度為準，一樣不變形�
 test("換圖腳本：自我測試會另外開一份新簡報，正式簡報一個字都不會動", () => {
   const { post, slides, created } = loadScript("tok123", deck());
   const before = JSON.stringify(slides);
-  const reply = post({ token: "tok123", action: "selfTest", imageBase64: PNG, imageWidthPx: 3903, imageHeightPx: 1572 });
+  const reply = post({ token: "tok123", action: "selfTest", imageBase64: PNG, beforeImageBase64: PNG, imageWidthPx: 3903, imageHeightPx: 1572 });
   assert.equal(reply.ok, true, JSON.stringify(reply));
   assert.equal(created.length, 1, "要自己建一份新的簡報來測");
   assert.equal(JSON.stringify(slides), before, "原本那份簡報完全沒被碰過");
@@ -234,8 +236,25 @@ test("換圖腳本：自我測試會另外開一份新簡報，正式簡報一�
   assert.ok(reply.presentationUrl.startsWith("https://docs.google.com/presentation/"));
 });
 
-test("換圖腳本：自我測試沒有圖片時老實拒絕", () => {
-  const { post, created } = loadScript("tok123", deck());
-  assert.match(post({ token: "tok123", action: "selfTest" }).error, /測試圖片/);
-  assert.equal(created.length, 0, "連新簡報都不該建");
+test("換圖腳本：自我測試缺任一張圖都要老實拒絕，不能先建了簡報才發現", () => {
+  const a = loadScript("tok123", deck());
+  assert.match(a.post({ token: "tok123", action: "selfTest" }).error, /測試圖片/);
+  assert.equal(a.created.length, 0, "連新簡報都不該建");
+  // 「替換前」那張佔位圖改由 agent-hub 產好送過來(範本裡不再內嵌手寫的二進位)，所以也要驗
+  const b = loadScript("tok123", deck());
+  assert.match(b.post({ token: "tok123", action: "selfTest", imageBase64: PNG }).error, /佔位圖片/);
+  assert.equal(b.created.length, 0);
+});
+
+
+test("換圖腳本：傳既有測試簡報 id 進來就沿用同一份，不要每測一次就在雲端硬碟多一份垃圾", () => {
+  const first = loadScript("tok123", deck());
+  const r1 = first.post({ token: "tok123", action: "selfTest", imageBase64: PNG, beforeImageBase64: PNG });
+  assert.equal(r1.ok, true);
+  assert.equal(first.created.length, 1, "第一次沒有可沿用的，要建一份");
+
+  const second = loadScript("tok123", deck());
+  const r2 = second.post({ token: "tok123", action: "selfTest", imageBase64: PNG, beforeImageBase64: PNG, reusePresentationId: "EXISTING" });
+  assert.equal(r2.ok, true);
+  assert.equal(second.created.length, 0, "有可沿用的就不能再建新的");
 });

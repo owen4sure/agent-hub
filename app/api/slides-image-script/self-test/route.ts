@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { getSharedSecrets } from "@/lib/settingsStore";
+import { getSetting, getSharedSecrets, setSetting } from "@/lib/settingsStore";
 import { getGoogleAccessToken } from "@/lib/googleSlidesApi";
-import { buildSelfTestImage } from "@/lib/slidesSelfTestImage";
+import { buildSelfTestImage, buildSelfTestPlaceholder } from "@/lib/slidesSelfTestImage";
 import { pngPixelSize } from "@/lib/xlsxCellStyle";
 import { SLIDES_IMAGE_TOKEN_KEY } from "@/lib/workflow/nodes/googleSlidesReplaceImage";
 import { denyIfNotLocal } from "@/lib/requireLocal";
@@ -18,6 +18,9 @@ import { denyIfNotLocal } from "@/lib/requireLocal";
  * 直接丟給瀏覽器常常因為快取/referrer 而載不出來；抓成 base64 交給前端最穩。
  */
 const SELF_TEST_TIMEOUT_MS = 90_000;
+// 記住上次那份測試簡報，下次沿用同一份——否則每測一次就在使用者的雲端硬碟多一份垃圾，
+// 而且平台的權限刪不掉(那份是腳本以他本人身分建的)。
+const TEST_DECK_KEY = "slidesImageTestPresentationId";
 
 export async function POST(req: Request) {
   const denied = denyIfNotLocal(req);
@@ -31,7 +34,7 @@ export async function POST(req: Request) {
   const token = (secrets[SLIDES_IMAGE_TOKEN_KEY] ?? "").trim();
   if (!token) return NextResponse.json({ ok: false, message: "還沒有驗證碼——請重新整理這張卡片" }, { status: 400 });
 
-  const sample = await buildSelfTestImage();
+  const [sample, placeholder] = await Promise.all([buildSelfTestImage(), buildSelfTestPlaceholder()]);
   const size = pngPixelSize(Buffer.from(sample.base64, "base64"));
 
   let reply: { ok?: boolean; error?: string; presentationId?: string; presentationUrl?: string; pageObjectId?: string; width?: number; height?: number };
@@ -40,8 +43,9 @@ export async function POST(req: Request) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        token, action: "selfTest", imageBase64: sample.base64,
+        token, action: "selfTest", imageBase64: sample.base64, beforeImageBase64: placeholder,
         imageWidthPx: size?.width, imageHeightPx: size?.height,
+        reusePresentationId: getSetting(TEST_DECK_KEY) ?? undefined,
       }),
       redirect: "follow",
       signal: AbortSignal.timeout(SELF_TEST_TIMEOUT_MS),
@@ -83,6 +87,8 @@ export async function POST(req: Request) {
       : reply.error ?? "腳本回報失敗，但沒有說明原因";
     return NextResponse.json({ ok: false, message: hint });
   }
+
+  if (reply.presentationId) setSetting(TEST_DECK_KEY, reply.presentationId);
 
   // 把換完的那一頁抓成圖片給使用者看——這才是「真的做到了」的證據，光說「成功」沒有說服力。
   let thumbnailBase64: string | null = null;

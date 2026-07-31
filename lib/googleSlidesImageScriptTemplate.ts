@@ -6,7 +6,7 @@
  * Slides API 的換圖只吃**公開網址**，餵不進圖片檔本身。所以純 API 的做法一定是
  * 「先把圖上傳到雲端硬碟 → 設成任何人可讀 → 換圖 → 刪掉」，中間那幾秒公司的 KPI 資料是公開的，
  * 而且很多企業的 Workspace 根本禁止對外分享(那條路會直接失敗)。
- * Apps Script 的 `Image.replaceImage(blob)` **可以直接吃圖片內容**，全程不需要任何公開連結。
+ * Apps Script 的 `Image.replace(blob)` **可以直接吃圖片內容**，全程不需要任何公開連結。
  *
  * ## 為什麼要獨立一份，不加進 GOOGLE_SHEET_SCRIPT_TEMPLATE
  *
@@ -118,7 +118,11 @@ function replaceSlideImageResult(body) {
 
   var before = { w: images[0].getWidth(), h: images[0].getHeight(), x: images[0].getLeft(), y: images[0].getTop() };
   var blob = Utilities.newBlob(Utilities.base64Decode(body.imageBase64), "image/png", "range.png");
-  var replaced = images[0].replaceImage(blob);
+  // 方法名是 replace()，不是 replaceImage()——後者是 Slides **REST API** 的請求名稱，
+  // Apps Script 的 Image 服務用的是 replace()。實測踩過：寫成 replaceImage 會得到
+  // 「replaceImage is not a function」，而單元測試的假環境當時也照著同一個誤解寫，
+  // 所以測試全綠、真的跑才爆——**假環境要照真實 API 寫，否則只是在驗證自己的誤解**。
+  var replaced = images[0].replace(blob);
   var box = fitInBox(before, body.imageWidthPx, body.imageHeightPx);
   replaced.setLeft(box.x).setTop(box.y).setWidth(box.w).setHeight(box.h);
   presentation.saveAndClose();
@@ -160,17 +164,25 @@ function fitInBox(box, imageWidthPx, imageHeightPx) {
  */
 function selfTest(body) {
   if (!body.imageBase64) return out({ ok: false, error: "沒有收到測試圖片" });
+  if (!body.beforeImageBase64) return out({ ok: false, error: "沒有收到「替換前」的佔位圖片" });
   var needle = "AgentHub 換圖測試頁";
-  var presentation = SlidesApp.create("Agent Hub 換圖測試（測完可以直接刪）");
+  // **重複使用同一份測試簡報**：每測一次就建一份新的，使用者的雲端硬碟很快就一堆垃圾，
+  // 而平台的權限又刪不掉(腳本是以他本人身分建的，agent-hub 的 drive.file 涵蓋不到)。
+  // 傳既有的 id 進來就沿用那一份，開不起來(被刪了)才建新的。
+  var presentation = null;
+  if (body.reusePresentationId) {
+    try { presentation = SlidesApp.openById(String(body.reusePresentationId)); } catch (e) { presentation = null; }
+  }
+  if (!presentation) presentation = SlidesApp.create("Agent Hub 換圖測試（測完可以直接刪）");
   var slide = presentation.getSlides()[0];
-  // 清掉版型自帶的預留位置，確保這一頁「剛好一個標題 + 剛好一張圖」，跟正式情境一致
+  // 清空這一頁(版型預留位置、上次測試留下的東西)，確保「剛好一個標題 + 剛好一張圖」，跟正式情境一致
   var existing = slide.getPageElements();
   for (var i = 0; i < existing.length; i++) existing[i].remove();
 
   slide.insertTextBox(needle, 20, 20, 300, 30);
   // 先放一張「替換前」的圖：用同一張圖沒有意義(換完看不出來有沒有換)，所以放一塊純色佔位圖，
   // 換完之後畫面上出現的是表格 = 真的換過了。
-  var placeholder = Utilities.newBlob(Utilities.base64Decode(BEFORE_PNG_BASE64), "image/png", "before.png");
+  var placeholder = Utilities.newBlob(Utilities.base64Decode(body.beforeImageBase64), "image/png", "before.png");
   slide.insertImage(placeholder, 20, 70, 600, 236);
   // 網址與 ID 要在 saveAndClose 之前拿——關掉之後這個物件就不保證還能問了。
   var presentationId = presentation.getId();
@@ -196,8 +208,8 @@ function selfTest(body) {
   });
 }
 
-// 一張 8x3 的深灰佔位 PNG，放大後就是一塊灰色 —— 換成表格圖之後對比非常明顯。
-var BEFORE_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAADCAYAAABEQ1VxAAAAF0lEQVQImWNkYGD4z0AEYCJG0aiCoaMAAG9gAR8Y1O0uAAAAAElFTkSuQmCC";
+// 「替換前」的佔位圖由 agent-hub 產好送過來，這裡刻意不內嵌任何二進位——
+// 手寫的 base64 PNG 第一版 CRC 全壞，Google 回「圖片無效或已損毀」，白繞一圈。
 
 // 回傳這一頁「每一個文字方塊各自的文字」(不是合併成一大段)——要分得出「標題剛好等於」
 // 跟「內文提到」，就不能先把整頁的文字接成一條字串。

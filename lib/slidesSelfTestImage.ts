@@ -47,3 +47,20 @@ export async function buildSelfTestImage(): Promise<{ base64: string; width: num
   const rendered = await renderXlsxRangeToImage(buffer, "測試", `A1:C${rows.length}`, { scale: 2 });
   return { base64: rendered.imageBase64, width: rendered.columns, height: rendered.rows };
 }
+
+/**
+ * 自我測試「替換前」的那張佔位圖。
+ *
+ * 為什麼要在這裡產、而不是寫死在 Apps Script 範本裡：**手寫二進位一定會出錯**——
+ * 第一版我直接在範本裡塞了一段自己拼的 base64 PNG，CRC 全是壞的，Google 回
+ * 「您嘗試使用的圖片無效或已損毀」。圖片這種東西要用真的影像函式庫產，不能用手拼。
+ *
+ * 用純灰色是刻意的：換成表格圖之後對比極強，一眼就知道「真的換過了」。
+ */
+export async function buildSelfTestPlaceholder(): Promise<string> {
+  const sharp = (await import("sharp")).default;
+  const png = await sharp({
+    create: { width: 600, height: 236, channels: 3, background: { r: 158, g: 158, b: 158 } },
+  }).png().toBuffer();
+  return png.toString("base64");
+}
