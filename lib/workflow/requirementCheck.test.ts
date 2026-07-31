@@ -908,3 +908,42 @@ test("需求驗收:「不要監聽資料夾，我自己選檔」不能被當成�
   // 「特別」的「別」不是否定詞(這個 repo 踩過的老坑)
   assert.equal(isFolderWatchRequested("請特別監聽這個資料夾"), true);
 });
+
+/**
+ * 真實踩過：「把我給的一段文字裡的所有數字加總」建不出來。
+ *
+ * 需求裡有「數字」就會觸發「業務數字要有真實來源」這條規則，而資料來源是一個叫
+ * 「要處理的文字」的執行時輸入欄——不符合它認得的檔案／試算表／網址／信件形狀，
+ * 於是永遠判定不通過。建圖重試兩輪後放棄，**任何模型都建不出來**(這是確定性檢查，
+ * 跟模型聰不聰明無關)。使用者每次執行自己貼進來的內容，本來就是真實資料。
+ */
+test("執行時自己貼的文字欄位，算是真實資料來源(不能被誤判成 AI 編的假數字)", () => {
+  const graph = {
+    nodes: [
+      { ...N("trigger", "trigger") },
+      { ...N("n2", "custom-code"), config: { intent: "從 {{text}} 抓出所有數字加總" } },
+    ],
+    edges: [{ from: "trigger", to: "n2" }],
+    triggerParams: [{ key: "text", label: "要處理的文字", type: "textarea" as const }],
+  };
+  const items = checkRequirements("把我給的一段文字裡的所有數字抓出來加總", graph);
+  const rule = items.find((i) => i.key === "realBusinessData");
+  assert.ok(rule, "這條規則本來就會被觸發(需求裡有「數字」)");
+  assert.equal(rule!.met, true, "使用者執行時自己貼的文字就是真實來源，不該被擋");
+});
+
+test("要做 KPI 簡報卻完全沒有資料來源，仍然要被擋下來(原本的保護不能失效)", () => {
+  const graph = {
+    nodes: [
+      { ...N("trigger", "trigger") },
+      { ...N("n2", "custom-code"), config: { intent: "產生本季業績數字" } },
+    ],
+    edges: [{ from: "trigger", to: "n2" }],
+    // 只有期間選擇器這種 select，不是「內容」——正是這條規則要擋的情境
+    triggerParams: [{ key: "periodWhich", label: "哪一期", type: "select" as const }],
+  };
+  const items = checkRequirements("幫我做本季的業績 KPI 簡報", graph);
+  const rule = items.find((i) => i.key === "realBusinessData");
+  assert.ok(rule);
+  assert.equal(rule!.met, false, "沒說資料哪來就不能放行");
+});

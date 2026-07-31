@@ -30,6 +30,8 @@ const SETTING_KEY = "modelProviders";
 const VERIFIED_KEY = "verifiedModels";
 const VISION_VERIFIED_KEY = "visionVerifiedModels";
 export const REF_SEPARATOR = "::";
+/** 沒特別設定時等多久(跟 modelClient 的預設一致) */
+export const DEFAULT_TIMEOUT_MS = 90_000;
 
 export interface ModelProvider {
   id: string;
@@ -41,6 +43,14 @@ export interface ModelProvider {
   models: string[];
   /** 這個來源的模型看不看得懂圖片(由使用者宣告——平台無法為未知模型硬編碼) */
   vision: boolean;
+  /**
+   * 這個來源可以等多久(毫秒)。
+   *
+   * 為什麼要能調(實測踩到)：預設 90 秒是為雲端 gateway 調的，但地端模型「比較慢但免費無限」——
+   * 用同一個逾時會把「正在正常產出一張複雜流程圖」切斷，看起來像模型不會做，其實只是被打斷。
+   * 真實數據：本機 gemma4 建簡單流程 17 秒，複雜流程(webhook+分類+簽核)超過 90 秒被砍。
+   */
+  timeoutMs?: number;
   /** 內建那一組不能刪 */
   builtin?: boolean;
 }
@@ -60,6 +70,7 @@ function readList(): ModelProvider[] {
         apiKey: String(p.apiKey ?? ""),
         models: Array.isArray(p.models) ? p.models.map((m) => String(m).trim()).filter(Boolean) : [],
         vision: p.vision === true,
+        ...(Number.isFinite(p.timeoutMs) ? { timeoutMs: Number(p.timeoutMs) } : {}),
       }))
       .filter((p) => p.id && p.id !== DEFAULT_PROVIDER_ID && p.baseUrl);
   } catch {
@@ -105,6 +116,8 @@ export function saveProvider(input: Omit<ModelProvider, "builtin">): ModelProvid
     apiKey: input.apiKey ?? "",
     models,
     vision: input.vision === true,
+    // 10 秒～10 分鐘：比 10 秒短沒有任何模型來得及回，比 10 分鐘長的話使用者會以為當掉了
+    timeoutMs: Math.min(Math.max(Number(input.timeoutMs) || DEFAULT_TIMEOUT_MS, 10_000), 600_000),
   };
   const list = readList().filter((p) => p.id !== id);
   writeList([...list, provider]);

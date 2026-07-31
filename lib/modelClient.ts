@@ -15,8 +15,15 @@ export { MODELS };
  * 沒傳的話沿用全域設定(舊行為)，但那只該用在「還不知道要用哪個模型」的情境。
  */
 export function getClient(modelRef?: string, timeoutMs = 90_000): OpenAI {
+  // 逾時跟著「這個模型屬於哪個來源」走：地端模型通常比雲端慢，但它免費且無限，
+  // 用同一個逾時會把正在正常產出的回應切斷(實測：複雜流程圖被 90 秒砍掉，看起來像模型不會做)。
+  let effectiveTimeout = timeoutMs;
   const { baseUrl, apiKey } = modelRef
-    ? (() => { const r = resolveModel(modelRef); return { baseUrl: r.provider.baseUrl, apiKey: r.provider.apiKey }; })()
+    ? (() => {
+      const r = resolveModel(modelRef);
+      if (timeoutMs === 90_000 && r.provider.timeoutMs) effectiveTimeout = r.provider.timeoutMs;
+      return { baseUrl: r.provider.baseUrl, apiKey: r.provider.apiKey };
+    })()
     : getGlobalSettings();
   // OpenAI SDK 預設逾時是 10 分鐘、內建重試 2 次——這跟 lib/aiRetry.ts 的外層重試疊在一起，
   // 會讓最壞情況等到「4次(外層) × 3次(SDK內建) × 最長10分鐘」完全沒有上限。關掉 SDK 自己的重試，
@@ -26,7 +33,7 @@ export function getClient(modelRef?: string, timeoutMs = 90_000): OpenAI {
   // 使用者感覺「隨便問一句都跑超久」。快速小呼叫(驗證碼辨識等)另有 nodeHelpers.makeClient(25秒)，不受影響。
   // OpenAI SDK 會在 constructor 就因空 key 拋錯，讓「已選 Claude Code／準備走本機備援」也無法開始。
   // 真正需要遠端模型的入口仍會先檢查設定；這個佔位值只讓本機備援能建立相同 client 介面。
-  return new OpenAI({ baseURL: baseUrl, apiKey: apiKey || "agent-hub-api-key-not-configured", timeout: timeoutMs, maxRetries: 0 });
+  return new OpenAI({ baseURL: baseUrl, apiKey: apiKey || "agent-hub-api-key-not-configured", timeout: effectiveTimeout, maxRetries: 0 });
 }
 
 export async function testModel(model: string): Promise<{ ok: boolean; message: string }> {

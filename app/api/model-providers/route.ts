@@ -12,7 +12,7 @@ import { recordAuditFromRequest } from "@/lib/auditLog";
 export async function GET() {
   return NextResponse.json({
     providers: listProviders().map((p) => ({
-      id: p.id, label: p.label, baseUrl: p.baseUrl, models: p.models, vision: p.vision,
+      id: p.id, label: p.label, baseUrl: p.baseUrl, models: p.models, vision: p.vision, timeoutMs: p.timeoutMs,
       builtin: Boolean(p.builtin),
       // 金鑰只回「有沒有設定」，不回值
       hasKey: Boolean(p.apiKey),
@@ -26,7 +26,7 @@ export async function POST(req: Request) {
   const denied = denyIfNotLocal(req);
   if (denied) return denied;
   const body = (await req.json().catch(() => null)) as {
-    id?: unknown; label?: unknown; baseUrl?: unknown; apiKey?: unknown; models?: unknown; vision?: unknown;
+    id?: unknown; label?: unknown; baseUrl?: unknown; apiKey?: unknown; models?: unknown; vision?: unknown; timeoutMs?: unknown;
   } | null;
   if (!body) return NextResponse.json({ error: "請求格式不正確" }, { status: 400 });
   try {
@@ -39,6 +39,7 @@ export async function POST(req: Request) {
         ? body.models.split(/[,\n]/).map((m) => m.trim()).filter(Boolean)
         : Array.isArray(body.models) ? body.models.map((m) => String(m)) : [],
       vision: body.vision === true,
+      timeoutMs: Number(body.timeoutMs) || undefined,
     });
     recordAuditFromRequest(req, "model-provider.save", provider.id, {
       label: provider.label, baseUrl: provider.baseUrl, models: provider.models, vision: provider.vision, hadKey: Boolean(provider.apiKey),

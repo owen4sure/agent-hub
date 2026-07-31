@@ -280,7 +280,15 @@ export function checkRequirements(userText: string, graph: GraphLike, opts: Requ
   if (asksBusinessData && !allowsSynthetic) {
     const configs = JSON.stringify(allNodes.map((node) => node.config));
     const hasRealSource = has("google-sheet-read", "read-file", "excel-process", "pdf-read", "email-read", "find-email", "web-page", "rss-read") ||
-      (graph.triggerParams ?? []).some((field) => /filePath|attachmentPath|inputFile|網址|url/i.test(`${field.key} ${field.label}`));
+      (graph.triggerParams ?? []).some((field) => /filePath|attachmentPath|inputFile|網址|url/i.test(`${field.key} ${field.label}`)) ||
+      // **使用者每次執行時自己貼進來的內容，本來就是真實資料**——這條規則防的是「AI 為了讓圖長得完整
+      // 而在 custom-code 裡編一組模擬數據」，不是防使用者自己提供資料。
+      // 真實踩過：「把我給的一段文字裡的數字加總」被這條規則永久擋住(需求裡有「數字」就觸發，
+      // 而資料來源是一個叫「要處理的文字」的執行時輸入欄，不符合上面那幾種檔案/網址形狀)，
+      // 導致**任何模型**都建不出這條流程——建圖重試兩輪後放棄。
+      // 只認「有內容的輸入欄」(text/textarea)：期間選擇器那種 select 不算資料來源，
+      // 那正是這條規則原本要擋的情境(要做 KPI 簡報卻沒說資料哪來)。
+      (graph.triggerParams ?? []).some((field) => !field.derived && (field.type === "text" || field.type === "textarea"));
     const inventsData = /模擬|假資料|測試用|synthetic|mock|sample/i.test(configs);
     add(
       "realBusinessData",

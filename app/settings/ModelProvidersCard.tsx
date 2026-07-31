@@ -17,7 +17,7 @@ import { useCallback, useEffect, useState } from "react";
 
 interface Provider {
   id: string; label: string; baseUrl: string; models: string[];
-  vision: boolean; builtin: boolean; hasKey: boolean;
+  vision: boolean; builtin: boolean; hasKey: boolean; timeoutMs?: number;
 }
 interface Choice { ref: string; model: string; providerLabel: string; verified: boolean; vision: boolean; visionTested: "yes" | "no" | null }
 
@@ -26,7 +26,7 @@ export function ModelProvidersCard() {
   const [choices, setChoices] = useState<Choice[]>([]);
   const [open, setOpen] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({ label: "", baseUrl: "", apiKey: "", models: "", vision: false });
+  const [form, setForm] = useState({ label: "", baseUrl: "", apiKey: "", models: "", vision: false, timeoutSec: 90 });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -77,12 +77,12 @@ export function ModelProvidersCard() {
     setMessage("");
     try {
       const res = await fetch("/api/model-providers", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...form, timeoutMs: form.timeoutSec * 1000 }),
       });
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) { setError(data.error ?? "儲存失敗"); return; }
       setMessage(`已加入。之後在流程的模型欄位直接填「${form.models.split(/[,\n]/)[0]?.trim()}」就會用這個來源。`);
-      setForm({ label: "", baseUrl: "", apiKey: "", models: "", vision: false });
+      setForm({ label: "", baseUrl: "", apiKey: "", models: "", vision: false, timeoutSec: 90 });
       setAdding(false);
       await load();
     } finally {
@@ -146,6 +146,7 @@ export function ModelProvidersCard() {
                 )}
               </div>
               <p className="text-xs muted font-mono break-all">{p.baseUrl || "(還沒設定 Base URL)"}</p>
+              {!p.builtin && <p className="text-xs faint">最多等 {Math.round((p.timeoutMs ?? 90_000) / 1000)} 秒</p>}
               {/* 每個模型一行，兩個測試分開——原本只有「點模型代號測連線」，
                   已經存起來的來源**完全沒有地方測看圖能力**(使用者回饋：「我想測試我的
                   gemma4 能不能看圖片沒地方能測啊」)。看圖是每個模型各自的能力，
@@ -206,6 +207,26 @@ export function ModelProvidersCard() {
               <div className="space-y-1">
                 <label className="text-xs muted">有哪些模型代號（逗號或換行分隔）</label>
                 <input value={form.models} onChange={(e) => setForm({ ...form, models: e.target.value })} placeholder="gemma4" className="input text-sm w-full font-mono" />
+              </div>
+              {/* 地端模型「比較慢但免費無限」，用雲端的 90 秒逾時會把正在正常產出的長回應切斷——
+                  實測踩過：本機 gemma4 建簡單流程 17 秒，建複雜流程(webhook+分類+簽核)超過 90 秒被砍，
+                  看起來像「這個模型不會建流程」，其實只是被打斷。 */}
+              <div className="space-y-1">
+                <label className="text-xs muted">最多等它幾秒（地端模型建議放寬）</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number" min={10} max={600}
+                    value={form.timeoutSec}
+                    onChange={(e) => setForm({ ...form, timeoutSec: Number(e.target.value) })}
+                    className="input text-sm w-24"
+                  />
+                  <span className="text-xs muted">秒</span>
+                  <button type="button" onClick={() => setForm({ ...form, timeoutSec: 300 })} className="btn btn-ghost text-xs">用 300 秒（本機模型建議）</button>
+                </div>
+                <p className="text-xs faint">
+                  本機模型建一張複雜流程圖可能要好幾分鐘。時間給太短會在它正常產出的途中切斷，
+                  結果看起來像「這個模型不會做」，其實只是沒等它講完。
+                </p>
               </div>
               {/* 「看不看得懂圖片」有客觀答案，不該讓使用者用猜的打勾——實測一次就知道。
                   尤其這個專案自己記錄過：有的模型不會說「我看不到」，而是自信地看圖亂講。 */}

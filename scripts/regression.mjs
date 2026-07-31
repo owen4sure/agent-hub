@@ -88,6 +88,11 @@ for (let i = from - 1; i < Math.min(to, CASES.length); i++) {
   const c = CASES[i];
   const t0 = Date.now();
   const { data: created } = await api("POST", "/api/workflows", { name: `回歸-${i + 1}` });
+  // 想評估「某個模型建圖能力如何」時指定它：AGENT_HUB_REGRESSION_MODEL=xxx node scripts/regression.mjs
+  // (不指定就用平台預設模型，行為跟以前完全一樣)
+  if (process.env.AGENT_HUB_REGRESSION_MODEL) {
+    await api("PATCH", `/api/workflows/${created.id}`, { model: process.env.AGENT_HUB_REGRESSION_MODEL });
+  }
   const wid = created.id;
   try {
   const firstResponse = await api("POST", `/api/workflows/${wid}/build`, { history: [{ role: "user", parts: [{ kind: "text", text: c.need }] }] });
