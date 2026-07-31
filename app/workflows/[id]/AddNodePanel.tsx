@@ -77,6 +77,19 @@ export function AddNodePanel({
       .catch(() => { /* 沒有自訂步驟不影響原本的積木清單 */ });
   }, []);
 
+  /**
+   * 刪掉一個「我的步驟」。
+   *
+   * 只是把它從「可以再套用」的清單裡拿掉——**已經加進某條流程的那些不受影響**，
+   * 因為加進去的時候就已經複製成該流程自己的節點了。這句話要寫進確認訊息裡，
+   * 不然使用者會不敢按(以為會把正在跑的流程弄壞)。
+   */
+  async function removeUserStep(step: UserStepLite) {
+    if (!confirm(`要刪掉「${step.name}」嗎？\n\n只是從這份清單移除，之後不能再套用它。\n已經加進流程裡的那些不受影響，照常執行。`)) return;
+    const res = await fetch(`/api/user-steps?id=${encodeURIComponent(step.id)}`, { method: "DELETE" });
+    if (res.ok) setUserSteps((list) => list.filter((s) => s.id !== step.id));
+  }
+
   const grouped = useMemo(() => {
     const q = query.trim().toLowerCase();
     const hit = (d: NodeDefLite) =>
@@ -123,10 +136,13 @@ export function AddNodePanel({
               {userSteps.filter((step) => !query.trim()
                 || step.name.toLowerCase().includes(query.trim().toLowerCase())
                 || step.description.toLowerCase().includes(query.trim().toLowerCase())).map((step) => (
+                // 一列 = 「套用」+「刪除」兩個動作。刪除鍵刻意只在滑過時才顯示：
+                // 它平常不該搶走注意力，但**必須存在**——原本 DELETE API 有、UI 沒有，
+                // 錄壞的步驟只能一直躺在清單裡(使用者：「東西有點太多了，我自己都不知道功用是什麼」)。
+                <div key={step.id} className="group/step flex items-start gap-1">
                 <button
-                  key={step.id}
                   onClick={() => onPickUserStep(step.id)}
-                  className="w-full flex items-start gap-2.5 px-2.5 py-2 rounded-xl text-left transition-colors hover:bg-[var(--surface-2)]"
+                  className="flex-1 min-w-0 flex items-start gap-2.5 px-2.5 py-2 rounded-xl text-left transition-colors hover:bg-[var(--surface-2)]"
                   title={step.description}
                 >
                   <span
@@ -142,6 +158,15 @@ export function AddNodePanel({
                     </span>
                   </span>
                 </button>
+                <button
+                  onClick={() => void removeUserStep(step)}
+                  className="shrink-0 mt-2 w-7 h-7 grid place-items-center rounded-md opacity-0 group-hover/step:opacity-100 focus-visible:opacity-100 transition-opacity faint hover:text-[var(--red)]"
+                  title={`刪掉「${step.name}」這個步驟（已經用到它的流程不受影響）`}
+                  aria-label={`刪除步驟 ${step.name}`}
+                >
+                  🗑
+                </button>
+                </div>
               ))}
             </div>
           </div>

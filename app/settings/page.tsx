@@ -227,133 +227,13 @@ export default function SettingsPage() {
 
   return (
     <div className="max-w-2xl mx-auto px-4 sm:px-8 py-6 sm:py-8 space-y-8">
-      <PageHeader title="設定" subtitle="模型 API 與各 workflow 的帳密" />
+      <PageHeader title="設定" subtitle="連線、AI、檔案位置——由上到下就是一般人會用到的順序" />
       {loadError && <div className="card px-4 py-3 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>部分設定載入失敗，顯示的內容可能不完整，請重新整理頁面。</div>}
 
-      <section className="card p-5 space-y-4">
-        <div>
-          <h2 className="font-medium">模型 API</h2>
-          <p className="text-sm muted mt-0.5">預設已填入免費 API，可改成自己的 OpenAI 相容服務。</p>
-        </div>
-        <label className="block text-sm">
-          <span className="muted">Base URL</span>
-          <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} className="input mt-1" />
-        </label>
-        <label className="block text-sm">
-          <span className="muted">API Key {hasApiKey && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder={hasApiKey ? "••••••••（已設定，留空不變）" : ""}
-            className="input mt-1"
-          />
-          {hasApiKey && <RevealCopyButton endpoint="/api/settings/reveal" />}
-        </label>
-        <div className="flex items-center gap-2">
-          <button onClick={saveGlobal} className="btn btn-primary">儲存</button>
-          {savedMsg && <span className="text-sm" style={{ color: savedError ? "var(--red)" : "var(--green)" }}>{savedMsg}</span>}
-        </div>
-        <div className="pt-3 border-t space-y-1.5">
-          <p className="text-xs muted">
-            下面選一個模型測試連不連得上——<b>這裡只是測試，不會改變任何流程實際使用的模型</b>。
-            要換某個流程真正執行用的模型，請到該流程頁面上方的模型選單調整。
-          </p>
-          <p className="text-xs muted">
-            <b>🖼️ = 能看一般圖片；🔤 = 圖形驗證碼也實測可用</b>。Claude Code 能理解一般圖片，但會基於安全政策拒絕 CAPTCHA，
-            所以只有 🖼️、沒有 🔤。流程真的遇到驗證碼時，系統會自動改用一個有 🔤 的模型，不會拿拒絕或會亂看的模型硬試。
-          </p>
-          <div className="flex flex-wrap items-center gap-2">
-            {customTestModel ? (
-              <input
-                value={testModel}
-                onChange={(e) => setTestModel(e.target.value)}
-                placeholder="輸入你接的 API 服務實際支援的模型代號"
-                className="input max-w-full min-w-0"
-                style={{ width: 220 }}
-              />
-            ) : (
-              <select value={testModel} onChange={(e) => setTestModel(e.target.value)} className="input" style={{ width: "auto" }}>
-                {MODELS.filter((m) => (KNOWN_WORKING_MODELS as readonly string[]).includes(m) || isClaudeCodeModel(m)).map((m) => {
-                  const working = (KNOWN_WORKING_MODELS as readonly string[]).includes(m) || isClaudeCodeModel(m);
-                  const vision = supportsVision(m);
-                  const captcha = supportsCaptchaVision(m);
-                  return <option key={m} value={m}>{working ? "✓ " : ""}{vision ? "🖼️ " : ""}{captcha ? "🔤 " : ""}{m}</option>;
-                })}
-                {/* 使用者自己接的模型也要出現在這裡，否則他永遠只看得到內建那幾個，
-                    會以為平台就是只能用這些(真實回饋：「我沒看到還能填別的模型」)。 */}
-                {extraModels.length > 0 && (
-                  <optgroup label="你自己接的">
-                    {extraModels.map((c) => (
-                      <option key={c.ref} value={c.ref}>{c.verified ? "✓ " : ""}{c.vision ? "🖼️ " : ""}{c.model}（{c.providerLabel}）</option>
-                    ))}
-                  </optgroup>
-                )}
-              </select>
-            )}
-            <button
-              onClick={() => setCustomTestModel((v) => !v)}
-              className="text-xs faint hover:text-[var(--text)]"
-              title="切換成清單選擇/自訂輸入模型代號(接自己的 API 服務就用這個)"
-            >
-              {customTestModel ? "清單" : "自訂"}
-            </button>
-            <button onClick={runTest} disabled={testing} className="btn btn-ghost">{testing ? "測試中…" : "測試連線"}</button>
-            {testResult && <span className="text-sm min-w-0 break-words" style={{ color: testResult.ok ? "var(--green)" : "var(--red)" }}>{testResult.ok ? `✅ ${testResult.message}` : `❌ ${testResult.message}`}</span>}
-          </div>
-        </div>
-      </section>
-
-      {/* 「我沒看到還能填別的模型」——這張卡片原本排在整頁 87% 的位置(所有帳密後面)，
-          而使用者要找「能不能用別的模型」時，眼睛看的是上面那個「模型 API」區塊。
-          功能找不到就等於不存在，所以搬到它正下方。 */}
-      <ModelProvidersCard />
-
-      <section className="card p-5 space-y-3">
-        <div>
-          <h2 className="font-medium">🧠 AI 建流程偏好</h2>
-          <p className="text-sm muted mt-0.5">
-            用白話寫下你的固定習慣，AI 每次建流程都會遵守——同一句話不用每條流程重講。
-            例如：「檔名一律加當天日期後綴」「Excel 標題列深藍底白字」「通知一律用 Telegram」「輸出檔都放桌面的『報表』資料夾」。
-          </p>
-        </div>
-        <textarea
-          value={prefs}
-          onChange={(e) => setPrefs(e.target.value)}
-          rows={4}
-          maxLength={2000}
-          placeholder="一行一條，寫你希望 AI 建流程時固定遵守的事…"
-          className="input w-full font-normal"
-          style={{ resize: "vertical", minHeight: 90 }}
-        />
-        <div className="flex items-center gap-2">
-          <button onClick={savePrefs} disabled={prefs === prefsSaved} className="btn btn-primary">儲存偏好</button>
-          {prefsMsg && <span className="text-sm" style={{ color: "var(--green)" }}>已儲存，下次跟 AI 對話就生效</span>}
-        </div>
-      </section>
-
-      <section className="card p-5 space-y-3">
-        <div>
-          <h2 className="font-medium">🧭 AI 推理力度</h2>
-          <p className="text-sm muted mt-0.5">
-            建立/修改流程、產生自訂程式碼時，本機 Claude Code 要想多深。力度愈高，愈能想清楚複雜或含糊的需求，但單輪回覆會等比較久；
-            力度愈低，回覆比較快，但遇到規則沒涵蓋到的講法比較容易理解錯。建議維持「高」——正確建好或修好比省那幾秒更重要。
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {(["low", "medium", "high"] as const).map((level) => (
-            <button
-              key={level}
-              onClick={() => saveEffort(level)}
-              className={effort === level ? "btn btn-primary" : "btn btn-ghost"}
-            >
-              {level === "low" ? "低(較快)" : level === "medium" ? "中" : "高(建議)"}
-            </button>
-          ))}
-          {effortMsg && <span className="text-sm" style={{ color: "var(--green)" }}>已儲存，下次跟 AI 對話就生效</span>}
-        </div>
-      </section>
-
+      <div className="pt-2">
+        <h2 className="text-sm font-semibold" style={{ color: "var(--accent)" }}>① 連線與帳號</h2>
+        <p className="text-xs muted mt-0.5">把外部服務串起來，流程才跑得動。大部分人只需要動這一段。</p>
+      </div>
       <section className="space-y-3">
         <div>
           <h2 className="font-medium">共用帳密</h2>
@@ -385,9 +265,7 @@ export default function SettingsPage() {
           </div>
         )}
       </section>
-
       <GoogleAccountCard />
-
       <section className="space-y-3">
         <div>
           <h2 className="font-medium">通知串接</h2>
@@ -595,12 +473,11 @@ export default function SettingsPage() {
         </div>
 
       </section>
-
       {Object.keys(secretsSet).length > 0 && (
         <section className="card p-5 space-y-3">
           <div>
             <h2 className="font-medium">🔐 已儲存帳密管理</h2>
-            <p className="text-sm muted mt-0.5">預設只顯示欄位名稱，按「顯示並複製」才會讀出內容（例如搬到另一台電腦時用）。停用整合或交接電腦時，可在這裡真正撤銷，不只是把輸入框留空。</p>
+            <p className="text-sm muted mt-0.5">這就是上面「共用帳密」已經存起來的內容——上面是<b>填</b>，這裡是<b>看與清除</b>，同一份資料。預設只顯示欄位名稱，按「顯示並複製」才會讀出內容（例如搬到另一台電腦時用）。停用整合或交接電腦時，可在這裡真正撤銷，不只是把輸入框留空。</p>
           </div>
           <div className="divide-y">
             {Object.keys(secretsSet).sort().map((key) => (
@@ -614,10 +491,157 @@ export default function SettingsPage() {
           </div>
         </section>
       )}
+      <div className="pt-2">
+        <h2 className="text-sm font-semibold" style={{ color: "var(--accent)" }}>② AI 模型與行為</h2>
+        <p className="text-xs muted mt-0.5">決定「用哪個 AI」以及「它建流程時的習慣」。不改也能用。</p>
+      </div>
+      {/* 模型設定原本散在三個地方而且看不出關係——真實回饋：「東西有點太多了，我自己都不知道功用是什麼」。
+          這三層其實是由大到小：全域端點 → 額外來源 → 單條流程覆寫。講清楚順序，使用者才知道自己在改哪一層。 */}
+      <div className="card p-4 text-xs leading-relaxed" style={{ background: "var(--surface-2)" }}>
+        <p className="font-medium mb-1">模型設定有三層，由大到小：</p>
+        <ol className="list-decimal ml-4 space-y-0.5 muted">
+          <li><b>模型 API</b>（下面第一張卡）＝ 平台預設要打哪個服務。大多數人只要這一層。</li>
+          <li><b>模型來源</b>（第二張卡）＝ 想同時用別的服務（例如自己電腦上的模型）時才加。<b>「內建」那一組就是上面那張卡的設定</b>，改上面下面會跟著變。</li>
+          <li><b>單條流程用哪個 AI</b> ＝ 在流程頁「⋯ → 這條流程的設定」裡改，只影響那一條。</li>
+        </ol>
+      </div>
+      <section className="card p-5 space-y-4">
+        <div>
+          <h2 className="font-medium">模型 API</h2>
+          <p className="text-sm muted mt-0.5">預設已填入免費 API，可改成自己的 OpenAI 相容服務。</p>
+        </div>
+        <label className="block text-sm">
+          <span className="muted">Base URL</span>
+          <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} className="input mt-1" />
+        </label>
+        <label className="block text-sm">
+          <span className="muted">API Key {hasApiKey && <span style={{ color: "var(--green)" }}>· 已設定</span>}</span>
+          <input
+            type="password"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder={hasApiKey ? "••••••••（已設定，留空不變）" : ""}
+            className="input mt-1"
+          />
+          {hasApiKey && <RevealCopyButton endpoint="/api/settings/reveal" />}
+        </label>
+        <div className="flex items-center gap-2">
+          <button onClick={saveGlobal} className="btn btn-primary">儲存</button>
+          {savedMsg && <span className="text-sm" style={{ color: savedError ? "var(--red)" : "var(--green)" }}>{savedMsg}</span>}
+        </div>
+        <div className="pt-3 border-t space-y-1.5">
+          <p className="text-xs muted">
+            下面選一個模型測試連不連得上——<b>這裡只是測試，不會改變任何流程實際使用的模型</b>。
+            要換某個流程真正執行用的模型，請到該流程頁面上方的模型選單調整。
+          </p>
+          <p className="text-xs muted">
+            <b>🖼️ = 能看一般圖片；🔤 = 圖形驗證碼也實測可用</b>。Claude Code 能理解一般圖片，但會基於安全政策拒絕 CAPTCHA，
+            所以只有 🖼️、沒有 🔤。流程真的遇到驗證碼時，系統會自動改用一個有 🔤 的模型，不會拿拒絕或會亂看的模型硬試。
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            {customTestModel ? (
+              <input
+                value={testModel}
+                onChange={(e) => setTestModel(e.target.value)}
+                placeholder="輸入你接的 API 服務實際支援的模型代號"
+                className="input max-w-full min-w-0"
+                style={{ width: 220 }}
+              />
+            ) : (
+              <select value={testModel} onChange={(e) => setTestModel(e.target.value)} className="input" style={{ width: "auto" }}>
+                {MODELS.filter((m) => (KNOWN_WORKING_MODELS as readonly string[]).includes(m) || isClaudeCodeModel(m)).map((m) => {
+                  const working = (KNOWN_WORKING_MODELS as readonly string[]).includes(m) || isClaudeCodeModel(m);
+                  const vision = supportsVision(m);
+                  const captcha = supportsCaptchaVision(m);
+                  return <option key={m} value={m}>{working ? "✓ " : ""}{vision ? "🖼️ " : ""}{captcha ? "🔤 " : ""}{m}</option>;
+                })}
+                {/* 使用者自己接的模型也要出現在這裡，否則他永遠只看得到內建那幾個，
+                    會以為平台就是只能用這些(真實回饋：「我沒看到還能填別的模型」)。 */}
+                {extraModels.length > 0 && (
+                  <optgroup label="你自己接的">
+                    {extraModels.map((c) => (
+                      <option key={c.ref} value={c.ref}>{c.verified ? "✓ " : ""}{c.vision ? "🖼️ " : ""}{c.model}（{c.providerLabel}）</option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+            )}
+            <button
+              onClick={() => setCustomTestModel((v) => !v)}
+              className="text-xs faint hover:text-[var(--text)]"
+              title="切換成清單選擇/自訂輸入模型代號(接自己的 API 服務就用這個)"
+            >
+              {customTestModel ? "清單" : "自訂"}
+            </button>
+            <button onClick={runTest} disabled={testing} className="btn btn-ghost">{testing ? "測試中…" : "測試連線"}</button>
+            {testResult && <span className="text-sm min-w-0 break-words" style={{ color: testResult.ok ? "var(--green)" : "var(--red)" }}>{testResult.ok ? `✅ ${testResult.message}` : `❌ ${testResult.message}`}</span>}
+          </div>
+        </div>
+      </section>
 
+      {/* 「我沒看到還能填別的模型」——這張卡片原本排在整頁 87% 的位置(所有帳密後面)，
+          而使用者要找「能不能用別的模型」時，眼睛看的是上面那個「模型 API」區塊。
+          功能找不到就等於不存在，所以搬到它正下方。 */}
+      <ModelProvidersCard />
+      <section className="card p-5 space-y-3">
+        <div>
+          <h2 className="font-medium">🧠 AI 建流程偏好</h2>
+          <p className="text-sm muted mt-0.5">
+            用白話寫下你的固定習慣，AI 每次建流程都會遵守——同一句話不用每條流程重講。
+            例如：「檔名一律加當天日期後綴」「Excel 標題列深藍底白字」「通知一律用 Telegram」「輸出檔都放桌面的『報表』資料夾」。
+          </p>
+        </div>
+        <textarea
+          value={prefs}
+          onChange={(e) => setPrefs(e.target.value)}
+          rows={4}
+          maxLength={2000}
+          placeholder="一行一條，寫你希望 AI 建流程時固定遵守的事…"
+          className="input w-full font-normal"
+          style={{ resize: "vertical", minHeight: 90 }}
+        />
+        <div className="flex items-center gap-2">
+          <button onClick={savePrefs} disabled={prefs === prefsSaved} className="btn btn-primary">儲存偏好</button>
+          {prefsMsg && <span className="text-sm" style={{ color: "var(--green)" }}>已儲存，下次跟 AI 對話就生效</span>}
+        </div>
+      </section>
+      <section className="card p-5 space-y-3">
+        <div>
+          <h2 className="font-medium">🧭 AI 推理力度</h2>
+          <p className="text-sm muted mt-0.5">
+            建立/修改流程、產生自訂程式碼時，本機 Claude Code 要想多深。力度愈高，愈能想清楚複雜或含糊的需求，但單輪回覆會等比較久；
+            力度愈低，回覆比較快，但遇到規則沒涵蓋到的講法比較容易理解錯。建議維持「高」——正確建好或修好比省那幾秒更重要。
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {(["low", "medium", "high"] as const).map((level) => (
+            <button
+              key={level}
+              onClick={() => saveEffort(level)}
+              className={effort === level ? "btn btn-primary" : "btn btn-ghost"}
+            >
+              {level === "low" ? "低(較快)" : level === "medium" ? "中" : "高(建議)"}
+            </button>
+          ))}
+          {effortMsg && <span className="text-sm" style={{ color: "var(--green)" }}>已儲存，下次跟 AI 對話就生效</span>}
+        </div>
+      </section>
+      <div className="pt-2">
+        <h2 className="text-sm font-semibold" style={{ color: "var(--accent)" }}>③ 產出的檔案</h2>
+        <p className="text-xs muted mt-0.5">流程做出來的檔案要放到哪裡。</p>
+      </div>
       <OutputFolderCard />
-      <RetentionCard />
-      <AuditLogCard />
+      {/* 這兩項是企業稽核那輪加的，一般自用幾乎不會動；刻意保留但收起來，不佔一般使用者的視線。 */}
+      <details className="card p-4">
+        <summary className="cursor-pointer text-sm font-semibold" style={{ color: "var(--accent)" }}>
+          ④ 進階（很少需要動）
+        </summary>
+        <p className="text-xs muted mt-1 mb-3">紀錄要留多久、以及誰在什麼時候做了什麼。平常不用管。</p>
+        <div className="space-y-4">
+          <RetentionCard />
+          <AuditLogCard />
+        </div>
+      </details>
     </div>
   );
 }

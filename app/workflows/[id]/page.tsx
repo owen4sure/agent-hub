@@ -24,6 +24,7 @@ import { extractVideoFrames, isVideoFile } from "@/lib/videoFrames";
 import { RecordActionCard } from "./RecordActionCard";
 import { OutputFolderPanel } from "./OutputFolderPanel";
 import { SlidesImageScriptCard } from "./SlidesImageScriptCard";
+import { WorkflowSettingsPanel } from "./WorkflowSettingsPanel";
 import { setupNeedsFor } from "@/lib/workflow/setupNeeds";
 import {
   useWFChat, sendChatToAI, stopChatToAI, stopVerification, startAutoTest, stopAutoTest,
@@ -303,10 +304,10 @@ export default function WorkflowPage() {
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [showRecorder, setShowRecorder] = useState(false);
   const [showSlidesImageScript, setShowSlidesImageScript] = useState(false);
+  const [showWorkflowSettings, setShowWorkflowSettings] = useState(false);
   const [setupBannerDismissed, setSetupBannerDismissed] = useState(false);
   const [showOutputFolder, setShowOutputFolder] = useState(false);
   // 模型名稱、API 服務這類不是建立流程所需的知識。平常完全收起，真的有進階需求的人才從「更多動作」打開。
-  const [showModelSettings, setShowModelSettings] = useState(false);
   const moreMenuRef = useRef<HTMLDivElement>(null);
   const [notFound, setNotFound] = useState(false);
   const [renamingWf, setRenamingWf] = useState(false);
@@ -315,7 +316,6 @@ export default function WorkflowPage() {
   // 的模型代號完全不在這份清單裡——固定下拉會逼使用者只能選一個對自己服務不存在的模型(踩過的
   // 開源可攜性缺口)。預設仍是下拉(對用內建免費服務的人最省事)，但可以切換成文字輸入自訂代號；
   // 目前存的 model 若本來就不在清單裡(表示已經自訂過)，直接視覺上以自訂模式呈現。
-  const [showCustomModel, setShowCustomModel] = useState(false);
   const [extraModels, setExtraModels] = useState<{ ref: string; model: string; providerLabel: string }[]>([]);
   const [sidePanelWidth, setSidePanelWidth] = useState(440);
   const [panelWidthReady, setPanelWidthReady] = useState(false);
@@ -1900,19 +1900,19 @@ export default function WorkflowPage() {
                 color: evidenceState.drifted ? "var(--amber)" : "var(--green)",
                 borderColor: evidenceState.drifted ? "color-mix(in srgb, var(--amber) 45%, var(--border))" : "color-mix(in srgb, var(--green) 45%, var(--border))",
               }}
-              title="查看這次真實驗收的來源檔案、分頁與內容指紋"
+              title="上次是用哪個檔案、哪個分頁驗過的——以及那份檔案後來有沒有被改過"
             >
-              {evidenceState.drifted ? "⚠️ 需要重新驗收" : "✓ 已驗證版本"}
+              {evidenceState.drifted ? "⚠️ 來源檔案變了，要重驗" : "✓ 已用真實檔案驗過"}
             </button>
           )}
-          {wf.n8nMigration && (
+          {wf.n8nMigration && ((wf.n8nMigration.reviewCount + wf.n8nMigration.unsupportedCount) > 0 || n8nGraphNeedsReview(wf)) && (
             <button
               onClick={() => { setShowN8nMigration((v) => !v); setShowHistory(false); setShowSchedule(false); setShowExplain(false); setShowVersions(false); setShowEvidence(false); selectNode(null); }}
               className="badge shrink-0 whitespace-nowrap"
-              style={{ color: (wf.n8nMigration.reviewCount + wf.n8nMigration.unsupportedCount) > 0 || n8nGraphNeedsReview(wf) ? "var(--amber)" : "var(--green)", borderColor: "color-mix(in srgb, var(--amber) 35%, var(--border))" }}
-              title="查看 n8n 匯入後的逐步映射與缺口"
+              style={{ color: "var(--amber)", borderColor: "color-mix(in srgb, var(--amber) 35%, var(--border))" }}
+              title="從 n8n 搬過來時，有幾步沒辦法直接對應，要你確認一下"
             >
-              {(wf.n8nMigration.reviewCount + wf.n8nMigration.unsupportedCount) > 0 || n8nGraphNeedsReview(wf) ? "⚠️ n8n 遷移待確認" : "✓ n8n 映射"}
+              ⚠️ 從 n8n 帶過來的步驟要確認
             </button>
           )}
           {wf.n8nMigration && wf.status === "official" && n8nAutomationReady === false && (
@@ -1920,9 +1920,9 @@ export default function WorkflowPage() {
               onClick={() => { setShowSchedule(true); setShowHistory(false); setShowExplain(false); setShowVersions(false); setShowEvidence(false); setShowN8nMigration(false); selectNode(null); }}
               className="badge shrink-0 whitespace-nowrap"
               style={{ color: "var(--amber)", borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))" }}
-              title="這版 n8n 流程尚未成功安全試跑；點擊開啟自動觸發面板查看下一步"
+              title="這條從 n8n 帶過來的流程還沒成功跑過一次安全試跑（只讀、不會改到任何資料）——點這裡看下一步"
             >
-              ⚠️ 尚未安全試跑
+              ⚠️ 還沒安全試跑過
             </button>
           )}
           <div className="workflow-toolbar-actions ml-auto flex items-center gap-1.5">
@@ -1977,10 +1977,10 @@ export default function WorkflowPage() {
             {/* 次要動作收進「⋯」：工具列擠到溢出要橫向捲(1440 寬就被截斷)是真實踩過的 UX 問題 */}
             <div className="relative shrink-0" ref={moreMenuRef}>
               <button
-                onClick={() => setShowMoreMenu((v) => { if (v) setShowModelSettings(false); return !v; })}
+                onClick={() => setShowMoreMenu((v) => !v)}
                 className="btn btn-ghost"
                 aria-label="更多動作"
-                title="設為正式 / 版本 / 排列 / 複製 / 匯出 / 刪除"
+                title="這條流程的設定 / 版本 / 複製 / 匯出 / 刪除"
                 style={{ paddingLeft: 10, paddingRight: 10, ...(showMoreMenu ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
               >
                 ⋯
@@ -2001,65 +2001,14 @@ export default function WorkflowPage() {
                   <button className="menu-item" onClick={() => { setShowMoreMenu(false); arrange(); }}>
                     <span>⌗</span> 自動排列
                   </button>
-                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); void manualLogin(); }}>
-                    <span>🔐</span> 手動登入一次(Google等)
-                  </button>
-                  {/* 「說不清楚就做一次給它看」：放在手動登入旁邊——兩者都是「打開真瀏覽器、
-                      使用者本人動手」的同一類操作，使用者的心智模型會把它們放在一起找。 */}
-                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); setShowRecorder(true); }}>
-                    <span>🔴</span> 錄一段操作給我看
-                  </button>
-                  {/* 每條流程各自指定產出資料夾——使用者原話「我每個要放的資料夾不一定一樣」 */}
-                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); setShowOutputFolder(true); }}>
-                    <span>📁</span> 這條流程的檔案要放哪
-                  </button>
-                  {/* 換簡報圖片需要一次性部署一小段 Apps Script——沒有入口就等於沒有這個功能 */}
-                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); setShowSlidesImageScript(true); }}>
-                    <span>🖼️</span> 讓流程能換簡報上的圖片
+                  <div className="menu-sep" />
+                  {/* 這條流程能調的東西全部收到一個地方(WorkflowSettingsPanel)。
+                      原本它們平鋪在這個選單裡跟「刪除流程」擠在一起，使用者要先認出「哪幾項是設定」，
+                      而且每一項都看不出「我到底設了沒有」——真實回饋：「我看不懂要去哪裡操作」。 */}
+                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); setShowWorkflowSettings(true); }}>
+                    <span>⚙</span> 這條流程的設定…
                   </button>
                   <div className="menu-sep" />
-                  <button className="menu-item" onClick={() => setShowModelSettings((v) => !v)}>
-                    <span>🧠</span> AI 選擇（進階）
-                  </button>
-                  {showModelSettings && (
-                    <div className="px-3 pb-3 pt-1 space-y-2" style={{ maxWidth: 310 }}>
-                      <p className="text-xs leading-relaxed faint">一般不需要調整，平台會自動處理圖片與驗證碼等情況。只有你自己有指定 AI 服務時才修改。</p>
-                      {showCustomModel || !((KNOWN_WORKING_MODELS as readonly string[]).includes(wf.model) || wf.model.startsWith("claude-code")) ? (
-                        <input
-                          key={wf.id}
-                          defaultValue={wf.model}
-                          onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== wf.model) changeModel(v); }}
-                          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                          placeholder="輸入 AI 名稱"
-                          aria-label="自訂 AI 名稱"
-                          className="input text-xs py-1 w-full"
-                        />
-                      ) : (
-                        <select
-                          value={wf.model}
-                          onChange={(e) => changeModel(e.target.value)}
-                          aria-label="選擇 AI"
-                          className="input text-xs py-1 w-full"
-                        >
-                          {MODELS.filter((m) => (KNOWN_WORKING_MODELS as readonly string[]).includes(m) || m.startsWith("claude-code")).map((m) => (
-                            <option key={m} value={m}>{m}</option>
-                          ))}
-                          {/* 使用者自己接的模型(地端/別台機器)也要在這裡選得到，
-                              否則他加完來源之後在流程裡還是找不到它(真實回饋：「我沒看到還能填別的模型」)。 */}
-                          {extraModels.length > 0 && (
-                            <optgroup label="你自己接的">
-                              {extraModels.map((c) => (
-                                <option key={c.ref} value={c.ref}>{c.model}（{c.providerLabel}）</option>
-                              ))}
-                            </optgroup>
-                          )}
-                        </select>
-                      )}
-                      <button onClick={() => setShowCustomModel((v) => !v)} className="text-xs faint hover:text-[var(--text)]">
-                        {showCustomModel ? "從內建 AI 選擇" : "改用自訂 AI 名稱"}
-                      </button>
-                    </div>
-                  )}
                   <button className="menu-item" onClick={() => { setShowMoreMenu(false); copy(); }}>
                     <span>⧉</span> 複製流程
                   </button>
@@ -2375,6 +2324,25 @@ export default function WorkflowPage() {
           value={wf.outputFolder}
           onClose={() => setShowOutputFolder(false)}
           onSaved={(_next, label) => { setShowOutputFolder(false); flashToast(`這條流程的產出檔：${label}`); void load(); }}
+        />
+      )}
+      {showWorkflowSettings && (
+        <WorkflowSettingsPanel
+          workflowName={wf.name}
+          model={wf.model}
+          builtinModels={MODELS.filter((m) => (KNOWN_WORKING_MODELS as readonly string[]).includes(m) || m.startsWith("claude-code"))}
+          extraModels={extraModels}
+          onChangeModel={(m) => changeModel(m)}
+          outputFolder={wf.outputFolder ?? null}
+          onOpenOutputFolder={() => { setShowWorkflowSettings(false); setShowOutputFolder(true); }}
+          onManualLogin={() => { setShowWorkflowSettings(false); void manualLogin(); }}
+          onOpenRecorder={() => { setShowWorkflowSettings(false); setShowRecorder(true); }}
+          slidesImage={{
+            used: wf.nodes.some((n) => n.type === "google-slides-replace-image"),
+            configured: wf.nodes.some((n) => n.type === "google-slides-replace-image" && String(n.config?.scriptUrl ?? "").trim() !== ""),
+          }}
+          onOpenSlidesImage={() => { setShowWorkflowSettings(false); setShowSlidesImageScript(true); }}
+          onClose={() => setShowWorkflowSettings(false)}
         />
       )}
       {showSlidesImageScript && <SlidesImageScriptCard workflowId={id} onClose={() => { setShowSlidesImageScript(false); void load(); }} />}

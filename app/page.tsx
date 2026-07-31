@@ -18,6 +18,8 @@ interface WorkflowSummary {
   group?: string;
   lastRun?: { status: string; started_at: string } | null;
   triggers?: { schedule: boolean; watch: boolean; webhook: boolean; email?: boolean; telegram?: boolean; line?: boolean };
+  /** 還沒完成的一次性設定(缺了就會執行失敗)。空陣列＝這條可以跑。 */
+  setupNeeds?: { kind: string; nodeLabels: string[] }[];
 }
 interface Overview {
   officialCount: number;
@@ -94,6 +96,7 @@ export default function HomePage() {
   const [createError, setCreateError] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [showN8nMigration, setShowN8nMigration] = useState(false);
+  const [showImportMenu, setShowImportMenu] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const [dismissedFailures, setDismissedFailures] = useState<string[]>([]);
   const [proposals, setProposals] = useState<FixProposal[]>([]);
@@ -510,6 +513,17 @@ export default function HomePage() {
         <div className="min-w-0 flex-1 flex items-baseline gap-2 relative z-[1] pointer-events-none">
           <span className="text-sm font-medium tracking-tight shrink-0">{w.name}</span>
           {w.builtin && <span className="badge badge-neutral shrink-0">內建範例</span>}
+          {/* 「這條還沒設定完，現在跑會失敗」要在清單上就看得到——不然使用者得一條一條點進去才知道
+              (真實回饋：17 條流程、他不知道哪條是壞的)。點進去之後流程頁上還有一張說明橫幅。 */}
+          {(w.setupNeeds?.length ?? 0) > 0 && (
+            <span
+              className="badge shrink-0"
+              style={{ color: "var(--amber)", borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))" }}
+              title={`還沒設定好：${w.setupNeeds!.flatMap((n) => n.nodeLabels).join("、")}——點進去會有說明`}
+            >
+              ⚠️ 差 {w.setupNeeds!.reduce((n, need) => n + need.nodeLabels.length, 0)} 步沒設定
+            </span>
+          )}
           <span className="text-xs faint truncate hidden sm:inline">
             {w.description || <span className="italic">點進去跟 AI 對話，說明會自動補上 ✨</span>}
           </span>
@@ -617,11 +631,23 @@ export default function HomePage() {
         subtitle="用白話跟 AI 建立、測試和執行工作流程"
         actions={
           <>
-            <label className="btn btn-ghost cursor-pointer">
-              ⬇ 匯入
-              <input ref={fileRef} type="file" accept=".json" onChange={handleImport} className="hidden" />
-            </label>
-            <button onClick={() => setShowN8nMigration(true)} className="btn btn-ghost">🔁 n8n 安全轉換</button>
+            {/* 匯入是「把別的地方的流程搬進來」——Agent Hub 自己的匯出檔、以及 n8n 的匯出檔，
+                是同一件事的兩種來源，所以收在同一顆按鈕底下。n8n 那條原本跟「建立新流程」平起平坐，
+                但它是**一次性的搬家工具**，多數人一輩子用一次或零次，不該常駐在主要動線上。 */}
+            <div className="relative">
+              <button onClick={() => setShowImportMenu((v) => !v)} className="btn btn-ghost">⬇ 匯入…</button>
+              {showImportMenu && (
+                <div className="menu absolute right-0 top-full mt-1 z-40 w-64">
+                  <label className="menu-item cursor-pointer">
+                    <span>📄</span> Agent Hub 匯出的流程檔
+                    <input ref={fileRef} type="file" accept=".json" onChange={(e) => { setShowImportMenu(false); handleImport(e); }} className="hidden" />
+                  </label>
+                  <button className="menu-item" onClick={() => { setShowImportMenu(false); setShowN8nMigration(true); }}>
+                    <span>🔁</span> 從 n8n 搬過來
+                  </button>
+                </div>
+              )}
+            </div>
             <button onClick={createNew} disabled={creating} className="btn btn-primary">{creating ? "建立中…" : "＋ 建立新流程"}</button>
           </>
         }

@@ -5,6 +5,7 @@ import { listRuns } from "@/lib/workflow/engine";
 import { getWebhookToken } from "@/lib/webhookStore";
 import { getLineToken } from "@/lib/lineHook";
 import { getDb } from "@/lib/db";
+import { setupNeedsFor } from "@/lib/workflow/setupNeeds";
 import { denyIfNotLocal } from "@/lib/requireLocal";
 import { recordAuditFromRequest } from "@/lib/auditLog";
 
@@ -32,6 +33,10 @@ export async function GET() {
       description: wf.description,
       group: wf.group ?? "",
       nodeCount: wf.nodes.length,
+      // 「這條還缺哪些一次性設定」直接算在清單裡：不然使用者要一條一條點進去才知道哪條是壞的
+      // (真實回饋：17 條流程、他不知道哪條沒設定完)。只回「缺幾項」與「缺什麼」的白話，
+      // 詳細設定還是在流程頁裡做。
+      setupNeeds: setupNeedsFor(wf.nodes).map((need) => ({ kind: need.kind, nodeLabels: need.nodeLabels })),
       // 首頁的「執行」必須跟流程頁內的「執行」問一樣的問題：只要有執行前參數(選期間等，就算有預設值
       // 也要讓使用者確認，不能默默拿預設值跑——使用者要選區間卻被跳過，踩過)、需要測試檔、或訊息觸發
       // 型要填測試值，就導進流程頁開執行表單。判斷條件要跟 workflows/[id]/page.tsx 的 onClickRun 一致。
