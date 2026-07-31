@@ -413,14 +413,15 @@ export function checkRequirements(userText: string, graph: GraphLike, opts: Requ
   // 「通知…{0,10}…不用」跨過逗號把「通知」配上了「不用」，整個桌面通知需求被判成使用者自己禁止，
   // 自我修正迴圈於是強迫模型把使用者明確要求的桌面通知節點拆掉(真實踩過：新手實測情境)。
   // 這兩個否定判斷跟契約建立、執行前閘門共用同一份(dataChangePolicy)——各寫一份必然漂移。
-  const { forbidsEmail, forbidsNotification } = dataChangePolicyFor(t);
+  // 正面判斷(wantsEmail/wantsNotification)一併從那裡拿：這裡本來各留了一份自己的 regex，
+  // 結果 dataChangePolicy 那邊修好「寄歡迎信」這種說法時，這裡沒跟上——而**真正決定
+  // send-email 會不會被自動刪掉的是這裡**。同一個判斷放兩份，遲早只修好其中一份。
+  const { forbidsEmail, forbidsNotification, wantsEmail, wantsNotification } = dataChangePolicyFor(t);
   // 通知
-  const wantsNotification = !forbidsNotification && /通知|告警|提醒|推播|敲我|傳給我|發給我|推到|傳到/.test(t);
   if (wantsNotification) {
     add("notify", "通知管道", has("telegram-notify", "line-notify", "slack-notify", "desktop-notify", "send-email"), "要有一個通知節點(telegram/line/slack/desktop/email)");
   }
   // 寄信
-  const wantsEmail = !forbidsEmail && /寄(信|email|郵件|出)|email 給|寄到|寄給/i.test(t);
   if (wantsEmail) {
     add("email", "寄出 Email", has("send-email"), "要放 send-email 節點(收件人留空=寄給自己)");
   }

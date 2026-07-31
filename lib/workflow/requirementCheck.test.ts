@@ -947,3 +947,23 @@ test("要做 KPI 簡報卻完全沒有資料來源，仍然要被擋下來(原�
   assert.ok(rule);
   assert.equal(rule!.met, false, "沒說資料哪來就不能放行");
 });
+
+test("需求驗收：「寄歡迎信給對方」的 send-email 不能被判成未獲授權而自動刪掉", () => {
+  // 真實回歸(gemma4 全庫實測第 11 案)：模型建出 trigger→send-email→google-sheet-append 是對的，
+  // 卻因為 wantsEmail 配不到「寄歡迎信」，send-email 被列進 noUnrequestedOutbound 的自動移除名單，
+  // autoTrim 刪掉它並回「你這次沒有要求寄信或通知」。確定性規則 = 換任何模型都一樣被刪。
+  const need = "給同事一個表單填姓名和 email，填完自動寄歡迎信給對方，並把名單記進 Google 試算表。細節用合理預設。";
+  const result = checkRequirements(need, {
+    nodes: [
+      { id: "t", type: "trigger", label: "表單", config: {}, position: { x: 0, y: 0 } },
+      { id: "mail", type: "send-email", label: "寄歡迎信", config: {}, position: { x: 1, y: 0 } },
+      { id: "sheet", type: "google-sheet-append", label: "登記名單", config: {}, position: { x: 2, y: 0 } },
+    ],
+    edges: [{ from: "t", to: "mail" }, { from: "mail", to: "sheet" }],
+  });
+  const outbound = result.find((i) => i.key === "noUnrequestedOutbound");
+  assert.equal(outbound, undefined, "使用者明確要求的寄信不該被列為未獲授權");
+  const email = result.find((i) => i.key === "email");
+  assert.ok(email, "需求核對清單要出現「寄出 Email」這一項");
+  assert.equal(email?.met, true, "圖上已經有 send-email，這一項要算達成");
+});

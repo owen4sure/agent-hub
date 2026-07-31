@@ -7,7 +7,14 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fixed｜使用者明確要求的「寄歡迎信」被當成 AI 自作主張，寄信步驟直接被刪掉｜真實回歸(gemma4 全庫實測第 11 案)：需求「填完自動寄歡迎信給對方」，模型正確建出 trigger→送歡迎信→寫進試算表，平台卻把 send-email 刪掉並回一句「🧹 這幾件事你沒有要求…你這次沒有要求寄信或通知」。根因是判斷「使用者有沒有要求寄信」的 regex 只認「寄」**緊接**信／email／郵件／出，「寄歡迎信」中間隔了兩個字就配不到 → `wantsEmail=false` → 需求驗收把它列進「未獲授權的外送」→ autoTrim 自動移除。**這是確定性規則，換任何模型都一樣會被刪**。修法：把寄信說法抽成共用的 `EMAIL_ACTION`(允許「寄」跟「信」之間插修飾語)，**正反兩面共用同一份**——只放寬「想要」不放寬「禁止」的話，「不要寄歡迎信」會被讀成「他要寄歡迎信」，比原本的漏判更危險；同時把 `requirementCheck` 自己留的那份 wantsEmail／wantsNotification 複本刪掉改用共用判斷(同一個判斷放兩份，遲早只修好其中一份——這次就是)｜`lib/workflow/dataChangePolicy.ts`、`lib/workflow/requirementCheck.ts`｜驗證：3+1 個單元測試(寄X信要算要求寄信／否定句同步放寬／不含寄信動作不誤判／該案例的 send-email 不被列為未獲授權)；重跑該回歸案例 26 秒通過
+
+- Fixed｜回歸庫把「同樣正確的另一種做法」判成建錯圖｜第 20 案「PDF 抽表」只認 `pdf-read`，但 `read-file` 的實作真的會呼叫 `extractTextFromFile` 把 PDF 抽成文字(不是只有描述這樣寫)，用它讀 PDF 一樣抽得到內容。這個期待是在 read-file 支援 PDF 之前寫的，已經過時。`expectAny` 改成 `anyOf`(好幾組候選、每組至少中一個)，硬指定其中一種等於把另一種正確答案判成錯｜`scripts/regression.mjs`｜驗證：重跑該案例 65 秒通過
+
 ### Added
+
 
 - Added｜每個模型來源可以自己設定「最多等幾秒」｜實測使用者的地端 gemma4 時發現：預設 90 秒是為雲端 gateway 調的，但地端模型「比較慢但免費無限」——用同一個逾時會把**正在正常產出的長回應切斷**，看起來像「這個模型不會建流程」，其實只是沒等它講完。真實數據：本機 gemma4 建簡單流程 17 秒、建複雜流程(webhook+分類+簽核)會超過 90 秒。表單有「用 300 秒（本機模型建議）」一鍵設定｜`ModelProvider.timeoutMs`、`getClient` 依來源取用｜驗證：把 gemma4 的逾時放寬到 300 秒後，原本失敗的 4 個回歸案例**全部通過**
 - Added｜回歸庫可以指定模型，用來評估「某個模型建圖能力如何」｜`AGENT_HUB_REGRESSION_MODEL=xxx node scripts/regression.mjs`。不指定就用平台預設，行為跟以前完全一樣｜這是把「這個模型能不能建流程」從軼事變成數字的工具

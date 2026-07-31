@@ -33,7 +33,27 @@ export interface DataChangePolicy {
   forbidsEmail: boolean;
   /** 「不要通知」 */
   forbidsNotification: boolean;
+  /** 使用者**明確要求**寄信(否定句已排除)。給需求驗收判斷「圖上的 send-email 是不是他要的」。 */
+  wantsEmail: boolean;
+  /** 使用者**明確要求**通知(否定句已排除)。 */
+  wantsNotification: boolean;
 }
+
+/**
+ * 「寄信」這個動作在白話裡的各種說法。
+ *
+ * 為什麼中間要允許插字(`寄` 跟 `信/email/郵件` 之間開一個不含標點的小視窗)——真實踩過兩次的同一類 bug：
+ * 舊版只認「寄」後面**緊接**信/email/郵件/出，於是
+ * ①「AI 草擬一封回信寄出去」配不到(已修，加了「寄出」)；
+ * ②「填完自動寄歡迎信給對方」還是配不到——「寄歡迎信」中間隔了兩個字。
+ * 後果不是少一項提醒而已：`wantsEmail=false` 會讓需求驗收把使用者**明明要求的** send-email 判成
+ * 「模型自作主張的外送」，autoTrim 直接把它刪掉，還回一句「你這次沒有要求寄信或通知」。
+ * 這是確定性規則，所以**換任何模型都一樣**會被刪。
+ *
+ * 正反兩面一定要共用同一份：只放寬正面(想要)不放寬負面(禁止)，「不要寄歡迎信」就會被讀成
+ * 「他要寄歡迎信」——比原本的漏判更危險(使用者明說禁止卻放行外送)。
+ */
+const EMAIL_ACTION = "(?:寄[^。，,\\n]{0,6}(?:信|e-?mail|郵件|mail)|寄出|寄到|寄給|e-?mail\\s*給)";
 
 export function dataChangePolicyFor(text: string): DataChangePolicy {
   const t = text;
@@ -55,9 +75,14 @@ export function dataChangePolicyFor(text: string): DataChangePolicy {
   // 執行前閘門三處用到，各寫一份必然漂移(這一系列 P0 的共同成因)。
   // 否定詞清單刻意不放裸字「別」：「特別」「差別」「分別」都含「別」字但完全不是否定語氣，
   // 寬鬆視窗會把它們誤判成「別通知」(真實踩過)；「別」要當否定詞只認緊接在動作前的祈使句型。
-  const forbidsEmail = /(?:不要|不需|不用|不必|絕不|禁止|勿)[^。，,\n]{0,10}(?:寄(?:信|email|郵件|出)|email|郵件)|(?:寄(?:信|email|郵件|出)|email|郵件)[^。，,\n]{0,10}(?:不要|不需|不用|不必|絕不|禁止|勿)|別(?:再)?寄(?:信|email|郵件|出)?/i.test(t);
+  const forbidsEmail = new RegExp(
+    `(?:不要|不需|不用|不必|絕不|禁止|勿)[^。，,\\n]{0,10}(?:${EMAIL_ACTION}|e-?mail|郵件)`
+    + `|(?:${EMAIL_ACTION}|e-?mail|郵件)[^。，,\\n]{0,10}(?:不要|不需|不用|不必|絕不|禁止|勿)`
+    + `|別(?:再)?寄(?:[^。，,\\n]{0,6}(?:信|e-?mail|郵件|mail))?`,
+    "i",
+  ).test(t);
   const forbidsNotification = /(?:不要|不需|不用|不必|絕不|禁止|勿)[^。，,\n]{0,10}(?:通知|告警|提醒|推播)|(?:通知|告警|提醒|推播)[^。，,\n]{0,10}(?:不要|不需|不用|不必|絕不|禁止|勿)|別(?:再)?(?:通知|告警|提醒|推播)/.test(t);
-  const wantsEmail = !forbidsEmail && /寄(信|email|郵件|出)|email 給|寄到|寄給/i.test(t);
+  const wantsEmail = !forbidsEmail && new RegExp(EMAIL_ACTION, "i").test(t);
   const wantsNotification = !forbidsNotification && /通知|告警|提醒|推播|敲我|傳給我|發給我|推到|傳到/.test(t);
 
   const bannedEffects = new Set<SideEffectTag>();
@@ -76,7 +101,7 @@ export function dataChangePolicyFor(text: string): DataChangePolicy {
   if (forbidsNotification) contractEffects.add("notify");
   if (wantsEmail) contractEffects.delete("email");
   if (wantsNotification) contractEffects.delete("notify");
-  return { bannedEffects, contractEffects, forbidsAllChanges, forbidsFileOutput, forbidsEmail, forbidsNotification };
+  return { bannedEffects, contractEffects, forbidsAllChanges, forbidsFileOutput, forbidsEmail, forbidsNotification, wantsEmail, wantsNotification };
 }
 
 /**

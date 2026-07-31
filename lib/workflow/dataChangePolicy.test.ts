@@ -60,3 +60,43 @@ test("資料變更政策：一般需求不會憑空產生限制", () => {
   assert.equal(policy.bannedEffects.size, 0);
   assert.equal(statesReadOnlyIntent("每天早上讀報表，整理成摘要用 telegram 通知我"), false);
 });
+
+test("寄信意圖：「寄X信」中間插修飾語也要算使用者要求寄信", () => {
+  // 真實回歸(gemma4 全庫實測第 11 案):「填完自動寄歡迎信給對方」——舊 regex 只認「寄」緊接
+  // 信/email/郵件/出,配不到「寄歡迎信」,於是 wantsEmail=false,需求驗收把使用者明明要求的
+  // send-email 當成「模型自作主張的外送」,autoTrim 直接刪掉並回「你這次沒有要求寄信或通知」。
+  // 這是確定性規則,換任何模型都一樣會被刪。
+  for (const text of [
+    "給同事一個表單填姓名和 email，填完自動寄歡迎信給對方",
+    "整理完寄一封通知信給主管",
+    "每週寄報表 email 給我",
+    "AI 草擬一封回信寄出去",
+    "結果寄到我信箱",
+  ]) {
+    assert.equal(dataChangePolicyFor(text).wantsEmail, true, text);
+    assert.deepEqual([...contractEffectsFor(text)], [], `${text}：明確要求的外送不能被記成禁止`);
+  }
+});
+
+test("寄信意圖：放寬正面說法時，否定句必須同步放寬(否則禁止變成授權)", () => {
+  // 只放寬「想要」不放寬「禁止」的話,「不要寄歡迎信」會被讀成「他要寄歡迎信」——
+  // 比原本的漏判更危險(使用者明說禁止卻放行外送)。正反兩面共用同一份 EMAIL_ACTION。
+  // 句子刻意避開「通知/提醒」字樣：那兩個詞會另外(正確地)觸發 forbidsNotification，
+  // 混在一起就驗不出這裡真正要測的 email 那一項。
+  for (const text of ["整理完給我看就好，不要寄歡迎信", "不用寄確認信給對方", "禁止寄任何電子報信"]) {
+    const policy = dataChangePolicyFor(text);
+    assert.equal(policy.forbidsEmail, true, text);
+    assert.equal(policy.wantsEmail, false, text);
+    assert.deepEqual([...contractEffectsFor(text)], ["email"], text);
+  }
+});
+
+test("寄信意圖：不含寄信動作的句子不會被誤判(視窗不得跨標點)", () => {
+  for (const text of [
+    "把資料寄放在這個資料夾，通知我就好",
+    "整理成摘要用 telegram 通知我",
+    "讀取信箱裡的日報附件做成表格",
+  ]) {
+    assert.equal(dataChangePolicyFor(text).wantsEmail, false, text);
+  }
+});
