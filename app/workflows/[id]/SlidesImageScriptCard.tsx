@@ -20,6 +20,9 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
   const [scriptUrl, setScriptUrl] = useState("");
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [deployStatus, setDeployStatus] = useState<{ hasClient: boolean; missingScopes: string[]; webAppUrl: string | null; deployed: boolean } | null>(null);
+  const [deploying, setDeploying] = useState(false);
+  const [deployResult, setDeployResult] = useState<{ ok: boolean; message: string; webAppUrl?: string } | null>(null);
   const [proving, setProving] = useState(false);
   const [proof, setProof] = useState<{ ok: boolean; message: string; presentationUrl?: string | null; thumbnailBase64?: string | null } | null>(null);
 
@@ -32,8 +35,32 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
         if (d.token) { setToken(d.token); setScript(d.script); } else setLoadError(d.error ?? "拿不到腳本內容");
       })
       .catch((e) => alive && setLoadError(String(e)));
+    fetch("/api/slides-image-script/deploy")
+      .then((r) => r.json())
+      .then((d) => {
+        if (!alive) return;
+        setDeployStatus(d);
+        // 之前部署過就把網址帶出來，使用者不用自己再去翻一次
+        if (d.webAppUrl) setScriptUrl((current) => current || d.webAppUrl);
+      })
+      .catch(() => { /* 拿不到就當作沒部署過，手動步驟照樣可用 */ });
     return () => { alive = false; };
   }, []);
+
+  async function autoDeploy() {
+    setDeploying(true);
+    setDeployResult(null);
+    try {
+      const res = await fetch("/api/slides-image-script/deploy", { method: "POST" });
+      const d = await res.json();
+      setDeployResult(d);
+      if (d.ok && d.webAppUrl) setScriptUrl(d.webAppUrl);
+    } catch (e) {
+      setDeployResult({ ok: false, message: `部署失敗：${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setDeploying(false);
+    }
+  }
 
   async function copyScript() {
     try {
@@ -105,7 +132,43 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
           </p>
         </div>
 
-        <ol className="list-decimal ml-5 space-y-2 text-sm">
+        <div className="card p-3 space-y-2" style={{ borderColor: "var(--accent)", background: "var(--accent-soft)" }}>
+          <p className="text-sm font-medium">最快的方式：讓它自己建好、自己部署</p>
+          {deployStatus && deployStatus.missingScopes.length > 0 ? (
+            <>
+              <p className="text-xs muted leading-relaxed">
+                你目前的 Google 授權還沒包含「建立與部署 Apps Script」這兩項，所以要先重新授權一次（一次就好）。
+              </p>
+              <a className="btn btn-primary text-xs inline-block" href="/api/oauth/google/start">重新授權 Google</a>
+            </>
+          ) : (
+            <>
+              <p className="text-xs muted leading-relaxed">
+                按一下，平台會用你的 Google 帳號建一個 Apps Script 專案、貼好程式碼、部署成網頁應用程式，
+                網址直接填好。以後腳本有更新也是按這顆，<b>網址不會變</b>。
+              </p>
+              <button type="button" className="btn btn-primary text-xs" onClick={autoDeploy} disabled={deploying}>
+                {deploying ? "建立中…（約 10-30 秒）" : deployStatus?.deployed ? "🔄 更新腳本到最新版" : "🚀 幫我自動建好並部署"}
+              </button>
+              <p className="text-xs faint leading-relaxed">
+                第一次用要先到{" "}
+                <a href="https://script.google.com/home/usersettings" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
+                  Apps Script 設定頁
+                </a>{" "}
+                把「Google Apps Script API」打開（預設是關的，只有你本人開得了，沒有任何程式可以代勞）。
+              </p>
+            </>
+          )}
+          {deployResult && (
+            <p className="text-xs leading-relaxed" style={{ color: deployResult.ok ? "var(--green)" : "var(--red)" }}>
+              {deployResult.ok ? "✅ " : "⚠️ "}{deployResult.message}
+            </p>
+          )}
+        </div>
+
+        <details>
+          <summary className="cursor-pointer text-xs faint">自動的那條走不通？展開手動步驟（結果完全一樣）</summary>
+        <ol className="list-decimal ml-5 space-y-2 text-sm mt-2">
           <li>
             按下面的「複製腳本」。<span className="muted text-xs">（驗證碼已經幫你填好在裡面了，不用自己改）</span>
             <div className="mt-1.5">
@@ -126,62 +189,59 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
             <b>執行身分＝我自己</b>、<b>誰可以存取＝任何人</b> → 部署。
             <p className="text-xs muted mt-0.5">中間會跳出授權畫面，要同意它存取你的簡報——那正是它要做的事。</p>
           </li>
-          <li>
-            把 Google 給你的 <code>…/exec</code> 網址貼到下面，按「檢查能不能用」。
-            <div className="mt-1.5 flex gap-2 flex-wrap">
-              <input
-                className="input text-xs py-1 flex-1 min-w-56"
-                placeholder="https://script.google.com/macros/s/…/exec"
-                value={scriptUrl}
-                onChange={(e) => setScriptUrl(e.target.value)}
-              />
-              <button type="button" className="btn btn-primary text-xs" onClick={check} disabled={checking || !scriptUrl.trim()}>
-                {checking ? "檢查中…" : "檢查能不能用"}
-              </button>
-            </div>
-            {checkResult && (
-              <p className="text-xs mt-1.5 leading-relaxed" style={{ color: checkResult.ok ? "var(--green)" : "var(--red)" }}>
-                {checkResult.ok ? "✅ " : "⚠️ "}{checkResult.message}
-              </p>
-            )}
-          </li>
-          <li>
-            通了之後，按這顆看它<b>真的換一次圖</b>——腳本會自己開一份用完即棄的測試簡報示範，
-            <b>你的正式簡報一個字都不會動</b>。
-            <div className="mt-1.5">
-              <button type="button" className="btn btn-primary text-xs" onClick={prove} disabled={proving || !scriptUrl.trim()}>
-                {proving ? "測試中…（約 10-30 秒）" : "🧪 實際換一次圖給我看"}
-              </button>
-            </div>
-            {proof && (
-              <div className="mt-2 space-y-1.5">
-                <p className="text-xs leading-relaxed" style={{ color: proof.ok ? "var(--green)" : "var(--red)" }}>
-                  {proof.ok ? "✅ " : "⚠️ "}{proof.message}
-                </p>
-                {proof.thumbnailBase64 && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={`data:image/png;base64,${proof.thumbnailBase64}`}
-                    alt="測試簡報換圖後的畫面"
-                    className="rounded-md border w-full"
-                    style={{ borderColor: "var(--border)" }}
-                  />
-                )}
-                {proof.presentationUrl && (
-                  <p className="text-xs">
-                    <a href={proof.presentationUrl} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
-                      開啟那份測試簡報
-                    </a>
-                    <span className="faint">（看完可以直接刪掉，它跟你的正式簡報無關）</span>
-                  </p>
-                )}
-              </div>
-            )}
-          </li>
-          <li>
-            確認沒問題後，把這個網址填進流程裡「換掉簡報上的圖片」那一步的設定。
-          </li>
+          <li>把 Google 給你的 <code>…/exec</code> 網址複製起來，貼到下面的欄位。</li>
         </ol>
+        </details>
+
+        <div className="card p-3 space-y-2" style={{ background: "var(--surface-2)" }}>
+          <p className="text-sm font-medium">確認它真的能動</p>
+          <div className="flex gap-2 flex-wrap">
+            <input
+              className="input text-xs py-1 flex-1 min-w-56"
+              placeholder="https://script.google.com/macros/s/…/exec"
+              value={scriptUrl}
+              onChange={(e) => setScriptUrl(e.target.value)}
+              aria-label="換圖腳本網址"
+            />
+            <button type="button" className="btn btn-ghost text-xs" onClick={check} disabled={checking || !scriptUrl.trim()}>
+              {checking ? "檢查中…" : "檢查連得上"}
+            </button>
+            <button type="button" className="btn btn-primary text-xs" onClick={prove} disabled={proving || !scriptUrl.trim()}>
+              {proving ? "測試中…（約 10-30 秒）" : "🧪 實際換一次圖給我看"}
+            </button>
+          </div>
+          <p className="text-xs faint leading-relaxed">
+            「實際換一次圖」會讓腳本自己開一份用完即棄的測試簡報示範，<b>你的正式簡報一個字都不會動</b>。
+          </p>
+          {checkResult && (
+            <p className="text-xs leading-relaxed" style={{ color: checkResult.ok ? "var(--green)" : "var(--red)" }}>
+              {checkResult.ok ? "✅ " : "⚠️ "}{checkResult.message}
+            </p>
+          )}
+          {proof && (
+            <div className="space-y-1.5">
+              <p className="text-xs leading-relaxed" style={{ color: proof.ok ? "var(--green)" : "var(--red)" }}>
+                {proof.ok ? "✅ " : "⚠️ "}{proof.message}
+              </p>
+              {proof.thumbnailBase64 && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={`data:image/png;base64,${proof.thumbnailBase64}`}
+                  alt="測試簡報換圖後的畫面"
+                  className="rounded-md border w-full"
+                  style={{ borderColor: "var(--border)" }}
+                />
+              )}
+              {proof.presentationUrl && (
+                <p className="text-xs">
+                  <a href={proof.presentationUrl} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>開啟那份測試簡報</a>
+                  <span className="faint">（看完可以直接刪掉，它跟你的正式簡報無關）</span>
+                </p>
+              )}
+            </div>
+          )}
+          <p className="text-xs faint">確認沒問題後，把這個網址填進流程裡「換掉簡報上的圖片」那一步的設定。</p>
+        </div>
 
         <div className="card p-3 text-xs space-y-1" style={{ background: "var(--surface-2)" }}>
           <p className="font-medium">你的驗證碼</p>
@@ -200,7 +260,8 @@ export function SlidesImageScriptCard({ onClose }: { onClose: () => void }) {
         </details>
 
         <p className="faint text-xs">
-          之後如果這段腳本有更新，記得在 Apps Script 用「管理部署作業 → 編輯 → 新版本」，只按儲存不會生效。
+          之後這段腳本有更新時：用上面的「🔄 更新腳本到最新版」就好，網址不會變。
+          如果當初是手動部署的，就要自己回 Apps Script 用「管理部署作業 → 編輯 → 新版本」（只按儲存不會生效）。
         </p>
       </div>
     </div>

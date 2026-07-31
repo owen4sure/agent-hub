@@ -244,3 +244,21 @@ export function deleteSharedSecrets(keys: string[]) {
     for (const key of items) stmt.run(SHARED, key);
   })(clean);
 }
+
+/**
+ * 一般設定值的簡單存取(`settings` 表)。
+ *
+ * 給「不是帳密、但需要跨重啟記住」的東西用——例如平台自己幫使用者建的 Apps Script 專案編號。
+ * 那類值必須存下來，否則下次要更新腳本時會變成再建一個新的專案 + 新的網址，
+ * 而使用者流程裡填的舊網址會安靜地停在舊版程式碼上。
+ */
+export function getSetting(key: string): string | null {
+  const row = getDb().prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setSetting(key: string, value: string) {
+  getDb()
+    .prepare(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+    .run(key, value);
+}
