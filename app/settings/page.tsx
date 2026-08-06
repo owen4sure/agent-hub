@@ -10,6 +10,7 @@ import { AuditLogCard } from "./AuditLogCard";
 import { OutputFolderCard } from "./OutputFolderCard";
 import { ModelProvidersCard } from "./ModelProvidersCard";
 import { RetentionCard } from "./RetentionCard";
+import { BackupCard } from "./BackupCard";
 
 interface SecretField { key: string; label: string; type: string; }
 /** 跨所有 workflow 去重後的一個共用帳密欄位 + 有哪些 workflow 用到它 */
@@ -642,8 +643,9 @@ export default function SettingsPage() {
         <summary className="cursor-pointer text-sm font-semibold" style={{ color: "var(--accent)" }}>
           ④ 進階（很少需要動）
         </summary>
-        <p className="text-xs muted mt-1 mb-3">紀錄要留多久、以及誰在什麼時候做了什麼。平常不用管。</p>
+        <p className="text-xs muted mt-1 mb-3">備份放哪裡、紀錄要留多久、以及誰在什麼時候做了什麼。平常不用管。</p>
         <div className="space-y-4">
+          <BackupCard />
           <RetentionCard />
           <AuditLogCard />
         </div>
