@@ -1,6 +1,9 @@
+import crypto from "node:crypto";
 import type { NodeDefinition } from "../types";
 import { PermanentError } from "../types";
 import { getWorkflow } from "../store";
+import { getDb } from "../../db";
+import { recordAudit } from "../../auditLog";
 import { scanSecretKeys } from "../secretScan";
 import { generateCustomCode, isPlaceholderCode, PLACEHOLDER_CODE } from "../codegen";
 import { customCodeIsUnsafeForDryRun, DRY_RUN_SKIPPED_WRITES_KEY } from "../dryRun";
@@ -8,6 +11,25 @@ import { executeCustomCodeInProcessSandbox } from "../customCodeProcessSandbox";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as any;
+
+/** 稽核用的程式碼指紋：同一段程式碼永遠同一個代號,執行紀錄能回答「那天跑的是哪個版本」。 */
+export function codeFingerprint(code: string): string {
+  return crypto.createHash("sha256").update(code).digest("hex").slice(0, 12);
+}
+
+/** 用到瀏覽器(ctx.session)的程式碼需要真的 Playwright Page,留在主行程執行(見 execute 內註解)。 */
+function usesBrowserSession(code: string): boolean {
+  return /ctx\s*\.\s*session/.test(code);
+}
+
+function runTriggerType(runId: string): string {
+  try {
+    const row = getDb().prepare(`SELECT trigger_type FROM runs WHERE id = ?`).get(runId) as { trigger_type: string } | undefined;
+    return row?.trigger_type ?? "";
+  } catch {
+    return ""; // 查不到(測試環境的假 runId)就當手動,不因稽核查詢擋住執行
+  }
+}
 
 /**
  * 逃生口：庫裡沒有的特殊需求，AI 依白話寫這段程式碼(使用者永遠不看)。
@@ -59,9 +81,26 @@ export const customCodeNode: NodeDefinition = {
           "這個自訂步驟還沒有內容：請點這個節點，用白話描述它要做什麼，或按「讓 AI 修」讓 AI 補上",
         );
       }
+      // 確認凍結：排程/自動觸發的執行**不做**臨場產碼——沒有任何人看過的新程式碼,
+      // 只能在有人在場的手動執行第一次跑(跑過之後程式碼就凍結在節點上,排程執行的
+      // 永遠是凍結版,每次執行都記指紋)。沒有這條的話,「半夜排程自己生了一段新程式
+      // 碼並直接執行」在稽核上完全講不過去。
+      const trigger = runTriggerType(ctx.runId);
+      if (trigger && trigger !== "manual") {
+        throw new PermanentError(
+          "這個自訂步驟還沒有程式碼,而這次是排程/自動觸發的執行——自動執行不會臨場產生新程式碼(產生的程式碼必須先在手動執行時跑過一次)。請先手動執行一次這條流程,確認結果沒問題後,排程就會正常運作",
+        );
+      }
       ctx.log("這個自訂步驟還沒有程式碼，先依描述自動產生(只有第一次執行需要，之後會直接用)");
       code = await generateCustomCode(ctx, intent);
-      ctx.log("程式碼已產生並存進節點");
+      recordAudit({
+        actor: "system",
+        action: "custom-code.generate",
+        target: `${ctx.workflowId}:${ctx.nodeId}`,
+        detail: { fingerprint: codeFingerprint(code), intent: intent.slice(0, 200) },
+        source: "run",
+      });
+      ctx.log(`程式碼已產生並存進節點(指紋 ${codeFingerprint(code)})`);
     }
 
     // 引擎在進節點前已檢查既有 code，但空殼是在這裡才生成；生成後一定要再檢查一次。
@@ -96,13 +135,29 @@ export const customCodeNode: NodeDefinition = {
         throw new PermanentError(`這一步的自訂程式碼執行時出錯了，需要讓 AI 重新產生。（技術細節：${err instanceof Error ? err.message : String(err)}）`);
       }
     } else {
+      // 語法先在主行程驗一次:語法錯誤要分類成「重新產生就能修」的 PermanentError,
+      // 不能混在子程序的一般執行錯誤裡(訊息會少掉「需要讓 AI 重新產生」這個明確下一步)。
       let fn: (ctx: unknown) => Promise<unknown>;
       try {
         fn = new AsyncFunction("ctx", code);
       } catch (err) {
         throw new PermanentError(`這一步的自訂程式碼有語法問題，需要讓 AI 重新產生。（技術細節：${err instanceof Error ? err.message : String(err)}）`);
       }
-      result = await fn(ctx);
+      if (usesBrowserSession(code)) {
+        // 用到瀏覽器的程式碼需要真的 Playwright Page(RPC 代理的保真度撐不起點擊/評值的全部行為),
+        // 留在主行程執行。執行紀錄明確標示,這是 SECURITY.md 寫明的殘餘風險,不假裝有隔離。
+        ctx.log(`執行程式碼(版本 ${codeFingerprint(code)},含瀏覽器操作,於主行程執行)`);
+        result = await fn(ctx);
+      } else {
+        // 其他一律進子程序沙箱:拿不到平台行程的環境變數(模型金鑰等),檔案系統只開放
+        // 這次執行的輸入檔與產出目錄。fetch/exceljs 在子程序是同一套 runtime,語意不變。
+        ctx.log(`執行程式碼(版本 ${codeFingerprint(code)},沙箱)`);
+        const sandboxed = await executeCustomCodeInProcessSandbox(ctx, code, { mode: "production" });
+        if (sandboxed.permissionMode === "vm-fallback") {
+          ctx.log("⚠️ 目前 Node 不支援作業系統權限隔離；仍在獨立子程序執行(環境變數已隔離)");
+        }
+        result = sandboxed.value;
+      }
     }
     // 裸陣列絕不能當 output：物件展開會把它變成 {"0":…,"1":…} 這種索引鍵垃圾,下游引用欄位名永遠讀不到、
     // 流程還全綠(實測踩過:模型產的擷取程式碼 return [record],彙整步驟讀 incomeChannelData 恆空)。

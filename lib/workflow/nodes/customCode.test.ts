@@ -99,3 +99,115 @@ test("custom-code：只讀試跑遇到含外部操作的程式碼要攔下來，
     globalThis.fetch = origFetch;
   }
 });
+
+/* ── 正式執行沙箱(2026-08)：隔離要真的擋得住,保真要真的不變 ─────────────── */
+
+function prodContext(code: string, opts: { input?: Record<string, unknown>; outputDir?: string } = {}) {
+  const ctx = context({ intent: "測試", code }, { input: opts.input });
+  if (opts.outputDir) (ctx as { outputDir: string }).outputDir = opts.outputDir;
+  return ctx;
+}
+
+test("沙箱隔離：子程序拿不到平台行程的環境變數(模型金鑰絕不外流給 AI 寫的程式碼)", async () => {
+  const prev = process.env.ZZ_TEST_SENSITIVE;
+  process.env.ZZ_TEST_SENSITIVE = "super-secret";
+  try {
+    const result = await customCodeNode.execute(prodContext("return { seen: process.env.ZZ_TEST_SENSITIVE ?? '(拿不到)' };"));
+    assert.equal(result.output?.seen, "(拿不到)");
+  } finally {
+    if (prev === undefined) delete process.env.ZZ_TEST_SENSITIVE;
+    else process.env.ZZ_TEST_SENSITIVE = prev;
+  }
+});
+
+test("沙箱保真：exceljs 在子程序能用,而且 Date 的 instanceof 不會被 realm 邊界弄壞", async () => {
+  const os = await import("node:os");
+  const fsMod = await import("node:fs");
+  const pathMod = await import("node:path");
+  const dir = fsMod.mkdtempSync(pathMod.join(os.tmpdir(), "cc-prod-"));
+  try {
+    // 真實 KPI 流程的縮影:exceljs 開活頁簿、放一個 Date 進儲存格、再讀回來
+    const result = await customCodeNode.execute(prodContext(`
+      const ExcelJS = (await import('exceljs')).default ?? await import('exceljs');
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet('測試');
+      ws.getCell('A1').value = new Date('2026-08-06T00:00:00Z');
+      ws.getCell('B1').value = 42;
+      const buffer = await wb.xlsx.writeBuffer();
+      const wb2 = new ExcelJS.Workbook();
+      await wb2.xlsx.load(buffer);
+      const cell = wb2.getWorksheet('測試').getCell('A1').value;
+      return { isDate: cell instanceof Date, year: cell instanceof Date ? cell.getUTCFullYear() : null, b1: wb2.getWorksheet('測試').getCell('B1').value };
+    `, { outputDir: dir }));
+    assert.equal(result.output?.isDate, true, "Date 過不了 instanceof = VM realm 問題,會弄壞真實的 Excel 程式碼");
+    assert.equal(result.output?.year, 2026);
+    assert.equal(result.output?.b1, 42);
+  } finally {
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("沙箱保真：fetch 在子程序照常運作(真實流程大量用 fetch 打 Apps Script)", async () => {
+  const http = await import("node:http");
+  const server = http.createServer((_req, res) => { res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ ok: true, msg: "來自本機伺服器" })); });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const result = await customCodeNode.execute(prodContext(`
+      const resp = await fetch('http://127.0.0.1:${port}/');
+      const data = await resp.json();
+      return { status: resp.status, msg: data.msg };
+    `));
+    assert.equal(result.output?.status, 200);
+    assert.equal(result.output?.msg, "來自本機伺服器");
+  } finally {
+    server.close();
+  }
+});
+
+test("沙箱保真：程式碼裡的 console.log 不能弄壞結果通道(要變成執行紀錄)", async () => {
+  const result = await customCodeNode.execute(prodContext("console.log('進度訊息', {a: 1}); return { done: true };"));
+  assert.equal(result.output?.done, true);
+});
+
+test("沙箱隔離：寫檔只准寫進這次執行的產出目錄,寫別的地方要被 OS 權限擋下", async () => {
+  const os = await import("node:os");
+  const fsMod = await import("node:fs");
+  const pathMod = await import("node:path");
+  const { hasNodePermissionRuntime } = await import("../customCodeProcessSandbox");
+  if (!hasNodePermissionRuntime()) return; // 舊 Node 沒有 --permission,這條防線在該環境本來就不存在
+  const outDir = fsMod.mkdtempSync(pathMod.join(os.tmpdir(), "cc-out-"));
+  const forbidden = pathMod.join(os.homedir(), `zz-test-should-not-exist-${Date.now()}.txt`);
+  try {
+    const ok = await customCodeNode.execute(prodContext(`
+      const fs = await import('node:fs');
+      fs.default.writeFileSync(ctx.outputDir + '/result.txt', '合法寫入');
+      let blocked = false;
+      try { fs.default.writeFileSync(${JSON.stringify(forbidden)}, '不該成功'); } catch { blocked = true; }
+      return { blocked };
+    `, { outputDir: outDir }));
+    assert.equal(fsMod.readFileSync(pathMod.join(outDir, "result.txt"), "utf8"), "合法寫入", "產出目錄要寫得進去");
+    assert.equal(ok.output?.blocked, true, "家目錄要被擋");
+    assert.equal(fsMod.existsSync(forbidden), false);
+  } finally {
+    fsMod.rmSync(outDir, { recursive: true, force: true });
+    fsMod.rmSync(forbidden, { force: true });
+  }
+});
+
+test("確認凍結：排程觸發的執行遇到還沒產碼的節點要拒絕,不臨場產生沒人看過的程式碼", async () => {
+  const { getDb } = await import("../../db");
+  const runId = "zz-test-schedule-run";
+  const db = getDb();
+  try {
+    db.prepare(`INSERT OR REPLACE INTO runs (id, workflow_id, status, trigger_type, started_at) VALUES (?, 'zz-test-wf', 'running', 'schedule', datetime('now'))`).run(runId);
+    const ctx = context({ intent: "做點什麼", code: PLACEHOLDER_CODE });
+    (ctx as { runId: string }).runId = runId;
+    await assert.rejects(
+      customCodeNode.execute(ctx),
+      (err: unknown) => err instanceof PermanentError && /手動執行一次/.test(err.message),
+    );
+  } finally {
+    db.prepare(`DELETE FROM runs WHERE id = ?`).run(runId);
+  }
+});

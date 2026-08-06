@@ -14,6 +14,10 @@
 - Security｜資料庫裡殘留的明碼帳密啟動時補加密｜「下次儲存才加密」的惰性設計在真實資料上等了很久也沒等到那次儲存(實測有 6 筆 webmail/Google 帳密仍是明碼)。啟動時一次補課，讀取端走同一條解密路徑完全無感｜`lib/settingsStore.ts`(encryptLegacyPlaintextSecrets)、`instrumentation.ts`｜驗證：補加密後值不變、重跑為 0 筆；真實資料 6 筆全部補上且解密回讀一致
 - Security｜修補 `ip-address`(SSRF 分類繞過,high)與 `brace-expansion`(DoS) 相依漏洞｜`npm audit` 歸零｜`package-lock.json`｜驗證：`npm audit` 0 筆、mailClient(受影響的 imapflow 鏈)測試全過
 
+### Security
+
+- Security｜`custom-code` 正式執行搬進子程序沙箱；每次執行記錄程式碼指紋；排程不臨場產碼｜過去只有 dry-run 有沙箱,正式執行的 AI 產碼在主程序以完整權限跑(SECURITY.md 4.1 的殘餘風險)。現在:①不用瀏覽器的程式碼(實測 40 個真實節點中的 37 個)一律進子程序——拿不到平台的環境變數、檔案系統只開放輸入檔與產出目錄(Node --permission)、禁開子程序;子程序在主 realm 直接執行而非 VM,exceljs 的 Date instanceof、fetch、console.log 全部保真。②每次執行記 sha256 指紋,「那天跑的是哪個版本的程式碼」從執行紀錄答得出來;產碼寫入稽核軌跡。③排程/自動觸發遇到還沒產碼的節點直接拒絕——沒人看過的新程式碼只能在手動執行時第一次跑。用瀏覽器的 3 個節點留在主程序(紀錄明確標示,SECURITY.md 4.1 如實記載)｜`lib/workflow/customCodeProcessSandbox.ts`、`lib/workflow/nodes/customCode.ts`｜驗證：13 個合約+隔離測試(env 隔離、家目錄寫檔被 OS 擋、exceljs Date 保真、本機 http fetch、console.log 不弄壞協定、排程拒產碼);另以真實流程 15 個純計算節點的歷史輸入在沙箱重放,12 個輸出逐位元一致、3 個差異全數歸因於程式碼本身的時間相依或歷史輸入缺漏,零沙箱語意差異
+
 ### Added
 
 - Added｜常駐服務日誌自動輪替｜launchd 寫的 engine.log/engine.error.log 過去無上限長大。排程 tick 內建 copytruncate 輪替(20MB 上限、留 3 份 gzip 封存；不能 rename——launchd 握著檔案控制代碼，rename 後它會繼續寫進被改名的檔案)｜`lib/logRotation.ts`(新增)、`lib/scheduler.ts`｜驗證：4 個輪替測試(含「原檔必須留在原地」「單檔失敗不拖垮其他」)

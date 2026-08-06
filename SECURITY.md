@@ -49,8 +49,10 @@ Agent Hub 是**單人、本機自架**的自動化平台。它只綁 `127.0.0.1`
 - **SSRF**（`lib/urlGuard.ts`）：進門驗主機名，並在瀏覽器內攔截**每一個**子請求與轉址，
   阻擋 loopback、私有網段與雲端 metadata（只驗進門會被 302 或一張 `<img>` 繞過）。
   渲染使用者檔案的瀏覽器全封網路。
-- **只讀安全排練的隔離**（`lib/workflow/customCodeProcessSandbox.ts`）：dry-run 的 `custom-code`
-  在獨立子程序執行，套用 Node OS 權限白名單、模組白名單、不繼承環境變數、瀏覽器只給唯讀介面。
+- **`custom-code` 的子程序隔離**（`lib/workflow/customCodeProcessSandbox.ts`）：dry-run 在受限 VM
+  ＋唯讀瀏覽器介面下執行；**正式執行也走子程序沙箱**（不繼承環境變數、檔案系統白名單、
+  禁開子程序），只有用到瀏覽器 session 的程式碼留在主程序（見 4.1）。每次執行記錄程式碼指紋，
+  排程觸發不做臨場產碼。
 - **帳密加密與權限**：`data/` 0700、DB 與備份 0600、帳密以 AES-256-GCM 加密後才進 DB；
   明碼還原是獨立的 POST 端點，需要使用者主動點擊，且會寫入稽核軌跡。
 - **金鑰不跟密文住在一起**（`lib/keychain.ts` / `lib/secretVault.ts`）：macOS 上金鑰存在
@@ -67,13 +69,17 @@ Agent Hub 是**單人、本機自架**的自動化平台。它只綁 `127.0.0.1`
 
 ## 4. 已接受的殘餘風險（不假裝解決了）
 
-### 4.1 正式執行的 `custom-code` 在主程序內以完整權限執行
+### 4.1 使用瀏覽器的 `custom-code` 在主程序內執行；沙箱不管網路
 
-`lib/workflow/nodes/customCode.ts`：只有 `ctx.dryRun` 走子程序沙箱，**正式執行走 `new AsyncFunction`**，
-在 Next.js 主程序內執行，可存取整個檔案系統、`process.env`、任意網路與整個 `data/`。
+2026-08 起，正式執行的 `custom-code` **預設走子程序沙箱**（`lib/workflow/customCodeProcessSandbox.ts`
+的 production 模式）：拿不到主程序的環境變數（模型金鑰等）、檔案系統只開放這次執行的輸入檔與
+產出/除錯目錄（Node `--permission`）、不能開子程序。每次執行在紀錄裡寫程式碼指紋（sha256），
+排程觸發的執行拒絕臨場產碼（新程式碼必須先在手動執行時跑過一次）。
 
-這是刻意的取捨，因為正式執行必須共用同一個瀏覽器 session、寫入產出檔、動態載入套件——
-把它移進沙箱會讓「登入一次接著做十件事」這類流程無法運作。
+仍然接受的殘餘風險有兩塊：
+- **用到 `ctx.session`（瀏覽器）的程式碼留在主程序執行**——它需要真的 Playwright Page，
+  RPC 代理的保真度撐不起真實流程（點擊/評值/等待的完整行為）。執行紀錄會明確標示這類步驟。
+- **沙箱不限制網路**：Node 的權限模型管不到網路，靠白名單管控的只有檔案系統與子程序。
 
 **風險邊界**：能觸發執行的人 = 使用者本人（或以他的 OS 身分執行的程式）。前者本來就有完整權限；
 後者也本來就有完整權限（它可以直接讀 `.env` 與 DB，不需要經過這個平台）。
@@ -144,10 +150,12 @@ It has no user accounts, no RBAC and no SSO, and it **executes AI-generated code
   other OS accounts on the same host (0700 data dir + 0600 token file), imported workflows
   (all `custom-code` is stripped on import), SSRF on user-supplied URLs, and untrusted model output
   (always validated deterministically).
-- **Accepted residual risk**: in production runs, `custom-code` executes in the main process with full user
-  privileges — a deliberate trade-off (shared browser session, file output, dynamic imports). The local token
-  does **not** protect against malware running as the same OS user; such code already has full access to
-  `.env` and the database without going through this app. Do not run this tool on a shared or untrusted host.
+- **Accepted residual risk**: production `custom-code` runs in a child-process sandbox (scrubbed env,
+  OS-level fs allow-list, no subprocesses, per-run code fingerprint), but code that drives the shared
+  browser session still runs in the main process, and the sandbox does not restrict network access.
+  The local token does **not** protect against malware running as the same OS user; such code already has
+  full access to `.env` and the database without going through this app. Do not run this tool on a shared
+  or untrusted host.
 - **Data flow**: workflow execution is local, but whenever AI is involved (building, fixing, `llm-decide`,
   semantic checks) the relevant runtime data — node inputs, page HTML, failure screenshots — is sent to the
   model endpoint configured in `AGENT_HUB_BASE_URL`. Point it at a local model if data must not leave the machine.

@@ -1,11 +1,16 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { PermanentError, type NodeContext } from "./types";
 
 const MAX_MESSAGE_BYTES = 512 * 1024;
+/** 正式執行的結果可以是整份 Excel 算出來的資料，上限要夠大——太小會把「成功算完」截斷成假失敗。 */
+const MAX_MESSAGE_BYTES_PRODUCTION = 8 * 1024 * 1024;
 const MAX_TEXT_RESULT = 200_000;
 const SAFE_IMPORTS = new Set(["exceljs", "xlsx", "path", "node:path", "crypto", "node:crypto", "fs", "node:fs"]);
+
+export type SandboxMode = "dry-run" | "production";
 
 export interface ProcessSandboxResult {
   value: unknown;
@@ -52,7 +57,19 @@ type BrowserLocator = { locator: (selector: string) => BrowserLocator; first: ()
  * operation is allowed. No arbitrary page.evaluate or browser handle crosses
  * the process boundary.
  */
-async function handleBrowserRpc(ctx: NodeContext, command: string, args: unknown[], locators: Map<string, BrowserLocator>): Promise<unknown> {
+async function handleBrowserRpc(ctx: NodeContext, command: string, args: unknown[], locators: Map<string, BrowserLocator>, mode: SandboxMode): Promise<unknown> {
+  if (command === "registerFile") {
+    // 正式執行的程式碼可以登記產出檔——但只轉發呼叫,不給子程序任何檔案系統之外的能力
+    if (mode !== "production") throw new PermanentError("只讀安全試跑禁止寫入或登記產出檔案");
+    const [name, filePath, mime, kind] = args;
+    ctx.registerFile(safeString(name, 200), safeString(filePath, 2_000), safeString(mime, 200), kind === "output" ? "output" : "intermediate");
+    return true;
+  }
+  if (mode === "production") {
+    // 正式沙箱刻意不含瀏覽器：RPC 代理的 Page 跟真的 Playwright Page 保真度賭不起。
+    // 用到 ctx.session 的程式碼由 customCode.ts 判斷後改走主行程,不會到這裡。
+    throw new PermanentError("沙箱執行不提供瀏覽器能力——這段程式碼用到了 ctx.session,應由平台自動改走主行程(若看到這個錯誤,代表判斷邏輯漏了,請回報)");
+  }
   if (command === "session.getPage") {
     await ctx.session.getPage();
     return true;
@@ -119,7 +136,13 @@ async function handleBrowserRpc(ctx: NodeContext, command: string, args: unknown
 const WORKER_SOURCE = String.raw`
 const readline = require('node:readline');
 const vm = require('node:vm');
+const util = require('node:util');
 const lines = readline.createInterface({ input: process.stdin });
+// 程式碼裡的 console.log 一定要改走訊息通道——直接印到 stdout 會插進 JSON 協定裡,
+// 家長行程會把整個執行當成「回傳格式錯誤」殺掉(而且看起來像隨機失敗)。
+for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
+  console[level] = (...args) => { try { process.stdout.write(JSON.stringify({ type: 'log', message: util.format(...args).slice(0, 2000) }) + '\n'); } catch {} };
+}
 let readyResolve;
 const ready = new Promise((resolve) => { readyResolve = resolve; });
 const pending = new Map();
@@ -192,15 +215,31 @@ async function main() {
     config: Object.assign(Object.create(null), payload.ctx.config || {}),
     secrets: Object.assign(Object.create(null), payload.ctx.secrets || {}),
     vars: Object.assign(Object.create(null), payload.ctx.vars || {}),
-    cancelSignal: Object.freeze({ aborted: false }),
+    // 正式模式給真的 AbortSignal(程式碼可能把它塞給 fetch,假物件會讓 fetch 直接 TypeError)。
+    // 實際取消由家長行程 kill 子程序完成,這個 signal 不需要真的觸發。
+    cancelSignal: payload.mode === 'production' ? new AbortController().signal : Object.freeze({ aborted: false }),
     log: callback((message) => send({ type: 'log', message: String(message) })),
     session: Object.assign(Object.create(null), {
       getPage: callback(async () => { await rpc('session.getPage', []); return page; }),
       currentPage: callback(() => page),
       getBrowser: callback(async () => { throw new Error('只讀安全試跑禁止取得未受限的瀏覽器能力'); }),
     }),
-    registerFile: callback(() => { throw new Error('只讀安全試跑禁止寫入或登記產出檔案'); }),
+    registerFile: callback((name, filePath, mime, kind) => {
+      if (payload.mode === 'production') return rpc('registerFile', [name, filePath, mime, kind]);
+      throw new Error('只讀安全試跑禁止寫入或登記產出檔案');
+    }),
   });
+  if (payload.mode === 'production') {
+    // 正式執行：在子程序的**主 realm** 直接執行,不進 VM——VM 是另一個 JS realm,
+    // 裡面 new 出來的 Date 過不了主 realm 函式庫(exceljs 等)的 instanceof 檢查,
+    // 而且 fetch/console/Buffer 都不在 VM context 裡,真實程式碼會莫名壞掉。
+    // 正式模式的隔離靠的是行程邊界：環境變數已清洗、OS 權限白名單擋住檔案系統與子程序。
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    const fn = new AsyncFunction('ctx', String(payload.code || ''));
+    const result = await fn(ctx);
+    send({ type: 'result', value: result });
+    return;
+  }
   const context = vm.createContext({ __agentHubSafeImport: safeImport }, { codeGeneration: { strings: false, wasm: false } });
   vm.runInContext('Object.defineProperty(globalThis, "constructor", {value:undefined, configurable:false}); for (const p of [Object.prototype, Function.prototype, Array.prototype, String.prototype, Number.prototype, Boolean.prototype, RegExp.prototype, Date.prototype, Promise.prototype]) { try { Object.defineProperty(p, "constructor", {value:undefined, configurable:false}); } catch {} }', context);
   const code = String(payload.code || '').replace(/\bimport\s*\(\s*(["'])([^"']+)\1\s*\)/g, '__agentHubSafeImport("$2")');
@@ -213,9 +252,29 @@ async function main() {
 ready.then(() => main().catch((error) => send({ type: 'error', error: error && error.message ? error.message : String(error) }))).catch((error) => send({ type: 'error', error: String(error) }));
 `;
 
-export async function executeCustomCodeInProcessSandbox(ctx: NodeContext, code: string): Promise<ProcessSandboxResult> {
+export async function executeCustomCodeInProcessSandbox(
+  ctx: NodeContext,
+  code: string,
+  opts: { mode?: SandboxMode } = {},
+): Promise<ProcessSandboxResult> {
+  const mode: SandboxMode = opts.mode ?? "dry-run";
   const permission = hasNodePermissionRuntime();
-  const args = permission ? ["--permission", `--allow-fs-read=${path.join(process.cwd(), "node_modules")}`, ...[...collectReadableFiles(ctx.input)].map((file) => `--allow-fs-read=${file}`), "-e", WORKER_SOURCE] : ["-e", WORKER_SOURCE];
+  const maxMessageBytes = mode === "production" ? MAX_MESSAGE_BYTES_PRODUCTION : MAX_MESSAGE_BYTES;
+  // 正式執行比只讀試跑多的權限：可讀 config 引用的檔案與這次 run 的產出/除錯目錄,
+  // 可寫產出/除錯目錄與 OS 暫存目錄。就這些——parent 的環境變數、其他目錄、子程序一律拿不到。
+  const readable = collectReadableFiles(ctx.input);
+  if (mode === "production") collectReadableFiles(ctx.config, readable);
+  const fsArgs = [
+    `--allow-fs-read=${path.join(process.cwd(), "node_modules")}`,
+    ...[...readable].map((file) => `--allow-fs-read=${file}`),
+    ...(mode === "production"
+      ? [
+        `--allow-fs-read=${ctx.outputDir}`, `--allow-fs-read=${ctx.debugDir}`, `--allow-fs-read=${os.tmpdir()}`,
+        `--allow-fs-write=${ctx.outputDir}`, `--allow-fs-write=${ctx.debugDir}`, `--allow-fs-write=${os.tmpdir()}`,
+      ]
+      : []),
+  ];
+  const args = permission ? ["--permission", ...fsArgs, "-e", WORKER_SOURCE] : ["-e", WORKER_SOURCE];
   const child = spawn(process.execPath, args, {
     cwd: process.cwd(),
     // Never inherit the parent environment: it may contain AGENT_HUB_API_KEY or
@@ -232,14 +291,14 @@ export async function executeCustomCodeInProcessSandbox(ctx: NodeContext, code: 
   const writeResponse = (id: string, ok: boolean, value?: unknown, error?: unknown) => child.stdin.write(JSON.stringify({ type: "response", id, ok, value, error: error instanceof Error ? error.message : error }) + "\n");
   child.stdout.on("data", (chunk: Buffer) => {
     stdoutBuffer += chunk.toString("utf8");
-    if (Buffer.byteLength(stdoutBuffer) > MAX_MESSAGE_BYTES * 2) { resultReject?.(new Error("只讀安全子程序回傳過大")); child.kill("SIGKILL"); return; }
+    if (Buffer.byteLength(stdoutBuffer) > maxMessageBytes * 2) { resultReject?.(new Error("自訂程式碼子程序回傳過大")); child.kill("SIGKILL"); return; }
     const lines = stdoutBuffer.split("\n"); stdoutBuffer = lines.pop() ?? "";
     for (const line of lines) {
       if (!line.trim()) continue;
       let message: { type?: string; id?: unknown; command?: unknown; args?: unknown; value?: unknown; error?: unknown; message?: unknown };
       try { message = JSON.parse(line); } catch { resultReject?.(new Error("只讀安全子程序回傳格式錯誤")); child.kill("SIGKILL"); continue; }
       if (message.type === "request") {
-        void handleBrowserRpc(ctx, String(message.command), Array.isArray(message.args) ? message.args : [], locators)
+        void handleBrowserRpc(ctx, String(message.command), Array.isArray(message.args) ? message.args : [], locators, mode)
           .then((value) => writeResponse(String(message.id), true, value))
           .catch((error) => writeResponse(String(message.id), false, undefined, error));
       } else if (message.type === "log") ctx.log(safeString(message.message, 2_000));
@@ -258,10 +317,11 @@ export async function executeCustomCodeInProcessSandbox(ctx: NodeContext, code: 
   if (ctx.cancelSignal.aborted) abort(); else ctx.cancelSignal.addEventListener("abort", abort, { once: true });
   const payload = {
     code,
+    mode,
     ctx: {
       runId: ctx.runId, workflowId: ctx.workflowId, nodeId: ctx.nodeId, input: ctx.input, config: ctx.config,
       secrets: ctx.secrets, vars: ctx.vars, model: ctx.model, baseUrl: ctx.baseUrl, headed: false,
-      outputDir: ctx.outputDir, debugDir: ctx.debugDir, dryRun: true,
+      outputDir: ctx.outputDir, debugDir: ctx.debugDir, dryRun: mode !== "production",
     },
   };
   child.stdin.write(JSON.stringify({ type: "start", payload }) + "\n");
