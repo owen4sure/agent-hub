@@ -1,0 +1,60 @@
+{
+  "id": "example-ai-triage",
+  "name": "範例：AI 幫你分類客戶訊息",
+  "status": "official",
+  "description": "示範「表單輸入→AI 判斷→依結果組回覆」：執行時先填一句客戶訊息，AI 把它分成四類之一(答案被限定住，不會回一整段話)，再組出一句處理建議。把觸發改成收信/表單，就是一條真的客服分流流程。",
+  "requiresSecrets": [],
+  "triggerParams": [
+    {
+      "key": "customerMessage",
+      "label": "客戶訊息(隨便打一句試試)",
+      "type": "text",
+      "default": "我上週買的咖啡機好像不會加熱了，還在保固內嗎？"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "trigger",
+      "type": "trigger",
+      "label": "開始(填一句訊息)",
+      "config": {},
+      "position": { "x": 250, "y": 40 }
+    },
+    {
+      "id": "classify",
+      "type": "llm-decide",
+      "label": "AI 分類",
+      "config": {
+        "prompt": "這是一則客戶來訊：「{{customerMessage}}」。請判斷它屬於哪一類。",
+        "outputKey": "分類結果",
+        "choices": "售後維修,購買諮詢,帳務問題,其他"
+      },
+      "position": { "x": 250, "y": 160 }
+    },
+    {
+      "id": "compose",
+      "type": "template-text",
+      "label": "組處理建議",
+      "config": {
+        "template": "訊息「{{customerMessage}}」已分類為【{{分類結果}}】。實務上這裡可以接「條件分支」，依分類把訊息轉給不同窗口或自動回信。",
+        "outputKey": "處理建議"
+      },
+      "position": { "x": 250, "y": 280 }
+    },
+    {
+      "id": "notify",
+      "type": "desktop-notify",
+      "label": "跳通知看結果",
+      "config": {
+        "title": "AI 分類結果",
+        "message": "{{處理建議}}"
+      },
+      "position": { "x": 250, "y": 400 }
+    }
+  ],
+  "edges": [
+    { "from": "trigger", "to": "classify" },
+    { "from": "classify", "to": "compose" },
+    { "from": "compose", "to": "notify" }
+  ]
+}

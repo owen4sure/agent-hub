@@ -1,0 +1,64 @@
+{
+  "id": "example-report",
+  "name": "範例：把資料整理成報表檔",
+  "status": "official",
+  "description": "零設定即可執行的入門範例：用一段內建的示範銷售資料，算出各分類小計，組成一份 Markdown 報表存進產出資料夾，最後跳桌面通知。示範「自訂步驟(AI 寫)→組字串→寫檔案→通知」這條最常見的資料處理骨架。",
+  "requiresSecrets": [],
+  "triggerParams": [],
+  "nodes": [
+    {
+      "id": "trigger",
+      "type": "trigger",
+      "label": "開始",
+      "config": {},
+      "position": { "x": 250, "y": 40 }
+    },
+    {
+      "id": "summarize",
+      "type": "custom-code",
+      "label": "彙總示範資料",
+      "config": {
+        "intent": "用內建的示範銷售清單，算每個分類的筆數與金額小計，還有總金額。",
+        "code": "const rows = [\n  { 分類: \"飲料\", 品項: \"美式咖啡\", 金額: 120 },\n  { 分類: \"飲料\", 品項: \"拿鐵\", 金額: 150 },\n  { 分類: \"點心\", 品項: \"可頌\", 金額: 80 },\n  { 分類: \"點心\", 品項: \"司康\", 金額: 90 },\n  { 分類: \"飲料\", 品項: \"紅茶\", 金額: 60 },\n];\nconst byCategory = {};\nfor (const r of rows) {\n  byCategory[r.分類] = byCategory[r.分類] ?? { 筆數: 0, 小計: 0 };\n  byCategory[r.分類].筆數 += 1;\n  byCategory[r.分類].小計 += r.金額;\n}\nconst lines = Object.entries(byCategory).map(([名稱, v]) => `- ${名稱}：${v.筆數} 筆，共 ${v.小計} 元`);\nconst total = rows.reduce((sum, r) => sum + r.金額, 0);\nreturn { ...ctx.input, 分類統計: lines.join(\"\\n\"), 總金額: total, 筆數: rows.length };"
+      },
+      "position": { "x": 250, "y": 160 }
+    },
+    {
+      "id": "compose",
+      "type": "template-text",
+      "label": "組報表內容",
+      "config": {
+        "template": "# 銷售小報表(範例)\n\n共 {{筆數}} 筆交易，總金額 {{總金額}} 元。\n\n## 各分類\n{{分類統計}}\n\n---\n這份檔案由「範例：把資料整理成報表檔」流程產生。把「彙總示範資料」那一步換成你自己的資料來源(讀 Excel、收信抓附件、打 API)，就是一條真的報表流程了。",
+        "outputKey": "報表內容"
+      },
+      "position": { "x": 250, "y": 280 }
+    },
+    {
+      "id": "save",
+      "type": "write-file",
+      "label": "存成報表檔",
+      "config": {
+        "fileName": "範例報表.md",
+        "content": "{{報表內容}}",
+        "extraDir": ""
+      },
+      "position": { "x": 250, "y": 400 }
+    },
+    {
+      "id": "notify",
+      "type": "desktop-notify",
+      "label": "跳通知說做完了",
+      "config": {
+        "title": "Agent Hub 範例",
+        "message": "報表做好了：共 {{筆數}} 筆、{{總金額}} 元。到「產出檔案」頁就能下載。"
+      },
+      "position": { "x": 250, "y": 520 }
+    }
+  ],
+  "edges": [
+    { "from": "trigger", "to": "summarize" },
+    { "from": "summarize", "to": "compose" },
+    { "from": "compose", "to": "save" },
+    { "from": "save", "to": "notify" }
+  ]
+}

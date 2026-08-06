@@ -1,0 +1,68 @@
+{
+  "id": "example-weather",
+  "name": "範例：抓天氣資料請 AI 給建議",
+  "status": "official",
+  "description": "示範「打外部 API→整理資料→AI 產生文字」：跟免費的 Open-Meteo 天氣 API 拿台北未來一天的預報(不用申請金鑰)，整理成好讀的數字，請 AI 用一句話給出穿搭與帶傘建議，最後跳桌面通知。需要網路連線。",
+  "requiresSecrets": [],
+  "triggerParams": [],
+  "nodes": [
+    {
+      "id": "trigger",
+      "type": "trigger",
+      "label": "開始",
+      "config": {},
+      "position": { "x": 250, "y": 40 }
+    },
+    {
+      "id": "fetch",
+      "type": "http-request",
+      "label": "抓台北天氣預報",
+      "config": {
+        "method": "GET",
+        "url": "https://api.open-meteo.com/v1/forecast?latitude=25.03&longitude=121.56&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Asia%2FTaipei&forecast_days=1",
+        "headers": "{}",
+        "body": "",
+        "successStatus": "200-299",
+        "responseSchema": "{\"daily\":\"object\"}"
+      },
+      "position": { "x": 250, "y": 160 }
+    },
+    {
+      "id": "extract",
+      "type": "custom-code",
+      "label": "整理成好讀的數字",
+      "config": {
+        "intent": "從天氣 API 的回應裡取出今天的最高溫、最低溫、降雨機率。",
+        "code": "const daily = ctx.input.json?.daily;\nif (!daily) throw new Error(\"上游沒有拿到天氣資料(json.daily 欄位是空的)\");\nreturn {\n  ...ctx.input,\n  最高溫: daily.temperature_2m_max?.[0],\n  最低溫: daily.temperature_2m_min?.[0],\n  降雨機率: daily.precipitation_probability_max?.[0],\n};"
+      },
+      "position": { "x": 250, "y": 280 }
+    },
+    {
+      "id": "advise",
+      "type": "llm-decide",
+      "label": "AI 給穿搭建議",
+      "config": {
+        "prompt": "台北今天最高 {{最高溫}}°C、最低 {{最低溫}}°C、降雨機率 {{降雨機率}}%。請用一句 30 字以內的話，給出今天的穿搭與要不要帶傘的建議。",
+        "outputKey": "建議",
+        "choices": ""
+      },
+      "position": { "x": 250, "y": 400 }
+    },
+    {
+      "id": "notify",
+      "type": "desktop-notify",
+      "label": "跳通知看建議",
+      "config": {
+        "title": "今天的天氣建議",
+        "message": "{{最低溫}}–{{最高溫}}°C，降雨 {{降雨機率}}%。{{建議}}"
+      },
+      "position": { "x": 250, "y": 520 }
+    }
+  ],
+  "edges": [
+    { "from": "trigger", "to": "fetch" },
+    { "from": "fetch", "to": "extract" },
+    { "from": "extract", "to": "advise" },
+    { "from": "advise", "to": "notify" }
+  ]
+}

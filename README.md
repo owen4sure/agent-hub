@@ -30,6 +30,7 @@ Open http://127.0.0.1:3000 (bound to localhost only — other devices can't reac
 
 > Using an AI coding tool like Claude Code? Just paste this repo's URL into it — following `AGENTS.md`, it will set up the environment, run the health check, and verify the app opens, no commands needed on your side.
 
+0. **Try it in 2 minutes, zero setup**: the home page ships with three built-in example workflows (badge「內建範例」) — a data-to-report pipeline, an AI message triage with a form input, and a live weather-API-to-AI-advice flow. Hit **▶ Run** on any of them to see nodes light up, files get produced, and a desktop notification pop — before configuring anything.
 1. On the **Settings** page, enter your model **API Key / Base URL** (any OpenAI-compatible endpoint), or set the environment variables `AGENT_HUB_API_KEY` / `AGENT_HUB_BASE_URL` (see `.env.example`). Credentials your workflows need (e.g. webmail) also go on the Settings page.
    - **Automatic fallback**: if this machine has Claude Code installed and logged in (the `claude` command works), then when your primary model (often a free/shared API) keeps failing after retries, Agent Hub **automatically** falls back to the local Claude Code CLI (using your Claude subscription) — flaky free services no longer take the whole workflow down. You can also pick "claude-code (local subscription)" as your primary model in the model dropdown.
 2. From the home page, click **＋ New workflow** to enter the canvas, then tell the AI what you want in the right-hand panel.
