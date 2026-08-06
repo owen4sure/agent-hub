@@ -70,7 +70,7 @@
     "@types/pdf-parse": "^1.1.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "^9.39.5",
+    "eslint": "^10.8.0",
     "eslint-config-next": "16.2.12",
     "tailwindcss": "^4",
     "typescript": "^5"
