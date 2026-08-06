@@ -9,6 +9,7 @@ import { sweepRetentionDaily } from "./retention";
 import { sweepStalledSchedules, warnScheduleBlocked } from "./scheduleWatchdog";
 import { sweepExpiredApprovals } from "./approvals";
 import { sweepHealthChecks } from "./workflow/healthCheck";
+import { rotateEngineLogs } from "./logRotation";
 
 export interface ScheduleRow {
   id: string;
@@ -344,6 +345,13 @@ function tick() {
     sweepRetentionDaily();
   } catch (err) {
     console.error("[scheduler] 資料保留期限清理失敗:", err);
+  }
+  // launchd 日誌輪替：沒有這個的話 engine.log 會無上限長大(newsyslog 設定要 sudo，放不進去)。
+  // 每分鐘只是 stat 兩個檔案，沒超過大小上限就直接返回，不用另外節流。
+  try {
+    rotateEngineLogs();
+  } catch (err) {
+    console.error("[scheduler] 日誌輪替失敗:", err);
   }
   const dt = taipeiParts(now);
   const minuteKey = `${dt.year}-${pad(dt.month)}-${pad(dt.day)}T${pad(dt.hour)}:${pad(dt.minute)}`;
