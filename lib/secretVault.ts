@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { DATA_DIR } from "./db";
+import { DATA_DIR, getDb } from "./db";
 import { realKeychainStore, type KeychainStore } from "./keychain";
 
 /**
@@ -35,13 +35,21 @@ function privateWrite(file: string, value: string) {
   }
 }
 
-function readKeyFile(keyFile: string): Buffer | null {
+/**
+ * 「檔案不存在」與「檔案存在但格式不對」是兩件完全不同的事：前者可以走全新安裝，
+ * 後者代表這台機器**曾經有一把金鑰**(可能被截斷/污染)——這時默默產生新金鑰會讓
+ * 既有密文永遠解不開,而且症狀看起來只是「每條流程的帳密都不對」(code review 抓到的回歸:
+ * 舊版遇到格式不對是直接拋錯的,遷移改寫時不能把這個保護弄丟)。
+ */
+function readKeyFile(keyFile: string): { state: "missing" } | { state: "corrupt" } | { state: "ok"; key: Buffer } {
+  let raw: string;
   try {
-    const decoded = Buffer.from(fs.readFileSync(keyFile, "utf8").trim(), "base64");
-    return decoded.length === 32 ? decoded : null;
+    raw = fs.readFileSync(keyFile, "utf8");
   } catch {
-    return null;
+    return { state: "missing" };
   }
+  const decoded = Buffer.from(raw.trim(), "base64");
+  return decoded.length === 32 ? { state: "ok", key: decoded } : { state: "corrupt" };
 }
 
 export interface VaultKeyDeps {
@@ -60,7 +68,21 @@ export function resolveVaultKey(deps: VaultKeyDeps): Buffer {
   if (configured) return crypto.createHash("sha256").update(configured).digest();
 
   const fromKeychain = deps.keychain.get();
-  const fromFile = readKeyFile(deps.keyFile);
+  const fileState = readKeyFile(deps.keyFile);
+  if (fileState.state === "corrupt") {
+    // 金鑰檔在但格式不對：這台機器曾有金鑰。絕不能走「全新安裝」重生一把——
+    // 大聲停下來,原始金鑰或許還救得回來(備份、Keychain、密碼管理器)。
+    if (fromKeychain) {
+      console.warn("[secretVault] 金鑰檔格式不正確,但 Keychain 有金鑰——用 Keychain 那把;金鑰檔請自行刪除或修復。");
+      return fromKeychain;
+    }
+    throw new Error(
+      "本機帳密保管金鑰格式不正確(data/.secret-vault-key 內容不是合法的金鑰)。"
+      + "**不會**自動產生新金鑰——那會讓已保存的所有帳密永遠解不開。"
+      + "若你有用 npm run key:export 匯出過金鑰,用 npm run key:import 放回來;或從備份還原這個檔案。",
+    );
+  }
+  const fromFile = fileState.state === "ok" ? fileState.key : null;
 
   if (fromKeychain && fromFile) {
     if (fromKeychain.equals(fromFile)) {
@@ -116,8 +138,8 @@ export function resolveVaultKey(deps: VaultKeyDeps): Buffer {
   } catch {
     // 兩個本機進程同時初始化：晚到的直接讀先到的那份
     const stored = readKeyFile(deps.keyFile);
-    if (!stored) throw new Error("本機帳密保管金鑰格式不正確");
-    return stored;
+    if (stored.state !== "ok") throw new Error("本機帳密保管金鑰格式不正確");
+    return stored.key;
   }
 }
 
@@ -206,13 +228,41 @@ export function exportVaultKeyBase64(): string {
   return vaultKey().toString("base64");
 }
 
+/** 這把金鑰是否真的在保護資料——secrets 表裡有沒有任何密文用它解得開。 */
+function keyProtectsExistingData(key: Buffer): boolean {
+  try {
+    const rows = getDb().prepare(`SELECT value FROM secrets WHERE value LIKE ?`).all(`${PREFIX}%`) as { value: string }[];
+    const apiKey = getDb().prepare(`SELECT value FROM settings WHERE key = 'apiKey'`).get() as { value: string } | undefined;
+    if (apiKey?.value.startsWith(PREFIX)) rows.push(apiKey);
+    return rows.some((row) => decryptWithKey(row.value, key).length > 0);
+  } catch {
+    return true; // DB 讀不到就往安全的方向假設(要 --force 才能換)
+  }
+}
+
+function decryptWithKey(value: string, key: Buffer): string {
+  if (!value.startsWith(PREFIX)) return "";
+  const pieces = value.slice(PREFIX.length).split(":");
+  if (pieces.length !== 3) return "";
+  try {
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(pieces[0], "base64url"));
+    decipher.setAuthTag(Buffer.from(pieces[1], "base64url"));
+    return Buffer.concat([decipher.update(Buffer.from(pieces[2], "base64url")), decipher.final()]).toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
 export function importVaultKeyBase64(base64: string, opts: { force?: boolean } = {}): void {
   const key = Buffer.from(base64.trim(), "base64");
   if (key.length !== 32) throw new Error("金鑰格式不正確：應該是 npm run key:export 印出來的那一整串");
   const kc = realKeychainStore();
-  const existing = kc.get() ?? readKeyFile(KEY_FILE);
-  if (existing && !existing.equals(key) && !opts.force) {
-    throw new Error("這台機器已經有一把不同的金鑰。確定要換掉的話加 --force(換掉後用舊金鑰加密的資料會解不開)。");
+  const fileState = readKeyFile(KEY_FILE);
+  const existing = kc.get() ?? (fileState.state === "ok" ? fileState.key : null);
+  // 新機器第一次啟動會自動產生一把金鑰,但那把還沒保護任何資料——這種情況直接換掉,
+  // 不用 --force(code review 抓到:照文件走「新電腦先 key:import」會被自己剛產生的空金鑰卡死)。
+  if (existing && !existing.equals(key) && !opts.force && keyProtectsExistingData(existing)) {
+    throw new Error("這台機器已經有一把不同的金鑰,而且它保護著已保存的帳密。確定要換掉的話加 --force(換掉後用舊金鑰加密的資料會解不開)。");
   }
   if (kc.set(key) && kc.get()?.equals(key)) {
     privateWriteMarker(LOCATION_MARKER);

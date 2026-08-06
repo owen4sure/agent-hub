@@ -17,9 +17,15 @@ export function codeFingerprint(code: string): string {
   return crypto.createHash("sha256").update(code).digest("hex").slice(0, 12);
 }
 
-/** 用到瀏覽器(ctx.session)的程式碼需要真的 Playwright Page,留在主行程執行(見 execute 內註解)。 */
-function usesBrowserSession(code: string): boolean {
-  return /ctx\s*\.\s*session/.test(code);
+/**
+ * 用到瀏覽器(ctx.session)的程式碼需要真的 Playwright Page,留在主行程執行(見 execute 內註解)。
+ * 判斷刻意**寬鬆**:除了 `ctx.session` 也抓解構(`const { session } = ctx`)與別名後的呼叫
+ * (`.getPage()`)——code review 抓到只比對字面 `ctx.session` 會把解構寫法誤送進沙箱,
+ * 瀏覽器 RPC 一律拋錯,原本能跑的流程每次排程都掛。誤判方向的取捨:寬鬆=偶爾讓純計算碼
+ * 少了沙箱(跟改動前一樣的行為,不會壞);嚴格=把瀏覽器碼關進沒有瀏覽器的沙箱(一定壞)。
+ */
+export function usesBrowserSession(code: string): boolean {
+  return /\bsession\b|\bgetPage\b/.test(code);
 }
 
 function runTriggerType(runId: string): string {
@@ -85,8 +91,10 @@ export const customCodeNode: NodeDefinition = {
       // 只能在有人在場的手動執行第一次跑(跑過之後程式碼就凍結在節點上,排程執行的
       // 永遠是凍結版,每次執行都記指紋)。沒有這條的話,「半夜排程自己生了一段新程式
       // 碼並直接執行」在稽核上完全講不過去。
+      // "retry" 也放行:UI 的「使用目前版本重試」按鈕就是用 retry 觸發——那是人剛剛按的,
+      // 不是無人看管的自動執行(code review 抓到:擋掉 retry 會讓「上游修好後按重試」直接死在這)。
       const trigger = runTriggerType(ctx.runId);
-      if (trigger && trigger !== "manual") {
+      if (trigger && trigger !== "manual" && trigger !== "retry") {
         throw new PermanentError(
           "這個自訂步驟還沒有程式碼,而這次是排程/自動觸發的執行——自動執行不會臨場產生新程式碼(產生的程式碼必須先在手動執行時跑過一次)。請先手動執行一次這條流程,確認結果沒問題後,排程就會正常運作",
         );

@@ -105,6 +105,30 @@ test("標記說金鑰在 Keychain 但讀不到：大聲報錯，絕不重生一�
   }
 });
 
+test("金鑰檔在但格式不對(截斷/污染)：大聲報錯，絕不當成全新安裝重生一把", () => {
+  const deps = tempDeps(brokenKeychain());
+  try {
+    fs.writeFileSync(deps.keyFile, "not-a-valid-key");
+    assert.throws(() => resolveVaultKey(deps), /不會.*自動產生|key:import/);
+    assert.equal(fs.readFileSync(deps.keyFile, "utf8"), "not-a-valid-key", "壞掉的檔案要原地保留——原始金鑰或許還救得回來");
+  } finally {
+    fs.rmSync(deps.dir, { recursive: true, force: true });
+  }
+});
+
+test("金鑰檔格式不對但 Keychain 有金鑰：用 Keychain 那把，不動壞檔", () => {
+  const kcKey = crypto.randomBytes(32);
+  const deps = tempDeps(fakeKeychain(kcKey));
+  try {
+    fs.writeFileSync(deps.keyFile, "corrupted!!");
+    const resolved = resolveVaultKey(deps);
+    assert.ok(resolved.equals(kcKey));
+    assert.equal(fs.existsSync(deps.keyFile), true, "壞檔留給使用者自行處理,不自動刪");
+  } finally {
+    fs.rmSync(deps.dir, { recursive: true, force: true });
+  }
+});
+
 test("Keychain 與檔案不一致(data/ 從別台機器搬來)：用檔案那把，兩邊都不動", () => {
   const kcKey = crypto.randomBytes(32);
   const fileKey = crypto.randomBytes(32);

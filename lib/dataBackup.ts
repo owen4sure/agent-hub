@@ -65,10 +65,19 @@ export function writeBackupZip(
   if (src.workflowDir && fs.existsSync(src.workflowDir)) zip.addLocalFolder(src.workflowDir, BACKUP_ENTRY.workflows);
   // 登入狀態(cookies)等同帳密，加密後才進包——備份檔被拷去別的地方時，拿到的只有密文。
   // 解密用的金鑰跟 DB 帳密同一把，還原本來就需要它，所以不增加還原的前置條件。
+  // 金鑰讀不到(Keychain 被鎖/該筆被刪)時**只跳過登入狀態、不讓整個備份失敗**——
+  // DB 與流程檔的備份比 cookies 重要得多,不能因為加密不了 cookies 就連災難復原副本都停產
+  // (code review 抓到:原本會在這裡直接炸掉,每日備份從此整個停擺)。
   if (src.sessionDir && fs.existsSync(src.sessionDir)) {
-    for (const file of walkFiles(src.sessionDir)) {
-      const relative = path.relative(src.sessionDir, file).split(path.sep).join("/");
-      zip.addFile(`${BACKUP_ENTRY.sessionsEnc}/${relative}`, encryptBytes(fs.readFileSync(file)));
+    try {
+      for (const file of walkFiles(src.sessionDir)) {
+        const relative = path.relative(src.sessionDir, file).split(path.sep).join("/");
+        zip.addFile(`${BACKUP_ENTRY.sessionsEnc}/${relative}`, encryptBytes(fs.readFileSync(file)));
+      }
+    } catch (err) {
+      console.error(`[backup] 帳密保管金鑰目前讀不到,這次備份不含網站登入狀態(其他內容照常備份)：${err instanceof Error ? err.message : err}`);
+      zip.addFile("SESSIONS-SKIPPED.txt", Buffer.from(
+        "這份備份不含網站登入狀態(browser-sessions)：建立備份當下帳密保管金鑰讀不到(多半是 Keychain 被鎖)。\n還原後需要重新「⋯ → 🔐 手動登入一次」各網站。\n", "utf8"));
     }
   }
   if (src.envFile && fs.existsSync(src.envFile)) zip.addLocalFile(src.envFile, "", BACKUP_ENTRY.env);
@@ -201,6 +210,22 @@ export function restoreDataBackup(
     throw new Error(`這個檔案裡沒有 ${BACKUP_ENTRY.db}，不是 Agent Hub 的備份包`);
   }
 
+  // 加密的登入狀態**先全部解開**再動任何東西——解不開(金鑰不對)要在還原開始前就失敗。
+  // code review 抓到的回歸:原本解密寫在還原迴圈裡,DB 已換、舊登入狀態已移開之後才炸,
+  // 留下半套資料;使用者看到「還原失敗」以為什麼都沒動,重開後卻跑在換過的資料上。
+  const decryptedSessions = new Map<string, Buffer>();
+  for (const entry of zip.getEntries()) {
+    if (entry.isDirectory || !entry.entryName.startsWith(`${BACKUP_ENTRY.sessionsEnc}/`)) continue;
+    const opened = decryptBytes(entry.getData());
+    if (!opened) {
+      throw new Error(
+        `備份裡的登入狀態(${entry.entryName})用這台機器的金鑰解不開,還原**尚未開始**、現有資料原封不動。`
+        + "如果是換了電腦：先在舊電腦 npm run key:export,在這台 npm run key:import -- <金鑰>,再還原一次。",
+      );
+    }
+    decryptedSessions.set(entry.entryName, opened);
+  }
+
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const result: RestoreResult = { restored: [], movedAside: [], verified: { integrity: "", workflowRows: 0, settingRows: 0 } };
 
@@ -241,19 +266,8 @@ export function restoreDataBackup(
       // zip 內的路徑一律當成不可信：`../` 會寫到目錄外面(Zip Slip)。
       const dest = path.resolve(target, relative);
       if (dest !== target && !dest.startsWith(target + path.sep)) continue;
-      let data = entry.getData();
-      if (encrypted) {
-        const opened = decryptBytes(data);
-        if (!opened) {
-          // 解不開幾乎都是金鑰不對(換機器沒先 key:import)。不能靜默跳過——
-          // 「還原成功但登入全失效」的除錯成本遠高於在這裡直接把話說清楚。
-          throw new Error(
-            `備份裡的登入狀態(${entry.entryName})用這台機器的金鑰解不開。`
-            + "如果是換了電腦：先在舊電腦 npm run key:export，在這台 npm run key:import -- <金鑰>，再還原一次。",
-          );
-        }
-        data = opened;
-      }
+      // 加密的內容在還原開始前就全部解好了(見上方 decryptedSessions),這裡只取用
+      const data = encrypted ? decryptedSessions.get(entry.entryName)! : entry.getData();
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.writeFileSync(dest, data);
       chmodPrivate(dest, 0o600);
