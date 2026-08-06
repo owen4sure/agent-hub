@@ -20,6 +20,9 @@
 
 ### Added
 
+- Added｜內建三條零設定範例流程,陌生人兩分鐘看到真實執行｜examples/ 機制早就存在但一直是空的——新裝好的平台首頁只有空清單,「這東西能幹嘛」全靠想像。現在首頁直接有：①把資料整理成報表檔(純本機:自訂步驟→組字串→寫檔→桌面通知) ②AI 幫你分類客戶訊息(表單輸入→AI 限定選項判斷) ③抓天氣資料請 AI 給建議(免金鑰公開 API→整理→AI 產生文字)。全部不需要任何帳密設定｜`examples/*.json`、`README.md`｜驗證：三條全部經由 API 真實執行成功(含 AI 真的回了分類與穿搭建議)
+- Added｜設定頁「進階」新增備份卡：第二備份位置＋換電腦還原說明｜備份每天都在做但使用者完全看不到;金鑰進 Keychain 後「跨機還原要先帶金鑰」這件事必須寫在畫面上。第二備份位置在儲存當下實際試寫一次,外接碟沒插會立刻講,不是半夜備份失敗隔天看 log｜`app/settings/BackupCard.tsx`、`app/api/settings/route.ts`、`lib/dataBackup.ts`｜驗證：tsc、change-guard、部署後截圖
+- Added｜執行紀錄頁預設顯示最近 50 筆｜實測整頁 10.9 個螢幕高(2026-08 審計 #12),翻舊帳才按「顯示更早的」;換篩選會重設避免「看不到符合的舊紀錄」錯覺｜`app/runs/page.tsx`
 - Added｜常駐服務日誌自動輪替｜launchd 寫的 engine.log/engine.error.log 過去無上限長大。排程 tick 內建 copytruncate 輪替(20MB 上限、留 3 份 gzip 封存；不能 rename——launchd 握著檔案控制代碼，rename 後它會繼續寫進被改名的檔案)｜`lib/logRotation.ts`(新增)、`lib/scheduler.ts`｜驗證：4 個輪替測試(含「原檔必須留在原地」「單檔失敗不拖垮其他」)
 
 ### Fixed
