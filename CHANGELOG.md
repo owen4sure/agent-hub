@@ -7,6 +7,17 @@
 
 ## Unreleased
 
+### Security
+
+- Security｜帳密保管金鑰搬進 macOS Keychain，不再跟密文同住 data/｜金鑰檔 `.secret-vault-key` 就放在它保護的 SQLite 旁邊——整包拷走 data/ 等於同時拿到鎖和鑰匙。現在金鑰存 login Keychain(服務名 `agent-hub-secret-vault`)，既有安裝啟動時自動遷移：讀回驗證逐位元一致才刪舊金鑰檔，之後 Keychain 讀不到一律大聲報錯、絕不默默重生金鑰(那會讓所有已存帳密變成解不開的垃圾且症狀完全看不出根因)。跨機還原走 `npm run key:export` / `key:import`，金鑰與備份分開保管。非 macOS 維持金鑰檔｜`lib/keychain.ts`(新增)、`lib/secretVault.ts`、`scripts/vault-key.ts`(新增)｜驗證：8 個遷移分支測試(含「標記說在 Keychain 但讀不到→報錯不重生」「兩把不一致→用檔案那把且兩邊都不動」)＋真 Keychain 整合測試；真實金鑰遷移後全部既有帳密解密驗證通過
+- Security｜備份 zip 裡的網站登入狀態(cookies)改加密後才進包；備份可多抄一份到外接碟｜過去 browser-sessions/ 原封不動進備份，備份檔被拷去別處等於登入狀態明文外流；且 14 天備份跟正本同一顆硬碟，硬碟一死全滅。現在登入狀態以同一把保管金鑰 AES-256-GCM 加密進 `browser-sessions.enc/`(還原時自動解密，舊格式備份仍可還原；解不開時直接把「先 key:import」講清楚不靜默跳過)，設定 `backupMirrorDir` 可每日多抄一份到第二個位置｜`lib/dataBackup.ts`、`lib/secretVault.ts`(encryptBytes/decryptBytes)｜驗證：備份演練測試斷言 cookie 值不以明文出現在 zip、還原後內容一致、金鑰不對時錯誤訊息含下一步指令
+- Security｜資料庫裡殘留的明碼帳密啟動時補加密｜「下次儲存才加密」的惰性設計在真實資料上等了很久也沒等到那次儲存(實測有 6 筆 webmail/Google 帳密仍是明碼)。啟動時一次補課，讀取端走同一條解密路徑完全無感｜`lib/settingsStore.ts`(encryptLegacyPlaintextSecrets)、`instrumentation.ts`｜驗證：補加密後值不變、重跑為 0 筆；真實資料 6 筆全部補上且解密回讀一致
+- Security｜修補 `ip-address`(SSRF 分類繞過,high)與 `brace-expansion`(DoS) 相依漏洞｜`npm audit` 歸零｜`package-lock.json`｜驗證：`npm audit` 0 筆、mailClient(受影響的 imapflow 鏈)測試全過
+
+### Added
+
+- Added｜常駐服務日誌自動輪替｜launchd 寫的 engine.log/engine.error.log 過去無上限長大。排程 tick 內建 copytruncate 輪替(20MB 上限、留 3 份 gzip 封存；不能 rename——launchd 握著檔案控制代碼，rename 後它會繼續寫進被改名的檔案)｜`lib/logRotation.ts`(新增)、`lib/scheduler.ts`｜驗證：4 個輪替測試(含「原檔必須留在原地」「單檔失敗不拖垮其他」)
+
 ### Fixed
 
 - Fixed｜從零建圖的模型第一輪已產出通過其他所有驗收的完整流程圖，只因為缺「排程 cron」一項就整張被丟棄，使用者拿到「AI 建立流程時沒有順利完成」｜以真實使用者需求(每週更新簡報數字的完整流程)實測建圖能力時踩到(診斷編號 fb2b1d95)：第一輪模型呼叫花了 8 分鐘產出完整圖，需求完整性檢查發現唯一缺口是 schedule.cron，把整包餵回模型要求重出——而此時整體建圖 10 分鐘預算只剩 45 秒，修補回合被切斷，整張好圖付諸流水。根因是「缺排程」跟「缺步驟」被同一種方式對待：後者只有模型補得出來，前者其實是使用者自己講過的話(「每週」「每天早上九點」)，確定性解析比再燒一輪模型可靠且永遠不會被預算切斷。新增 `scheduleSuggest.ts`：唯一缺口是排程且原話講得出頻率時直接推出 cron(沒講時間假設 09:00、沒講星期幾假設週一，假設的部分在回覆裡明講可到排程頁改；只講「自動」講不出頻率仍照舊餵回模型——頻率不能猜)｜`lib/workflow/scheduleSuggest.ts`(新增)、`lib/workflow/builder.ts`｜驗證：`npx tsc --noEmit`、`npm test`(1116 個測試全過，新增 12 個 cron 解析測試+2 個建圖迴圈測試：唯一缺排程時一輪交付不燒第二輪模型、無法確定性補時仍走原本的丟棄重畫路徑)、`npm run check:change-guard` 全過

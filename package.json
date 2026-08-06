@@ -23,6 +23,8 @@
     "check:change-guard": "node scripts/change-guard.mjs",
     "check:audit": "node scripts/audit-gate.mjs",
     "restore:backup": "node scripts/restore-backup.mjs",
+    "key:export": "tsx scripts/vault-key.ts export",
+    "key:import": "tsx scripts/vault-key.ts import",
     "verify:real-workflows": "node scripts/verify-real-workflows.mjs",
     "postinstall": "playwright install chromium && node scripts/install-hooks.mjs"
   },

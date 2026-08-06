@@ -285,6 +285,26 @@ export function deleteSharedSecrets(keys: string[]) {
 }
 
 /**
+ * 把還躺在資料庫裡的明碼帳密補加密(啟動時跑一次)。
+ *
+ * 為什麼需要：加密原本是「下次儲存時才加密」的惰性設計，但真實資料顯示有 6 筆帳密
+ * (webmail、Google 帳密)存了很久卻從沒被重新儲存過——惰性等於永遠不會發生。
+ * 加密後的值走同一條 decryptSecret 讀取路徑，讀取端完全無感。
+ */
+export function encryptLegacyPlaintextSecrets(): number {
+  const db = getDb();
+  const rows = db.prepare(`SELECT workflow_id, key, value FROM secrets`).all() as
+    { workflow_id: string; key: string; value: string }[];
+  const pending = rows.filter((r) => r.value !== "" && !isEncryptedSecret(r.value));
+  if (pending.length === 0) return 0;
+  const stmt = db.prepare(`UPDATE secrets SET value = ? WHERE workflow_id = ? AND key = ?`);
+  db.transaction((items: typeof pending) => {
+    for (const r of items) stmt.run(encryptSecret(r.value), r.workflow_id, r.key);
+  })(pending);
+  return pending.length;
+}
+
+/**
  * 一般設定值的簡單存取(`settings` 表)。
  *
  * 給「不是帳密、但需要跨重啟記住」的東西用——例如平台自己幫使用者建的 Apps Script 專案編號。

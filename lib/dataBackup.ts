@@ -4,6 +4,18 @@ import { randomUUID } from "node:crypto";
 import AdmZip from "adm-zip";
 import Database from "better-sqlite3";
 import { DATA_DIR, getDb } from "./db";
+import { decryptBytes, encryptBytes } from "./secretVault";
+import { getSetting } from "./settingsStore";
+
+function walkFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...walkFiles(full));
+    else if (entry.isFile()) out.push(full);
+  }
+  return out;
+}
 
 const BACKUP_DIR = path.join(DATA_DIR, "backups");
 const WORKFLOW_DIR = path.join(DATA_DIR, "workflows");
@@ -32,6 +44,8 @@ export const BACKUP_ENTRY = {
   db: "agent-hub.db",
   workflows: "workflows",
   sessions: "browser-sessions",
+  /** 2026-08 起登入狀態(cookies)改加密後才進備份包；舊名稱保留是為了還原舊備份。 */
+  sessionsEnc: "browser-sessions.enc",
   env: ".env",
 } as const;
 
@@ -49,13 +63,23 @@ export function writeBackupZip(
   const zip = new AdmZip();
   zip.addLocalFile(src.dbFile, "", BACKUP_ENTRY.db);
   if (src.workflowDir && fs.existsSync(src.workflowDir)) zip.addLocalFolder(src.workflowDir, BACKUP_ENTRY.workflows);
-  if (src.sessionDir && fs.existsSync(src.sessionDir)) zip.addLocalFolder(src.sessionDir, BACKUP_ENTRY.sessions);
+  // 登入狀態(cookies)等同帳密，加密後才進包——備份檔被拷去別的地方時，拿到的只有密文。
+  // 解密用的金鑰跟 DB 帳密同一把，還原本來就需要它，所以不增加還原的前置條件。
+  if (src.sessionDir && fs.existsSync(src.sessionDir)) {
+    for (const file of walkFiles(src.sessionDir)) {
+      const relative = path.relative(src.sessionDir, file).split(path.sep).join("/");
+      zip.addFile(`${BACKUP_ENTRY.sessionsEnc}/${relative}`, encryptBytes(fs.readFileSync(file)));
+    }
+  }
   if (src.envFile && fs.existsSync(src.envFile)) zip.addLocalFile(src.envFile, "", BACKUP_ENTRY.env);
   zip.addFile("RESTORE.txt", Buffer.from(
-    "此備份含 Agent Hub 的流程、版本、設定、帳密與已保存的網站登入狀態。\n"
+    "此備份含 Agent Hub 的流程、版本、設定、帳密(加密)與網站登入狀態(加密)。\n"
     + "還原方式(建議)：先停止 Agent Hub，再執行 npm run restore:backup -- <這個檔案的路徑>。\n"
-    + "手動還原：把 agent-hub.db、workflows/ 與 browser-sessions/ 放回 data/(記得同時刪掉舊的\n"
-    + "agent-hub.db-wal 與 agent-hub.db-shm，否則舊的日誌檔會蓋掉剛還原的資料庫內容)；.env 放回專案根目錄。\n",
+    + "換了一台電腦？帳密與登入狀態要靠金鑰才解得開：先在舊電腦執行 npm run key:export 把金鑰\n"
+    + "抄下來(存進密碼管理器)，新電腦上先 npm run key:import -- <金鑰> 再還原。\n"
+    + "手動還原：把 agent-hub.db 與 workflows/ 放回 data/(記得同時刪掉舊的 agent-hub.db-wal 與\n"
+    + "agent-hub.db-shm，否則舊的日誌檔會蓋掉剛還原的資料庫內容)；browser-sessions.enc/ 是加密\n"
+    + "內容，手動放回去沒有用，要用 npm run restore:backup 才會解密。.env 放回專案根目錄。\n",
     "utf8",
   ));
   zip.writeZip(target);
@@ -87,6 +111,7 @@ export async function createDailyDataBackup(): Promise<string> {
     // 多進程同時產生同一天備份也沒關係：內容都是一致快照，最後一個原子 rename 覆蓋即可。
     fs.renameSync(tempZip, target);
     chmodPrivate(target, 0o600);
+    mirrorBackup(target);
 
     const backups = fs.readdirSync(BACKUP_DIR)
       .filter((name) => /^agent-hub-\d{4}-\d{2}-\d{2}\.zip$/.test(name))
@@ -97,6 +122,32 @@ export async function createDailyDataBackup(): Promise<string> {
   } finally {
     fs.rmSync(tempDb, { force: true });
     fs.rmSync(tempZip, { force: true });
+  }
+}
+
+/**
+ * 把當日備份多抄一份到使用者指定的第二個地方(設定 key：backupMirrorDir，例如外接硬碟或
+ * iCloud 資料夾)。沒設定就安靜跳過。
+ *
+ * 為什麼：data/backups/ 跟正本在同一顆硬碟上——硬碟一死，資料跟 14 天的備份一起消失，
+ * 那不是備份，只是副本。抄寫失敗(外接碟沒插)只記 log 不讓每日備份失敗：本機那份仍然要成功。
+ */
+function mirrorBackup(zipFile: string): void {
+  let mirrorDir: string | null = null;
+  try {
+    mirrorDir = getSetting("backupMirrorDir")?.trim() || null;
+  } catch { /* DB 還沒好(極早期啟動)：這一輪先不抄 */ }
+  if (!mirrorDir) return;
+  try {
+    fs.mkdirSync(mirrorDir, { recursive: true });
+    fs.copyFileSync(zipFile, path.join(mirrorDir, path.basename(zipFile)));
+    const mirrored = fs.readdirSync(mirrorDir)
+      .filter((name) => /^agent-hub-\d{4}-\d{2}-\d{2}\.zip$/.test(name))
+      .sort()
+      .reverse();
+    for (const old of mirrored.slice(MAX_BACKUPS)) fs.rmSync(path.join(mirrorDir, old), { force: true });
+  } catch (err) {
+    console.error(`[backup] 第二份備份抄不進 ${mirrorDir}(外接碟沒插？)：${err instanceof Error ? err.message : err}`);
   }
 }
 
@@ -171,24 +222,43 @@ export function restoreDataBackup(
   chmodPrivate(dbTarget, 0o600);
   result.restored.push(BACKUP_ENTRY.db);
 
-  // ② 流程 JSON 與已保存的登入狀態(有備到才還原)。
-  for (const folder of [BACKUP_ENTRY.workflows, BACKUP_ENTRY.sessions] as const) {
-    const hasFolder = [...names].some((name) => name.startsWith(`${folder}/`));
+  // ② 流程 JSON 與已保存的登入狀態(有備到才還原)。登入狀態有兩種格式：
+  //    舊備份是明文的 browser-sessions/，新備份是加密的 browser-sessions.enc/(還原時解密放回原名)。
+  const sessionSources = [
+    { prefix: BACKUP_ENTRY.workflows, target: BACKUP_ENTRY.workflows, encrypted: false },
+    { prefix: BACKUP_ENTRY.sessions, target: BACKUP_ENTRY.sessions, encrypted: false },
+    { prefix: BACKUP_ENTRY.sessionsEnc, target: BACKUP_ENTRY.sessions, encrypted: true },
+  ] as const;
+  for (const { prefix, target: targetName, encrypted } of sessionSources) {
+    const hasFolder = [...names].some((name) => name.startsWith(`${prefix}/`));
     if (!hasFolder) continue;
-    const target = path.join(dataDir, folder);
+    const target = path.join(dataDir, targetName);
     moveAside(target);
     fs.mkdirSync(target, { recursive: true });
     for (const entry of zip.getEntries()) {
-      if (entry.isDirectory || !entry.entryName.startsWith(`${folder}/`)) continue;
-      const relative = entry.entryName.slice(folder.length + 1);
+      if (entry.isDirectory || !entry.entryName.startsWith(`${prefix}/`)) continue;
+      const relative = entry.entryName.slice(prefix.length + 1);
       // zip 內的路徑一律當成不可信：`../` 會寫到目錄外面(Zip Slip)。
       const dest = path.resolve(target, relative);
       if (dest !== target && !dest.startsWith(target + path.sep)) continue;
+      let data = entry.getData();
+      if (encrypted) {
+        const opened = decryptBytes(data);
+        if (!opened) {
+          // 解不開幾乎都是金鑰不對(換機器沒先 key:import)。不能靜默跳過——
+          // 「還原成功但登入全失效」的除錯成本遠高於在這裡直接把話說清楚。
+          throw new Error(
+            `備份裡的登入狀態(${entry.entryName})用這台機器的金鑰解不開。`
+            + "如果是換了電腦：先在舊電腦 npm run key:export，在這台 npm run key:import -- <金鑰>，再還原一次。",
+          );
+        }
+        data = opened;
+      }
       fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.writeFileSync(dest, entry.getData());
+      fs.writeFileSync(dest, data);
       chmodPrivate(dest, 0o600);
     }
-    result.restored.push(`${folder}/`);
+    result.restored.push(`${targetName}/`);
   }
 
   // ③ .env 只另存，不覆蓋。

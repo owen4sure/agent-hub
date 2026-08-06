@@ -51,8 +51,14 @@ Agent Hub 是**單人、本機自架**的自動化平台。它只綁 `127.0.0.1`
   渲染使用者檔案的瀏覽器全封網路。
 - **只讀安全排練的隔離**（`lib/workflow/customCodeProcessSandbox.ts`）：dry-run 的 `custom-code`
   在獨立子程序執行，套用 Node OS 權限白名單、模組白名單、不繼承環境變數、瀏覽器只給唯讀介面。
-- **帳密加密與權限**：`data/` 0700、DB 與備份 0600、帳密以本機金鑰加密後才進 DB；
+- **帳密加密與權限**：`data/` 0700、DB 與備份 0600、帳密以 AES-256-GCM 加密後才進 DB；
   明碼還原是獨立的 POST 端點，需要使用者主動點擊，且會寫入稽核軌跡。
+- **金鑰不跟密文住在一起**（`lib/keychain.ts` / `lib/secretVault.ts`）：macOS 上金鑰存在
+  login Keychain（服務名 `agent-hub-secret-vault`），離線拷走整個 `data/` 只拿得到密文。
+  既有安裝啟動時自動遷移（讀回驗證一致才刪舊金鑰檔；Keychain 讀不到時大聲報錯，
+  絕不重生金鑰）。跨機還原：`npm run key:export` / `npm run key:import`。非 macOS 退回金鑰檔。
+- **備份裡沒有明文登入狀態**（`lib/dataBackup.ts`）：browser-sessions（等同已登入的 cookies）
+  加密後才進備份 zip；備份可另設 `backupMirrorDir` 多抄一份到外接碟/iCloud（異地備份）。
 - **稽核軌跡**（`lib/auditLog.ts`）：核准／拒絕、流程增刪改、帳密讀寫、手動觸發、設定與排程變更。
 - **資料保留期限**（`lib/retention.ts`）：除錯截圖與頁面內容預設 90 天後刪除。
 - **相依漏洞閘門**（`scripts/audit-gate.mjs`）：high/critical 一律卡住 CI；例外必須寫理由與到期日。

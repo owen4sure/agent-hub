@@ -40,3 +40,21 @@ test("normalizeFolderPath：整條路徑超過 150 字時退回只取第一段(�
   assert.ok(result!.length <= 150);
   assert.equal(result, seg.slice(0, 150));
 });
+
+test("明碼帳密補加密：只動明碼、加密後讀取端無感、既有密文原封不動", async () => {
+  const { getDb } = await import("./db");
+  const { encryptLegacyPlaintextSecrets } = await import("./settingsStore");
+  const { decryptSecret, isEncryptedSecret } = await import("./secretVault");
+  const db = getDb();
+  const WF = "zz-test-legacy-secrets";
+  try {
+    db.prepare(`INSERT OR REPLACE INTO secrets (workflow_id, key, value) VALUES (?, 'zzLegacyPlain', 'plain-value')`).run(WF);
+    encryptLegacyPlaintextSecrets();
+    const row = db.prepare(`SELECT value FROM secrets WHERE workflow_id = ? AND key = 'zzLegacyPlain'`).get(WF) as { value: string };
+    assert.equal(isEncryptedSecret(row.value), true, "明碼要被補加密");
+    assert.equal(decryptSecret(row.value), "plain-value", "讀取端拿到的值不能變");
+    assert.equal(encryptLegacyPlaintextSecrets(), 0, "重跑一次不該再動任何東西");
+  } finally {
+    db.prepare(`DELETE FROM secrets WHERE workflow_id = ?`).run(WF);
+  }
+});

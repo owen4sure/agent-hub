@@ -32,11 +32,14 @@ function makeSourceData(dir: string) {
   db.close();
 
   fs.writeFileSync(path.join(dir, "workflows", "wf-drill.json"), JSON.stringify({ id: "wf-drill", name: "演練用流程", nodes: [] }));
-  fs.writeFileSync(path.join(dir, "browser-sessions", "wf-drill.json"), JSON.stringify({ cookies: [] }));
+  fs.writeFileSync(
+    path.join(dir, "browser-sessions", "wf-drill.json"),
+    JSON.stringify({ cookies: [{ name: "session", value: "drill-cookie-value" }] }),
+  );
   return dbFile;
 }
 
-test("備份還原演練：建立備份 → 破壞資料 → 還原 → 內容與還原前一致", () => {
+test("備份還原演練：建立備份 → 破壞資料 → 還原 → 內容與還原前一致", async () => {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "agent-hub-drill-"));
   try {
     const dataDir = path.join(work, "data");
@@ -53,6 +56,18 @@ test("備份還原演練：建立備份 → 破壞資料 → 還原 → 內容�
       envFile: path.join(projectRoot, ".env"),
     }, zipFile);
     assert.ok(fs.existsSync(zipFile), "備份檔要真的被寫出來");
+
+    // 登入狀態(cookies)在備份包裡必須是密文——備份檔被拷去別處時不能等於登入外流
+    const AdmZipCheck = (await import("adm-zip")).default;
+    const zipRaw = new AdmZipCheck(zipFile);
+    const sessionEntry = zipRaw.getEntries().find((e) => e.entryName.startsWith(`${BACKUP_ENTRY.sessionsEnc}/`));
+    assert.ok(sessionEntry, "登入狀態要以加密形式進備份包");
+    assert.equal(sessionEntry.getData().includes("drill-cookie-value"), false, "cookie 值不能以明文出現在備份包裡");
+    assert.equal(
+      zipRaw.getEntries().some((e) => e.entryName.startsWith(`${BACKUP_ENTRY.sessions}/`)),
+      false,
+      "不能同時留一份明文的登入狀態",
+    );
 
     // 破壞：資料庫內容被清掉、流程 JSON 被刪掉，而且留下一份「舊的 WAL」——
     // 這正是手動還原最常踩的坑(忘了刪 -wal，SQLite 會把舊日誌套在還原後的檔案上)。
@@ -81,6 +96,11 @@ test("備份還原演練：建立備份 → 破壞資料 → 還原 → 內容�
     const json = JSON.parse(fs.readFileSync(path.join(dataDir, "workflows", "wf-drill.json"), "utf8")) as { id: string };
     assert.equal(json.id, "wf-drill");
 
+    // 加密的登入狀態要解密放回原位、內容一致
+    const session = JSON.parse(fs.readFileSync(path.join(dataDir, "browser-sessions", "wf-drill.json"), "utf8")) as
+      { cookies: { value: string }[] };
+    assert.equal(session.cookies[0]?.value, "drill-cookie-value", "還原後的登入狀態要跟備份前一致");
+
     // 舊的 WAL 不能留在原地(否則還原完的資料庫可能被舊日誌蓋掉)
     assert.equal(fs.existsSync(`${dbFile}-wal`), false, "舊的 -wal 要被移開");
     assert.ok(result.movedAside.some((name) => name.includes("-wal")), "被移開的舊檔要回報出來");
@@ -89,6 +109,33 @@ test("備份還原演練：建立備份 → 破壞資料 → 還原 → 內容�
     assert.equal(result.envSavedAs, ".env.from-backup");
     assert.equal(fs.readFileSync(path.join(projectRoot, ".env"), "utf8").includes("from-backup"), true);
     assert.ok(fs.existsSync(path.join(projectRoot, ".env.from-backup")));
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("備份裡的登入狀態解不開(金鑰不對/內容毀損)：要把「先 key:import」講清楚，不能靜默跳過", async () => {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "agent-hub-drill-"));
+  try {
+    const dataDir = path.join(work, "data");
+    const dbFile = makeSourceData(dataDir);
+    const zipFile = path.join(work, "backup.zip");
+    writeBackupZip({ dbFile, sessionDir: path.join(dataDir, "browser-sessions") }, zipFile);
+
+    // 模擬「換了機器、金鑰不同」：密文被這台機器的金鑰解不開 == 內容驗證失敗
+    const AdmZip = (await import("adm-zip")).default;
+    const zip = new AdmZip(zipFile);
+    const entry = zip.getEntries().find((e) => e.entryName.startsWith(`${BACKUP_ENTRY.sessionsEnc}/`))!;
+    const tampered = entry.getData();
+    tampered[tampered.length - 1] ^= 0xff;
+    zip.updateFile(entry.entryName, tampered);
+    zip.writeZip(zipFile);
+
+    assert.throws(
+      () => restoreDataBackup(zipFile, { dataDir: path.join(work, "restore-to"), projectRoot: work }),
+      /key:import/,
+      "錯誤訊息要直接給下一步指令",
+    );
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
   }

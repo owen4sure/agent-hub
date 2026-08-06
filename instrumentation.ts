@@ -29,6 +29,10 @@ export async function register() {
     cleanupStaleProposals();
     const approvals = await import("./lib/approvals");
     approvals.pruneOrphanApprovals();
+    // 惰性加密(「下次儲存才加密」)的補課：真實資料裡有明碼帳密躺了很久沒等到那次儲存
+    const { encryptLegacyPlaintextSecrets } = await import("./lib/settingsStore");
+    const sealed = encryptLegacyPlaintextSecrets();
+    if (sealed) console.info(`[migration] 已把 ${sealed} 筆仍是明碼的帳密補加密`);
   });
   await init("scheduler", async () => (await import("./lib/scheduler")).startScheduler());
   await init("folderWatcher", async () => (await import("./lib/watchers")).startWatchers());
