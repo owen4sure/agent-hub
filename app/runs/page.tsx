@@ -58,6 +58,9 @@ export default function RunsPage() {
   const [error, setError] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
   const [search, setSearch] = useState("");
+  // 一次全列出來的實測結果是 10+ 個螢幕高(2026-08 UI/UX 審計 #12)——先給最近 50 筆,
+  // 真的要翻舊帳再按「顯示更早的」。篩選/搜尋改變時重設,避免「換了篩選卻看不到符合的舊紀錄」的錯覺。
+  const [limit, setLimit] = useState(50);
   // 相對時間的基準時間戳,只在 effect(fetch tick)裡更新——不在 render 中呼叫 Date.now()(react 純度規則)
   const [now, setNow] = useState(0);
 
@@ -78,7 +81,7 @@ export default function RunsPage() {
     return () => { alive = false; clearInterval(t); };
   }, []);
 
-  const visible = useMemo(() => {
+  const matching = useMemo(() => {
     const q = search.trim().toLowerCase();
     return (runs ?? []).filter((r) => {
       if (statusFilter === "active" ? !["running", "queued"].includes(r.status) : statusFilter !== "all" && r.status !== statusFilter) return false;
@@ -86,6 +89,8 @@ export default function RunsPage() {
       return true;
     });
   }, [runs, statusFilter, search]);
+  const visible = useMemo(() => matching.slice(0, limit), [matching, limit]);
+  useEffect(() => { setLimit(50); }, [statusFilter, search]);
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-8 py-6 sm:py-8">
@@ -109,7 +114,7 @@ export default function RunsPage() {
       {runs !== null && runs.length === 0 && (
         <EmptyState icon="☰" title="還沒有任何執行紀錄" hint="流程執行過後，每一筆都會出現在這裡（每條流程保留最近 20 筆）。" action={<Link href="/" className="btn btn-primary">看流程列表</Link>} />
       )}
-      {runs !== null && runs.length > 0 && visible.length === 0 && (
+      {runs !== null && runs.length > 0 && matching.length === 0 && (
         <EmptyState
           icon="☰"
           title="沒有符合條件的執行紀錄"
@@ -148,6 +153,13 @@ export default function RunsPage() {
               </Link>
             );
           })}
+        </div>
+      )}
+      {matching.length > visible.length && (
+        <div className="text-center mt-4">
+          <button onClick={() => setLimit((n) => n + 100)} className="btn btn-ghost text-sm">
+            顯示更早的（還有 {matching.length - visible.length} 筆）
+          </button>
         </div>
       )}
     </div>
