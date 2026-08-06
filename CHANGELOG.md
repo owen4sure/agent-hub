@@ -18,6 +18,10 @@
 
 - Security｜`custom-code` 正式執行搬進子程序沙箱；每次執行記錄程式碼指紋；排程不臨場產碼｜過去只有 dry-run 有沙箱,正式執行的 AI 產碼在主程序以完整權限跑(SECURITY.md 4.1 的殘餘風險)。現在:①不用瀏覽器的程式碼(實測 40 個真實節點中的 37 個)一律進子程序——拿不到平台的環境變數、檔案系統只開放輸入檔與產出目錄(Node --permission)、禁開子程序;子程序在主 realm 直接執行而非 VM,exceljs 的 Date instanceof、fetch、console.log 全部保真。②每次執行記 sha256 指紋,「那天跑的是哪個版本的程式碼」從執行紀錄答得出來;產碼寫入稽核軌跡。③排程/自動觸發遇到還沒產碼的節點直接拒絕——沒人看過的新程式碼只能在手動執行時第一次跑。用瀏覽器的 3 個節點留在主程序(紀錄明確標示,SECURITY.md 4.1 如實記載)｜`lib/workflow/customCodeProcessSandbox.ts`、`lib/workflow/nodes/customCode.ts`｜驗證：13 個合約+隔離測試(env 隔離、家目錄寫檔被 OS 擋、exceljs Date 保真、本機 http fetch、console.log 不弄壞協定、排程拒產碼);另以真實流程 15 個純計算節點的歷史輸入在沙箱重放,12 個輸出逐位元一致、3 個差異全數歸因於程式碼本身的時間相依或歷史輸入缺漏,零沙箱語意差異
 
+### Changed
+
+- Changed｜兩個最大的模組拆成內聚小檔,單檔不再超過 800 行紅線｜wfChatStore.ts(1,827 行)→ lib/wfChat/ 五個模組＋433 行入口;builder.ts(2,217 行)→ builderTypes/builderHeuristics/builderPrompts/builderGraphNormalize/builderModelCall＋799 行主流程。兩者都是「只搬不改」:搬移內容與原文逐位元相同(唯一差異是跨檔符號加 export),入口檔 re-export 全部公開符號,既有 import 路徑一行都不用改。刻意沒拆的:app/workflows/[id]/page.tsx(3,099 行,UI 拆分需要截圖回歸驗證的獨立工作)與 lib/workflow/engine.ts(1,782 行,執行引擎核心,機械搬動的風險報酬比不划算)——這兩個是已知未達標,不假裝拆完了｜`lib/wfChat/*`、`lib/workflow/builder*.ts`｜驗證：tsc 零錯誤、1,187 個測試全綠、change-guard(含 lint)通過、拆移內容逐行 diff 比對
+
 ### Added
 
 - Added｜內建三條零設定範例流程,陌生人兩分鐘看到真實執行｜examples/ 機制早就存在但一直是空的——新裝好的平台首頁只有空清單,「這東西能幹嘛」全靠想像。現在首頁直接有：①把資料整理成報表檔(純本機:自訂步驟→組字串→寫檔→桌面通知) ②AI 幫你分類客戶訊息(表單輸入→AI 限定選項判斷) ③抓天氣資料請 AI 給建議(免金鑰公開 API→整理→AI 產生文字)。全部不需要任何帳密設定｜`examples/*.json`、`README.md`｜驗證：三條全部經由 API 真實執行成功(含 AI 真的回了分類與穿搭建議)
