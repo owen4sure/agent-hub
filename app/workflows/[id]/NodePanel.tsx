@@ -6,6 +6,7 @@ import { fetchNodeDefs, type NodeDefLite, type ParamFieldLite } from "./AddNodeP
 import type { WFNode, NodeRun } from "./types";
 import { plainLanguage } from "@/lib/workflow/plainLanguage";
 import { GOOGLE_SHEET_SCRIPT_TEMPLATE } from "@/lib/googleSheetScriptTemplate";
+import { AppsScriptSetupSteps } from "./AppsScriptSetupSteps";
 import type { Part } from "@/lib/wfChatStore";
 import { findFieldMistakes, type InsertableField } from "@/lib/workflow/insertableFields";
 import { parseUserFields } from "@/lib/workflow/userStepFields";
@@ -134,6 +135,7 @@ export function NodePanel({
   onDraftChange,
   onRunFromHere,
   onRunOnlyThis,
+  onTestSendToSelf,
   watchRun,
   onWatchRunChange,
   testOnly,
@@ -163,11 +165,14 @@ export function NodePanel({
   onRunFromHere: () => void;
   /** 只測這一步：只跑這一格，其餘全部沿用最近結果或跳過 */
   onRunOnlyThis: () => void;
+  /** 「用網頁信箱寄信」節點專用的測試寄送：不管節點設定的收件人是誰，這次一定只會寄到傳進來的這個信箱
+   * （安全保證在後端 API 那一層做，不是這裡的 UI 約束——見 test-send/route.ts）。 */
+  onTestSendToSelf: (testEmail: string) => Promise<void>;
   /** 部分執行要不要開有頭瀏覽器看畫面。預設關——開視窗會把使用者的螢幕焦點搶走 */
   watchRun: boolean;
   onWatchRunChange: (v: boolean) => void;
-  /** 「只測試,不更改資料」勾選：預設 false=真的執行到底(含寫入/發送)——使用者拍板「圈起來執行的
-   * 就執行到底,除非我有說只測試」;勾了才走只讀安全排練(dryRun)。 */
+  /** 「只演練，不更改資料」勾選：預設 false=真的執行到底(含寫入/發送)——使用者拍板「圈起來執行的
+   * 就執行到底,除非我有說只測試」;勾了才走只讀演練(dryRun)。 */
   testOnly: boolean;
   onTestOnlyChange: (v: boolean) => void;
   /** 這條流程還沒填的帳密欄位——帳密類失敗要直接給輸入框(AI 修不了缺帳密,不能只給修復按鈕) */
@@ -204,6 +209,26 @@ export function NodePanel({
   // 使用者是不懂程式的人，預設只給他看得懂的白話說明(explainStep 由父層一次抓整條流程的說明後傳下來，
   // 不用每點開一個節點就重打一次 API)；原始 config/code 只留給想除錯的人，收在下面「技術細節」裡預設收合。
   const [showTechnical, setShowTechnical] = useState(false);
+
+  // ── ✉️ 測試寄送(僅 webmail-send)：記住上次填的信箱只是省得每次重打，不是「已設定好的正式值」——
+  // 一定要在畫面上看得到、可以改，寄送當下也一定要重新讀這個欄位當下的值，不能用什麼隱藏預設值。
+  const [testSendEmail, setTestSendEmail] = useState("");
+  const [testSending, setTestSending] = useState(false);
+  useEffect(() => {
+    const saved = window.localStorage.getItem("agenthub_test_send_email");
+    if (saved) setTestSendEmail(saved);
+  }, []);
+  async function handleTestSend() {
+    const email = testSendEmail.trim();
+    if (!email || testSending) return;
+    setTestSending(true);
+    try {
+      window.localStorage.setItem("agenthub_test_send_email", email);
+      await onTestSendToSelf(email);
+    } finally {
+      setTestSending(false);
+    }
+  }
 
   // ── 直接改設定:簡單值(網址/關鍵字/檔名…)自己打字改,不用每次都求 AI(雙模式編輯拍板) ──
   const [defs, setDefs] = useState<NodeDefLite[] | null>(null);
@@ -295,6 +320,10 @@ export function NodePanel({
     help: field.help,
   })) as ParamFieldLite[];
   const editableFields = [...userFields, ...schemaFields.filter((f) => !userFields.some((u) => u.key === f.key))];
+  // CSS 選擇器、內部系統代號這類欄位(advanced:true)一般使用者看不懂也不用手動改——收進
+  // 預設收合的「進階設定」，跟「標題關鍵字」這種一看就懂的欄位分開，見 ParamField.advanced 註解。
+  const basicFields = editableFields.filter((f) => !f.advanced);
+  const advancedFields = editableFields.filter((f) => f.advanced);
   // AI 微調後的回報是給使用者確認「有沒有改對」，不是除錯用的 raw config dump。程式碼、內嵌步驟、
   // JSON 與沒有對應表單的內部欄位一律收成白話結論；真正技術細節仍只在後端與 AI 的修復現場使用。
   const friendlyLastDiff = lastDiff
@@ -438,7 +467,7 @@ export function NodePanel({
           data.droppedImages ? `${data.droppedImages} 張圖片` : null,
           data.droppedFiles ? `${data.droppedFiles} 份檔案` : null,
         ].filter(Boolean).join("、");
-        setMsg(dropped ? `已更新這個節點(超過上限，有 ${dropped} 沒有送出，一次最多 4 張圖/4 份檔案)` : "已更新這個節點");
+        setMsg(dropped ? `已更新這個步驟(超過上限，有 ${dropped} 沒有送出，一次最多 4 張圖/4 份檔案)` : "已更新這個步驟");
         // AI 到底改了什麼，之前後端有回傳(before/config)但畫面上從來沒顯示過——現在秀出來讓使用者確認
         setLastDiff({ before: data.before ?? {}, after: data.config ?? {} });
         onChanged();
@@ -483,7 +512,7 @@ export function NodePanel({
       if (data.cancelled) setMsg(`已停止修復，沒通過驗證的改動已還原${report}`);
       else if (data.ok && data.suspicion) { setMsg(`⚠️ 流程通過了，但驗收檢查覺得結果可疑：${data.suspicion}——建議親自看一眼結果，有問題再說一次${report}`); onToast(`「${node.label}」跑通了但建議確認一下`); }
       else if (data.ok) { setMsg(`✅ 修好了(試了 ${data.attempts} 次)。下面是實際改動與驗證結果：${report}`); onToast(`已修好：${node.label}`); }
-      else if (data.movedTo) setMsg(`這一步已通過，但接著卡在別的節點；請直接點紅色節點處理。${report}`);
+      else if (data.movedTo) setMsg(`這一步已通過，但接著卡在別的步驟；請直接點紅色步驟處理。${report}`);
       else setMsg(`試了 ${data.attempts ?? ""} 次還沒修好：${data.error ?? ""}${report}`);
       onChanged();
     } catch {
@@ -531,6 +560,115 @@ export function NodePanel({
     } finally {
       setSavingSecrets(false);
     }
+  }
+
+  function renderConfigField(f: ParamFieldLite) {
+    const v = fieldValue(f);
+    const set = (val: string | boolean) => setDraftCfg((d) => ({ ...d, [f.key]: val }));
+    return (
+      <div key={f.key}>
+        <label className="block text-xs faint mb-1">
+          {f.label}
+          {f.help ? <span className="opacity-70">（{f.help}）</span> : null}
+        </label>
+        {f.type === "select" && f.options?.length ? (
+          <select value={String(v)} onChange={(e) => set(e.target.value)} className="input text-sm min-h-11">
+            {String(v) === "" && <option value="">（用預設值）</option>}
+            {f.options.map((o) => {
+              const p = parseOption(o);
+              return <option key={p.value} value={p.value}>{p.label}</option>;
+            })}
+          </select>
+        ) : f.type === "boolean" ? (
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={v === true} onChange={(e) => set(e.target.checked)} />
+            <span className="muted">開啟</span>
+          </label>
+        ) : f.type === "textarea" ? (
+          <textarea ref={(el) => { fieldRefs.current[f.key] = el; }} onFocus={() => setFocusedField(f.key)} value={String(v)} onChange={(e) => set(e.target.value)} rows={6} className="input text-sm resize-y leading-relaxed min-h-32" placeholder={f.default ? `預設：${f.default}` : "留空會使用預設值"} />
+        ) : (
+          <input
+            ref={(el) => { fieldRefs.current[f.key] = el; }}
+            onFocus={() => setFocusedField(f.key)}
+            value={String(v)}
+            onChange={(e) => set(e.target.value)}
+            inputMode={f.type === "number" ? "numeric" : undefined}
+            className="input text-sm min-h-11"
+            placeholder={f.default ? `預設：${f.default}` : "留空會使用預設值"}
+          />
+        )}
+        {/* 可以插入哪些上游資料 + 打錯了當場提醒。只對「會做 {{欄位}} 代換」的文字型欄位顯示；
+            勾選框、下拉選單不吃樣板，掛上去只會變成雜訊。 */}
+        {(f.type === "textarea" || f.type === "text" || !f.type) && (
+          <>
+            {focusedField === f.key && (
+              <InsertableFieldChips fields={insertable} onInsert={(key) => insertToken(key, f.key, String(v), (val) => set(val))} />
+            )}
+            <FieldMistakeHints
+              text={String(v)}
+              fields={insertable}
+              onFix={(from, to) => set(String(v).split(`{{${from}}}`).join(`{{${to}}}`))}
+            />
+          </>
+        )}
+        {f.key === "readOnly" && node.type === "http-request" && readOnlyState?.applicable && (
+          <div className="mt-2 rounded-lg border p-3 text-xs space-y-2" style={{ borderColor: readOnlyState.approved ? "var(--green)" : "var(--amber)" }}>
+            {readOnlyState.approved ? (
+              <>
+                <p style={{ color: "var(--green)" }}>✅ 你已確認這個呼叫只是查詢。演練會真的執行它。</p>
+                <p className="faint">之後若網址、Headers、Body 或方法被改動(包括 AI 自己改)，這個確認會自動失效，需要你重新確認。</p>
+                <button type="button" disabled={readOnlyBusy} onClick={() => setReadOnlyApproval(false)} className="btn btn-ghost text-xs">
+                  {readOnlyBusy ? "處理中…" : "取消確認"}
+                </button>
+              </>
+            ) : (
+              <>
+                <p style={{ color: "var(--amber)" }}>
+                  {readOnlyState.aiSuggestsReadOnly
+                    ? "AI 建議這是查詢，但需要你確認此端點不會寫資料。"
+                    : "這個呼叫不是 GET，系統一律當成「可能會改動對方的資料」。"}
+                </p>
+                <p className="faint">在你確認之前，演練會略過這一步(不會真的送出)。只有你確定這個網址只是查詢、不會建立或修改對方的資料時才按確認。</p>
+                <button type="button" disabled={readOnlyBusy} onClick={() => setReadOnlyApproval(true)} className="btn btn-ghost text-xs">
+                  {readOnlyBusy ? "處理中…" : "我確認這個呼叫只是查詢"}
+                </button>
+              </>
+            )}
+          </div>
+        )}
+        {f.key === "scriptUrl" && (
+          <div className="mt-2 space-y-2">
+            <button type="button" onClick={probeScriptUrl} disabled={sheetProbe.busy || !String(v).trim()} className="btn btn-ghost text-xs">
+              {sheetProbe.busy ? "檢查並儲存中…" : "🔎 檢查並套用到本流程所有寫入步驟（不寫資料）"}
+            </button>
+            {sheetProbe.text && <p className="text-xs" style={{ color: sheetProbe.ok ? "var(--green)" : "var(--red)" }}>{sheetProbe.text}</p>}
+            <details className="rounded-lg border p-3 text-xs">
+              <summary className="cursor-pointer font-medium">第一次設定 Apps Script 寫入網址</summary>
+              <div className="mt-2">
+                <AppsScriptSetupSteps
+                  bound
+                  pasteDestination={<>貼回<b>上方欄位</b></>}
+                  copyButton={
+                    <>
+                      按這顆把腳本複製起來。
+                      <div className="mt-1.5">
+                        <button type="button" className="btn btn-ghost text-xs" onClick={copySheetScript}>
+                          {sheetScriptCopied ? "✅ 已複製 v3 程式碼" : "📋 複製 v3 程式碼"}
+                        </button>
+                      </div>
+                    </>
+                  }
+                />
+              </div>
+              <details className="mt-2">
+                <summary className="cursor-pointer faint">需要手動複製時才展開程式碼</summary>
+                <pre className="mt-2 p-2 rounded-md overflow-x-auto whitespace-pre text-[11px]" style={{ background: "var(--surface-2)" }}>{GOOGLE_SHEET_SCRIPT_TEMPLATE}</pre>
+              </details>
+            </details>
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -640,10 +778,30 @@ export function NodePanel({
               </label>
               <label className="flex items-center gap-1 text-xs faint cursor-pointer select-none" title="勾了就只測試:不寫入、不發送、不動任何外部資料">
                 <input type="checkbox" checked={testOnly} onChange={(e) => onTestOnlyChange(e.target.checked)} />
-                只測試,不更改資料
+                只演練，不更改資料
               </label>
             </div>
-            <p className="text-xs faint leading-relaxed">「從這一步」會跑這一步和它後面的所有步驟；「只{testOnly ? "測" : "執行"}這一步」只跑這一格。沒跑到的步驟不會重新執行(有最近一次的結果就沿用，沒有就跳過)。<strong>預設會真的執行到底(包含寫入/發送)</strong>；只想演練、不動任何外部資料，勾「只測試,不更改資料」。預設在背景執行、不會跳出瀏覽器視窗搶走你的畫面——想親眼看操作過程再勾「看畫面」。畫布上也可以直接用滑鼠拖曳框選幾個節點，一次跑那幾步。</p>
+            <p className="text-xs faint leading-relaxed">「從這一步」會跑這一步和它後面的所有步驟；「只{testOnly ? "測" : "執行"}這一步」只跑這一步。沒跑到的步驟不會重新執行(有最近一次的結果就沿用，沒有就跳過)。<strong>預設會真的執行到底(包含寫入/發送)</strong>；只想演練、不動任何外部資料，勾「只演練，不更改資料」。預設在背景執行、不會跳出瀏覽器視窗搶走你的畫面——想親眼看操作過程再勾「看畫面」。畫布上也可以直接用滑鼠拖曳框選幾個步驟，一次跑那幾步。</p>
+          </div>
+        )}
+        {node.type === "webmail-send" && (
+          <div className="card p-3 space-y-1.5">
+            <p className="text-xs font-medium">✉️ 測試寄送</p>
+            <p className="text-xs faint leading-relaxed">
+              用這一步真正會產生的主旨/內容/附件寄一封信，但<strong>不管上面收件人/副本/密件副本欄位填了什麼，這裡一定只會寄到你下面填的這個信箱</strong>，其他收件人完全不會用到——放心拿來檢查格式跟附件對不對。
+            </p>
+            <div className="flex gap-2">
+              <input
+                type="email"
+                value={testSendEmail}
+                onChange={(e) => setTestSendEmail(e.target.value)}
+                placeholder="你自己的信箱地址"
+                className="input text-xs flex-1"
+              />
+              <button onClick={handleTestSend} disabled={!testSendEmail.trim() || testSending} className="btn btn-ghost text-xs shrink-0">
+                {testSending ? "寄送中…" : "寄一封測試信給我"}
+              </button>
+            </div>
           </div>
         )}
         <div className="card p-3 text-[13px] leading-relaxed" style={{ background: "var(--surface-2)" }}>
@@ -787,107 +945,13 @@ export function NodePanel({
               <p className="text-sm font-medium" style={{ color: "var(--accent)" }}>✏️ 直接改設定</p>
               <p className="text-xs faint mt-1">小修改可以直接在這裡改；欄位會跟著右側面板一起拉寬。</p>
             </div>
-            {editableFields.map((f) => {
-              const v = fieldValue(f);
-              const set = (val: string | boolean) => setDraftCfg((d) => ({ ...d, [f.key]: val }));
-              return (
-                <div key={f.key}>
-                  <label className="block text-xs faint mb-1">
-                    {f.label}
-                    {f.help ? <span className="opacity-70">（{f.help}）</span> : null}
-                  </label>
-                  {f.type === "select" && f.options?.length ? (
-                    <select value={String(v)} onChange={(e) => set(e.target.value)} className="input text-sm min-h-11">
-                      {String(v) === "" && <option value="">（用預設值）</option>}
-                      {f.options.map((o) => {
-                        const p = parseOption(o);
-                        return <option key={p.value} value={p.value}>{p.label}</option>;
-                      })}
-                    </select>
-                  ) : f.type === "boolean" ? (
-                    <label className="flex items-center gap-2 text-sm">
-                      <input type="checkbox" checked={v === true} onChange={(e) => set(e.target.checked)} />
-                      <span className="muted">開啟</span>
-                    </label>
-                  ) : f.type === "textarea" ? (
-                    <textarea ref={(el) => { fieldRefs.current[f.key] = el; }} onFocus={() => setFocusedField(f.key)} value={String(v)} onChange={(e) => set(e.target.value)} rows={6} className="input text-sm resize-y leading-relaxed min-h-32" placeholder={f.default ? `預設：${f.default}` : "留空會使用預設值"} />
-                  ) : (
-                    <input
-                      ref={(el) => { fieldRefs.current[f.key] = el; }}
-                      onFocus={() => setFocusedField(f.key)}
-                      value={String(v)}
-                      onChange={(e) => set(e.target.value)}
-                      inputMode={f.type === "number" ? "numeric" : undefined}
-                      className="input text-sm min-h-11"
-                      placeholder={f.default ? `預設：${f.default}` : "留空會使用預設值"}
-                    />
-                  )}
-                  {/* 可以插入哪些上游資料 + 打錯了當場提醒。只對「會做 {{欄位}} 代換」的文字型欄位顯示；
-                      勾選框、下拉選單不吃樣板，掛上去只會變成雜訊。 */}
-                  {(f.type === "textarea" || f.type === "text" || !f.type) && (
-                    <>
-                      {focusedField === f.key && (
-                        <InsertableFieldChips fields={insertable} onInsert={(key) => insertToken(key, f.key, String(v), (val) => set(val))} />
-                      )}
-                      <FieldMistakeHints
-                        text={String(v)}
-                        fields={insertable}
-                        onFix={(from, to) => set(String(v).split(`{{${from}}}`).join(`{{${to}}}`))}
-                      />
-                    </>
-                  )}
-                  {f.key === "readOnly" && node.type === "http-request" && readOnlyState?.applicable && (
-                    <div className="mt-2 rounded-lg border p-3 text-xs space-y-2" style={{ borderColor: readOnlyState.approved ? "var(--green)" : "var(--amber)" }}>
-                      {readOnlyState.approved ? (
-                        <>
-                          <p style={{ color: "var(--green)" }}>✅ 你已確認這個呼叫只是查詢。安全試跑會真的執行它。</p>
-                          <p className="faint">之後若網址、Headers、Body 或方法被改動(包括 AI 自己改)，這個確認會自動失效，需要你重新確認。</p>
-                          <button type="button" disabled={readOnlyBusy} onClick={() => setReadOnlyApproval(false)} className="btn btn-ghost text-xs">
-                            {readOnlyBusy ? "處理中…" : "取消確認"}
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <p style={{ color: "var(--amber)" }}>
-                            {readOnlyState.aiSuggestsReadOnly
-                              ? "AI 建議這是查詢，但需要你確認此端點不會寫資料。"
-                              : "這個呼叫不是 GET，系統一律當成「可能會改動對方的資料」。"}
-                          </p>
-                          <p className="faint">在你確認之前，安全試跑會略過這一步(不會真的送出)。只有你確定這個網址只是查詢、不會建立或修改對方的資料時才按確認。</p>
-                          <button type="button" disabled={readOnlyBusy} onClick={() => setReadOnlyApproval(true)} className="btn btn-ghost text-xs">
-                            {readOnlyBusy ? "處理中…" : "我確認這個呼叫只是查詢"}
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  )}
-                  {f.key === "scriptUrl" && (
-                    <div className="mt-2 space-y-2">
-                      <button type="button" onClick={probeScriptUrl} disabled={sheetProbe.busy || !String(v).trim()} className="btn btn-ghost text-xs">
-                        {sheetProbe.busy ? "檢查並儲存中…" : "🔎 檢查並套用到本流程所有寫入步驟（不寫資料）"}
-                      </button>
-                      {sheetProbe.text && <p className="text-xs" style={{ color: sheetProbe.ok ? "var(--green)" : "var(--red)" }}>{sheetProbe.text}</p>}
-                      <details className="rounded-lg border p-3 text-xs">
-                        <summary className="cursor-pointer font-medium">第一次設定 Apps Script 寫入網址</summary>
-                        <ol className="list-decimal ml-4 mt-2 space-y-1.5 muted">
-                          <li>打開要寫入的試算表 →「擴充功能」→「Apps Script」。</li>
-                          <li>複製下方 v3 程式碼，完整取代編輯器內容後儲存。</li>
-                          <li>「部署」→「新增部署作業」→「網頁應用程式」→ 存取權選「任何人」。</li>
-                          <li>把 Google 給的 <code>https://script.google.com/macros/…/exec</code> 網址貼回上方欄位。</li>
-                        </ol>
-                        <button type="button" className="btn btn-ghost text-xs mt-2" onClick={copySheetScript}>
-                          {sheetScriptCopied ? "✅ 已複製 v3 程式碼" : "📋 複製 v3 程式碼"}
-                        </button>
-                        <details className="mt-2">
-                          <summary className="cursor-pointer faint">需要手動複製時才展開程式碼</summary>
-                          <pre className="mt-2 p-2 rounded-md overflow-x-auto whitespace-pre text-[11px]" style={{ background: "var(--surface-2)" }}>{GOOGLE_SHEET_SCRIPT_TEMPLATE}</pre>
-                        </details>
-                      </details>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {basicFields.map(renderConfigField)}
+            {advancedFields.length > 0 && (
+              <details className="rounded-lg border p-3 text-xs">
+                <summary className="cursor-pointer font-medium faint">🔧 進階設定（一般不用改；壞了用下面「讓 AI 修」比較快）</summary>
+                <div className="mt-3 space-y-4">{advancedFields.map(renderConfigField)}</div>
+              </details>
+            )}
             <button onClick={saveConfig} disabled={!dirty || saving} className="btn btn-primary w-full justify-center text-sm">
               {saving ? "儲存中…" : dirty ? "儲存修改" : "沒有修改"}
             </button>
@@ -931,7 +995,7 @@ export function NodePanel({
         )}
       </div>
       <div className="border-t p-4 space-y-2">
-        <p className="text-xs faint">用白話叫 AI 微調這個節點；出錯的話可以直接傳截圖/檔案給它看</p>
+        <p className="text-xs faint">用白話叫 AI 微調這個步驟；出錯的話可以直接傳截圖/檔案給它看</p>
         {attachParts.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
             {attachParts.map((p, i) => (

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { getWorkflow, listWorkflows, saveWorkflow, deleteWorkflow, deriveRequiresSecrets, isBuiltin } from "@/lib/workflow/store";
-import { getWorkflowModel, setWorkflowModel, getWorkflowSecrets, setWorkflowSecrets, normalizeFolderPath } from "@/lib/settingsStore";
+import { getWorkflowModel, setWorkflowModel, getWorkflowModelPolicy, setWorkflowModelPolicy, getWorkflowSecrets, setWorkflowSecrets, normalizeFolderPath } from "@/lib/settingsStore";
+import { describeWorkflowModelPlan } from "@/lib/modelPolicy";
 import { listRuns } from "@/lib/workflow/engine";
 import { autorunActive } from "@/lib/workflow/busyLocks";
 import { getNodeDef } from "@/lib/workflow/registry";
@@ -74,7 +75,16 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     ? { descriptions: pendingConsent.crons.map(describeSuggestedSchedule), consequences: pendingConsent.consequences }
     : undefined;
   return NextResponse.json({
-    workflow: { ...wf, requiresSecrets, model: getWorkflowModel(id, wf.defaultModel) },
+    workflow: {
+      ...wf,
+      requiresSecrets,
+      model: getWorkflowModel(id, wf.defaultModel),
+      // 「建流程用哪顆」跟「跑起來用哪顆」是兩件事。runModel 空字串 = 沿用 model(現狀)。
+      ...getWorkflowModelPolicy(id),
+      // 還沒跑就先讓使用者看到「這條流程實際會用哪顆、資料會去哪裡」——執行紀錄事後看得到，
+      // 但要拿去做資料落地確認的人需要的是**跑之前**就能確認。
+      modelPlan: await describeWorkflowModelPlan(id, getWorkflowModel(id, wf.defaultModel)),
+    },
     acceptanceSpecValid: isAcceptanceSpecForGraph(wf.acceptanceSpec, wf, workflowExecutionFingerprint),
     currentGraphFingerprint: currentFingerprint,
     // 持續回傳而非只靠設為正式時的一次性 warning，讓觸發面板與工具列在重整後仍能說清楚
@@ -108,8 +118,25 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   if (typeof body.longDescription === "string" && body.longDescription.length > 20_000) {
     return NextResponse.json({ error: "流程說明最多 20,000 個字" }, { status: 400 });
   }
+  // description(短說明)是首頁流程清單直接顯示的那一句——本來只有 AI 建圖當下會自動寫，之後
+  // 沒有任何管道能修正。使用者原話：「現在那些工作流沒有很完整的敘述，這樣有些功能我會不確定
+  // 有沒有做」：好幾條流程是「複製」既有流程建立的，description 也整句原封不動複製過去，
+  // 完全沒講清楚是哪個對象/哪個資料來源，掃過清單完全分不出哪條是哪條。
+  if (body.description !== undefined && typeof body.description !== "string") {
+    return NextResponse.json({ error: "流程短說明必須是文字" }, { status: 400 });
+  }
+  if (typeof body.description === "string" && body.description.length > 300) {
+    return NextResponse.json({ error: "流程短說明最多 300 個字" }, { status: 400 });
+  }
   if (body.model !== undefined && (typeof body.model !== "string" || !body.model.trim() || body.model.length > 160)) {
     return NextResponse.json({ error: "模型代號格式不正確" }, { status: 400 });
+  }
+  // 執行模型允許空字串——那代表「恢復成沿用建流程那顆」，是使用者取消設定的正常操作。
+  if (body.runModel !== undefined && (typeof body.runModel !== "string" || body.runModel.length > 160)) {
+    return NextResponse.json({ error: "執行時使用的模型代號格式不正確" }, { status: 400 });
+  }
+  if (body.strict !== undefined && typeof body.strict !== "boolean") {
+    return NextResponse.json({ error: "「執行時不要自動換模型」必須是 true 或 false" }, { status: 400 });
   }
   if (body.group !== undefined && typeof body.group !== "string") {
     return NextResponse.json({ error: "群組名稱必須是文字" }, { status: 400 });
@@ -155,6 +182,14 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   }
 
   if (body.model) setWorkflowModel(id, body.model.trim());
+  // 執行模型與「不要自動換」——兩個都可以單獨更新，沒送的欄位保持原值。
+  // runModel 允許送空字串(代表「恢復成沿用建流程那顆」)，所以不能用 if(body.runModel) 判斷。
+  if (body.runModel !== undefined || body.strict !== undefined) {
+    setWorkflowModelPolicy(id, {
+      ...(body.runModel === undefined ? {} : { runModel: String(body.runModel).trim() }),
+      ...(body.strict === undefined ? {} : { strict: body.strict === true }),
+    });
+  }
   if (body.secrets) {
     const cleanSecrets: Record<string, string> = {};
     for (const [key, value] of Object.entries(body.secrets as Record<string, unknown>)) {
@@ -363,7 +398,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   }
 
   const changesManifest =
-    body.name !== undefined || body.longDescription !== undefined || body.status !== undefined || body.outputFolder !== undefined ||
+    body.name !== undefined || body.description !== undefined || body.longDescription !== undefined || body.status !== undefined || body.outputFolder !== undefined ||
     body.requiresSecrets !== undefined ||
     body.triggerParams !== undefined || body.onFailureWorkflow !== undefined || body.group !== undefined || body.acceptanceSpec !== undefined || body.acknowledgeN8nMigration !== undefined || body.n8nMigrationReview !== undefined;
   if (changesManifest) {
@@ -437,6 +472,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     saveWorkflow({
       ...cur,
       name: typeof body.name === "string" ? body.name.trim() : cur.name,
+      description: typeof body.description === "string" ? body.description.trim() : cur.description,
       longDescription: body.longDescription ?? cur.longDescription,
       status: body.status ?? cur.status,
       nodes: cur.nodes,

@@ -33,6 +33,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
     return NextResponse.json({ error: "dryRun 必須是 true 或 false" }, { status: 400 });
   }
+  // 「這次通知/寄信先都寄給我自己」：只是一個信箱字串，不是帳密，格式錯了也不用擋住整次執行——
+  // 讓 webmail-send 節點自己在真的要寄的時候老實失敗，比在這裡猜規則更可靠。
+  if (body.testSendOverride !== undefined && (typeof body.testSendOverride !== "string" || body.testSendOverride.length > 200)) {
+    return NextResponse.json({ error: "testSendOverride 格式不正確" }, { status: 400 });
+  }
   if (body.approvalDecisions !== undefined && (!body.approvalDecisions || typeof body.approvalDecisions !== "object" || Array.isArray(body.approvalDecisions) ||
     !Object.entries(body.approvalDecisions as Record<string, unknown>).every(([nodeId, decision]) => /^[A-Za-z0-9_-]{1,80}$/.test(nodeId) && (decision === "approved" || decision === "rejected")))) {
     return NextResponse.json({ error: "簽核分支選擇格式不正確" }, { status: 400 });
@@ -107,6 +112,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       onlyNodeIds: body.onlyNodeIds,
       dryRun: body.dryRun === true,
       scenarioApprovalDecisions: body.dryRun === true ? body.approvalDecisions : undefined,
+      testSendOverride: typeof body.testSendOverride === "string" ? body.testSendOverride : undefined,
     });
     recordAuditFromRequest(req, "workflow.run", id, { runId, dryRun: body.dryRun === true, onlyNodeIds: body.onlyNodeIds ?? null });
     return NextResponse.json({ runId });

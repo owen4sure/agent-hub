@@ -61,7 +61,7 @@ export const googleSlidesReplaceImageNode: NodeDefinition = {
     const token = ctx.secrets[SLIDES_IMAGE_TOKEN_KEY];
     if (!token) {
       throw new PermanentError(
-        "還沒設定換圖腳本的驗證碼。到流程頁「⋯ → 設定」的「換掉簡報圖片」卡片，複製腳本部署一次，並把驗證碼填進來。",
+        "還沒設定換圖腳本的驗證碼。到流程頁「⚙ 這條流程的設定」裡的「換掉簡報上的圖片」，複製腳本部署一次，並把驗證碼填進來。",
       );
     }
 

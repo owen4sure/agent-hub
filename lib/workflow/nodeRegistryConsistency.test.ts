@@ -25,3 +25,18 @@ test("nodeRegistryConsistency：ICONS／TYPE_META 裡不能有指向不存在節
   assert.deepEqual(staleIcons, [], `ICONS 裡這些項目對應的節點型別已經不在 registry.ts：${staleIcons.join("、")}(型別改名或移除節點時忘了同步清掉)`);
   assert.deepEqual(staleTypeMeta, [], `TYPE_META 裡這些項目對應的節點型別已經不在 registry.ts：${staleTypeMeta.join("、")}(型別改名或移除節點時忘了同步清掉)`);
 });
+
+/**
+ * 真實踩過的第二種漏網之魚(2026-08 UI/UX 審計發現)：型別存在、忘了補的檢查會過，
+ * 但 TYPE_META 的白話名稱自己另外手寫一份，跟 registry.ts 的 label 各自演化到 12 個型別對不起來
+ * (使用者在「加步驟」抽屜看到「打 API」，放上畫布後卡片副標卻寫「連接外部服務」)。
+ * registry.ts 的 label 是唯一真相(AddNodePanel 直接從它 fetch)，TYPE_META 只是另一處顯示，
+ * 兩邊字面必須一致，用測試機械化鎖住，不能只靠人記得同步改兩個地方。
+ */
+test("nodeRegistryConsistency：TYPE_META 的白話名稱要跟 registry.ts 的 label 逐字一致(同一個節點，使用者不該在不同地方看到不同名字)", () => {
+  const mismatches = Object.entries(NODE_DEFS)
+    .filter(([type]) => type in TYPE_META)
+    .filter(([type, def]) => def.label !== TYPE_META[type].label)
+    .map(([type, def]) => `${type}：registry="${def.label}" vs TYPE_META="${TYPE_META[type].label}"`);
+  assert.deepEqual(mismatches, [], `這些節點型別的名稱兩邊對不起來：\n${mismatches.join("\n")}`);
+});

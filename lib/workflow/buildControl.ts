@@ -8,7 +8,15 @@ import { randomUUID } from "node:crypto";
 // 同一個決定)，這裡把預設上限拉高到 10 分鐘，讓困難的既有流程修改有足夠時間完成，而不是被錯誤地
 // 提前判定成「卡住了」。`callClaudeCode` 自己仍有獨立的 45 秒無回應偵測與 20 分鐘絕對上限
 // (lib/claudeCodeClient.ts)，真的卡死的呼叫不會因為這裡拉長而失去保護。
-const DEFAULT_MAX_BUILD_MS = 10 * 60_000;
+//
+// 2026-08-05 再拉高到 20 分鐘：用真實需求實測「從零建圖」時，同一天內四次死在這個上限上
+// (診斷編號 fb2b1d95/54a05cd3 及兩次重測)。實測數據：從零建圖的完整提示(40k+ 字)走本機
+// Claude Code 一輪就要 7~9 分鐘(medium 474 秒、high 400~530 秒，力度降檔救不了這個規模)，
+// 而「需求完整性驗收」抓到缺口後的修正輪也需要同等時間——10 分鐘在數學上只塞得下一輪，
+// 任何需要修正的從零建圖必然失敗且整包丟棄。這個上限的本意是防失控，不是節奏控制：
+// gateway 模型的失敗本來就快(45 秒 timeout)，不會被這裡拖慢；只有「模型真的還在想」的
+// 情況會用到 20 分鐘，而畫面有進度列與「⏹ 停止」鈕，使用者隨時能中止。
+const DEFAULT_MAX_BUILD_MS = 20 * 60_000;
 
 interface ActiveBuild {
   token: string;
@@ -22,7 +30,7 @@ const activeBuilds = new Map<string, ActiveBuild>();
 
 function buildLimitMs(): number {
   const raw = Number(process.env.AGENT_HUB_BUILD_TIMEOUT_MS);
-  return Number.isFinite(raw) ? Math.max(30_000, Math.min(raw, 20 * 60_000)) : DEFAULT_MAX_BUILD_MS;
+  return Number.isFinite(raw) ? Math.max(30_000, Math.min(raw, 30 * 60_000)) : DEFAULT_MAX_BUILD_MS;
 }
 
 function dispose(item: ActiveBuild): void {

@@ -13,6 +13,8 @@ import { callAIWithRetry } from "../aiRetry";
 import { extractJsonObject, stripCodeFences } from "../jsonExtract";
 import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../claudeCodeClient";
 import { communityRefsSection } from "../communityIndex";
+import { existingWorkflowRefsSection, matchExistingWorkflows } from "./existingWorkflowRefs";
+import { wantsImportExistingWorkflowNodes, spliceImportedWorkflowNodes, importConfirmMessage } from "./importExistingWorkflowNodes";
 import { checkRequirements, unmetFeedback, checklistText, isManualFileUploadRequested, hasCustomCodeFileReader } from "./requirementCheck";
 import { getSharedSecrets } from "../settingsStore";
 import type { Workflow, WorkflowNode, WorkflowEdge, ParamField } from "./types";
@@ -26,6 +28,8 @@ import { autoTrimUnrequested, trimSummary } from "./autoTrim";
 import { clipped } from "./contextBudget";
 import { buildWorkflowDataFlow } from "./dataFlow";
 import { storeSubflowResolver } from "./subflowResolver";
+import { suggestCronFromText } from "./scheduleSuggest";
+import { resolveModel, DEFAULT_PROVIDER_ID } from "../modelProviders";
 
 export type MessagePart =
   | { kind: "text"; text: string }
@@ -66,6 +70,13 @@ export interface SuggestedSchedule {
 export const BUILDER_MAX_OUTPUT_TOKENS = 12_000;
 
 /**
+ * 「還夠不夠再跑一輪 high 推理力度」的門檻。實測：本機 Claude Code 在 40-68k 字的建圖提示上，
+ * high 一輪要 400~530 秒(7~9 分鐘)，加上驗證與解析的餘裕抓 10 分鐘。低於這個數字才降檔——
+ * 高於它就完全尊重使用者在設定頁選的力度(見 callOnce 裡的說明)。
+ */
+const HIGH_EFFORT_ROUND_MS = 10 * 60_000;
+
+/**
  * 改既有圖通常只要回一小段增量 JSON；若共用 gateway 連這種請求都卡太久，繼續等不會讓答案
  * 更完整，只會讓使用者以為 AI 又在鬼打牆。從零建圖仍保留較長時間，避免大型流程被過早切斷。
  * 這不是總建圖上限：逾時後會立即改走備援模型／本機 Claude Code，並保留既有的驗證迴圈。
@@ -77,22 +88,60 @@ export function builderGatewayTimeoutMs(existingGraphEdit: boolean): number {
   return existingGraphEdit ? 30_000 : 45_000;
 }
 
-/** 排程在對話裡只講人話；無法對應簡易表單的進階排程也不把 cron 語法露給使用者。 */
-export function describeSuggestedSchedule(cron: string): string {
-  const parsed = parseCron(cron);
-  if (!parsed) return "自訂的固定時間";
-  const [hourText, minuteText] = parsed.time.split(":");
-  const hour = Number(hourText);
-  const minute = Number(minuteText);
+/**
+ * 某個模型在建圖時實際等多久。30/45 秒的短等待是為「共用免費 gateway 常整段沒回應」設計的——
+ * 快速失敗、把預算留給備援。但使用者自訂來源(例如地端模型)是他明確選擇並自己宣告了 timeoutMs
+ * 的：地端 26B 模型吐一整包建圖 JSON 本來就要幾分鐘，套 45 秒等於「自訂模型永遠沒得上場、
+ * 每次都被靜默切到備援」(2026-08-05 真實踩到：使用者問「用我的地端模型建得出來嗎」，實測它
+ * 45 秒就被切走，測到的全是備援模型)。主力是自訂來源就尊重它宣告的 timeoutMs；
+ * 備援模型(都在共用 gateway 上)維持短等待不變。
+ */
+function builderTimeoutForModel(targetModel: string, baseTimeoutMs: number, remainingBudgetMs: number): number {
+  let timeout = baseTimeoutMs;
+  try {
+    const { provider } = resolveModel(targetModel);
+    if (provider.id !== DEFAULT_PROVIDER_ID && provider.timeoutMs) timeout = Math.max(baseTimeoutMs, provider.timeoutMs);
+  } catch {
+    // 解析不到(未知代號等)就照預設——這裡只是挑等待時間，真正的錯誤讓呼叫本身去報
+  }
+  if (timeout === baseTimeoutMs || !Number.isFinite(remainingBudgetMs)) return timeout;
+  // 尊重自訂來源宣告的長等待，但**絕不能讓它吃掉整個建圖預算**：主力最多用掉剩餘預算的一半，
+  // 另一半留給備援鏈。沒有這道夾擠時，一台當掉的地端模型會等滿它宣告的 10 分鐘(上限 600 秒)，
+  // 備援還沒開始就被總預算切斷，正好重演這次要消滅的「幾乎完成的圖被整包丟棄」
+  // (code review 2026-08-06 抓到：這是短等待快速失敗那條設計被拿掉後留下的洞)。
+  return Math.min(timeout, Math.max(baseTimeoutMs, Math.floor(remainingBudgetMs / 2)));
+}
+
+const WEEKDAY_NAMES = ["日", "一", "二", "三", "四", "五", "六"];
+
+/** 把 24 小時制換成口語的「早上 9:00」「晚上 8:30」。 */
+function humanTime(hour: number, minute: number): string {
   const mm = String(minute).padStart(2, "0");
-  const time = hour === 0 ? `凌晨 12:${mm}`
+  return hour === 0 ? `凌晨 12:${mm}`
     : hour < 6 ? `凌晨 ${hour}:${mm}`
       : hour < 12 ? `早上 ${hour}:${mm}`
         : hour === 12 ? `中午 12:${mm}`
           : hour < 18 ? `下午 ${hour - 12}:${mm}`
             : `晚上 ${hour - 12}:${mm}`;
+}
+
+/** 排程在對話裡只講人話；無法對應簡易表單的進階排程也不把 cron 語法露給使用者。 */
+export function describeSuggestedSchedule(cron: string): string {
+  // 星期區間(週一到週五)排程器認得、但簡易表單的 parseCron 只認單一星期——不特別處理的話
+  // 使用者只會看到「自訂的固定時間」，等於平台自己推薦的排程講不出它是什麼(2026-08-06)。
+  const range = cron.trim().match(/^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+([0-6])-([0-6])$/);
+  if (range) {
+    const [, min, hr, from, to] = range;
+    return `每週${WEEKDAY_NAMES[Number(from)]}到週${WEEKDAY_NAMES[Number(to)]} ${humanTime(Number(hr), Number(min))}`;
+  }
+  const parsed = parseCron(cron);
+  if (!parsed) return "自訂的固定時間";
+  const [hourText, minuteText] = parsed.time.split(":");
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const time = humanTime(hour, minute);
   if (parsed.mode === "daily") return `每天 ${time}`;
-  if (parsed.mode === "weekly") return `每週${["日", "一", "二", "三", "四", "五", "六"][Number(parsed.weekday)] ?? ""} ${time}`;
+  if (parsed.mode === "weekly") return `每週${WEEKDAY_NAMES[Number(parsed.weekday)] ?? ""} ${time}`;
   if (parsed.mode === "monthly") return `每月 ${parsed.day} 號 ${time}`;
   if (parsed.mode === "bimonth") return `每兩個月 ${parsed.day} 號 ${time}`;
   if (parsed.mode === "quarter") return `每季首月 ${parsed.day} 號 ${time}`;
@@ -1334,7 +1383,7 @@ ${MAIL_RECIPE}
  * 走本機 Claude Code 時，不用 OpenAI 那種多模態 messages[] 陣列——Claude Code 是能讀檔案的 agent，
  * 把對話攤平成一段文字(標明「使用者:」/「AI:」)，圖片先存成暫存檔給它路徑用 Read 工具讀，比較符合它的操作方式。
  */
-async function callViaClaudeCode(system: string, history: ChatMessage[], signal?: AbortSignal, deadlineAt?: number): Promise<string> {
+async function callViaClaudeCode(system: string, history: ChatMessage[], signal?: AbortSignal, deadlineAt?: number, effortOverride?: "low" | "medium" | "high"): Promise<string> {
   const tmpDir = path.join(os.tmpdir(), `agenthub-cc-${randomUUID()}`);
   const imagePaths: string[] = [];
   const readPaths: string[] = [];
@@ -1380,7 +1429,9 @@ async function callViaClaudeCode(system: string, history: ChatMessage[], signal?
       signal,
       // 使用者可在設定頁調整推理力度(預設 high)：確定性檢查只攔得住寫進規則裡的情況，
       // 攔不住的情境還是要靠模型自己想清楚，不能靠寫死低推理力度換速度。
-      effort: getBuilderEffort(),
+      // effortOverride 是唯一例外(見 callOnce 的降檔說明)：修正輪/預算見底時，high 會被
+      // 整體 10 分鐘預算切斷、整包丟棄——「一次 medium 完成」嚴格優於「一次 high 被砍」。
+      effort: effortOverride ?? getBuilderEffort(),
       budgetMs: deadlineAt ? deadlineAt - Date.now() : undefined,
     });
   } finally {
@@ -1392,7 +1443,7 @@ export async function buildWorkflow(
   client: OpenAI,
   model: string,
   history: ChatMessage[],
-  currentGraph: { nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[]; requiredSecretsStatus?: { key: string; label: string; filled: boolean }[]; inheritedContext?: string; confirmedRules?: { text: string; confirmedAt: string }[] },
+  currentGraph: { id?: string; nodes: WorkflowNode[]; edges: WorkflowEdge[]; triggerParams?: ParamField[]; requiredSecretsStatus?: { key: string; label: string; filled: boolean }[]; inheritedContext?: string; confirmedRules?: { text: string; confirmedAt: string }[] },
   runtimeContext?: RuntimeContext,
   signal?: AbortSignal,
   /** 建圖進度回報(理解需求→畫圖→驗證→修正第N輪)——前端輪詢顯示,使用者才知道慢在哪一步 */
@@ -1414,6 +1465,26 @@ export async function buildWorkflow(
   const graphStr = compacted.text;
   const fullHistory = history;
   const latestUserText = lastUserMsg ? userRequirementText([lastUserMsg]) : "";
+  // 使用者明確要求「把既有流程的步驟複製過來、我自己接」時，直接從磁碟原始資料複製節點物件
+  // 回傳 phase:"ready"，完全不呼叫模型——比讓 AI 讀著使用者貼的 JSON 重新打字生成一份「看起來
+  // 一樣」的節點可靠，也不用使用者跑一趟「匯出 JSON 貼過來」。matchExistingWorkflows 對訊息裡
+  // 完整出現的流程名稱是確定性比對，不是模糊猜測，才敢直接跳過模型這一步(2026-08 使用者原話：
+  // 「他就直接反問是否是某某工作流，我點同意他就直接把他們匯入進來，我可以自己在裡面把節點
+  // 串接或分開等等操作」——下方預覽圖+「套用」/「捨棄」按鈕就是這個「反問→同意」的確認動作，
+  // 不用另外做一輪文字確認)。
+  const importMatches = matchExistingWorkflows(latestUserText, currentGraph.id);
+  if (importMatches.length > 0 && wantsImportExistingWorkflowNodes(latestUserText)) {
+    const spliced = spliceImportedWorkflowNodes(currentGraph, importMatches);
+    if (spliced.imported.some((x) => x.nodeCount > 0)) {
+      return {
+        phase: "ready",
+        message: importConfirmMessage(spliced.imported),
+        nodes: spliced.nodes,
+        edges: spliced.edges,
+        triggerParams: currentGraph.triggerParams,
+      };
+    }
+  }
   // 對話歷史是「理解脈絡」用，不是把所有舊命令永久疊加成不能推翻的契約。
   // 已有流程時，舊需求已經落在目前這張圖；使用者最新一句才是本次要改什麼的唯一來源。
   // 否則「先不要寫入」→「現在重做並輸出檔案」會被需求驗收誤判為互相衝突，AI 就算畫對也會被
@@ -1473,15 +1544,23 @@ export async function buildWorkflow(
   // 模型手上都有真實世界的結構藍圖可對照,不用憑空想步驟拆法。索引缺檔時回空字串,功能靜默停用。
   const lastUserText = latestUserText;
   const communityRefs = communityRefsSection(lastUserText);
+  // 使用者提到既有流程名稱時(例如「跑一次『某條既有流程』」)，把那條流程實際的步驟+
+  // (若跑過)真正的輸出欄位一起餵給模型，接 run-workflow 的下游欄位才有真憑實據可以對，
+  // 不用憑空猜——不管是從零建立還是修改既有圖都適用，所以放在 useEditPrompt 分支外面。
+  // excludeWorkflowId：這條流程正在被修改，不能把自己列成「可以呼叫」的既有流程參考——
+  // 不然使用者訊息剛好提到自己的名字時，AI 會被引導去加一個呼叫自己的 run-workflow 節點，
+  // 執行時立刻撞上「子流程不能呼叫自己」(2026-08 code review 抓到的真實 bug)。
+  const existingWorkflowRefs = existingWorkflowRefsSection(lastUserText, currentGraph.id);
   const useEditPrompt = currentGraph.nodes.length > 1 && isLikelyExistingGraphEdit(lastUserText) && !wantsFullGraphReplacement(lastUserText);
   const gatewayTimeoutMs = builderGatewayTimeoutMs(useEditPrompt);
   const fullSystemPrompt = (useEditPrompt
     ? existingGraphEditSystemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph, currentGraph.inheritedContext, currentGraph.confirmedRules)
     : systemPrompt(graphStr, runtimeContext, currentGraph.triggerParams, currentGraph, currentGraph.inheritedContext, currentGraph.confirmedRules) + communityRefs + clarifyCapNote + immediateBuildNote
-  ) + secretsStatusSection(currentGraph.requiredSecretsStatus);
+  ) + existingWorkflowRefs + secretsStatusSection(currentGraph.requiredSecretsStatus);
   console.info("[workflow-builder] context", {
     systemChars: fullSystemPrompt.length,
     communityChars: useEditPrompt ? 0 : communityRefs.length,
+    existingWorkflowRefsChars: existingWorkflowRefs.length,
     mode: useEditPrompt ? "existing-graph-edit" : "full-builder",
     gatewayTimeoutMs,
     historyChars: inputStats.textChars + inputStats.fileChars,
@@ -1569,9 +1648,21 @@ export async function buildWorkflow(
   const callOnce = async (extra: OpenAI.Chat.ChatCompletionMessageParam[], extraCC: ChatMessage[]): Promise<string> => {
     // 用「目前這一份」系統提示，不是最初那份：上面若因為模型吞不下而換成精簡版，本機備援也要拿
     // 同一份，否則使用者收到的「哪幾步沒看到」會跟實際情況對不上。
-    const claudeCodeFallback = () =>
-      callViaClaudeCode(String(messages[0].content ?? fullSystemPrompt), [...history, ...extraCC], signal, deadlineAt);
-    if (isClaudeCodeModel(model)) return callAIWithRetry(claudeCodeFallback, { label: "建立流程圖(Claude Code)", signal, maxAttempts: 2 });
+    //
+    // 推理力度降檔(2026-08-05 兩個真實案例定下，診斷編號 fb2b1d95/81985119；2026-08-06 code
+    // review 收緊)：high 力度在這種 40-68k 字的建圖提示上單次要 7~9 分鐘(實測 400~530 秒)。
+    // **降檔的唯一正當理由是「剩下的時間不夠再跑一輪 high，硬跑必然被總預算切斷、整包丟棄」——
+    // 不是「因為這是修正輪」、也不是「因為現在是備援角色」**。AGENTS.md 拍板「不能靠寫死低推理
+    // 力度換速度」，所以這裡只看剩餘預算：建圖預算已拉到 20 分鐘，第一輪跑完通常還容得下一輪
+    // high，那就完全尊重使用者設定；真的不夠才降到 medium(實測 medium 處理有精確回饋的定向修正
+    // 30~140 秒完成)——「完成的 medium」嚴格優於「被砍的 high」。主力與備援共用同一套判斷即可：
+    // 備援上場時預算已被主力消耗，剩餘時間自然會反映出來，不需要為角色另設一條規則。
+    const remainingMs = deadlineAt ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY;
+    const effortOverride = getBuilderEffort() === "high" && remainingMs < HIGH_EFFORT_ROUND_MS ? "medium" as const : undefined;
+    const claudeCodeCall = () =>
+      callViaClaudeCode(String(messages[0].content ?? fullSystemPrompt), [...history, ...extraCC], signal, deadlineAt, effortOverride);
+    const claudeCodeFallback = claudeCodeCall;
+    if (isClaudeCodeModel(model)) return callAIWithRetry(claudeCodeCall, { label: "建立流程圖(Claude Code)", signal, maxAttempts: 2 });
     const claudeAvailable = await isClaudeCodeAvailable();
     // 「這包太大」不是暫時性故障：重試同一包、甚至換另一個模型，結果通常還是同一個。
     // 在這裡就地縮小重打一次，不要讓它一路掉進換模型/換本機備援的通用重試鏈裡白等。
@@ -1584,7 +1675,7 @@ export async function buildWorkflow(
       }
     };
     const requestGatewayModel = (targetModel: string) =>
-      client.chat.completions.create({ model: targetModel, messages: [...messages, ...extra], max_tokens: BUILDER_MAX_OUTPUT_TOKENS }, { signal, timeout: gatewayTimeoutMs }).then((res) => {
+      client.chat.completions.create({ model: targetModel, messages: [...messages, ...extra], max_tokens: BUILDER_MAX_OUTPUT_TOKENS }, { signal, timeout: builderTimeoutForModel(targetModel, gatewayTimeoutMs, deadlineAt ? deadlineAt - Date.now() : Number.POSITIVE_INFINITY) }).then((res) => {
         const choice = res.choices[0];
         const content = choice?.message?.content ?? "";
         console.info("[workflow-builder] model-response", {
@@ -2016,7 +2107,28 @@ export async function buildWorkflow(
               `請重新輸出一張「一開始就不含那些步驟」的完整流程圖，並把分支出口接到正確的下一步。`,
             ];
           } else {
-          const unmet = reqItems.filter((i) => !i.met && !i.needsUser);
+          let unmet = reqItems.filter((i) => !i.met && !i.needsUser);
+          // 唯一缺口是「排程」時走確定性補齊，不再燒整輪模型重出。真實踩過(診斷編號 fb2b1d95)：
+          // 第一輪模型呼叫花 8 分鐘產出通過其他所有驗收的完整圖，只缺 schedule.cron；餵回模型
+          // 要求整包重出時建圖預算只剩 45 秒被切斷 → 整張好圖被丟棄。「每週/每天/每月」是使用者
+          // 自己講的，從原話確定性解析比再燒一輪模型可靠，也永遠不會被預算切斷；假設的部分
+          // (時間/星期幾)由 scheduleAssumedNote 在回覆裡明講，可到排程頁隨時改。
+          let scheduleAssumedNote = "";
+          if (unmet.length > 0 && unmet.every((i) => i.key === "schedule") && !schedule?.cron) {
+            const suggestedCron = suggestCronFromText(requirementText);
+            if (suggestedCron) {
+              schedule = { cron: suggestedCron.cron };
+              scheduleAssumedNote = suggestedCron.assumed.length
+                ? `\n\n⏰ 你有說要定時自動跑，但沒講${suggestedCron.assumed.join("和")}——先照這樣設定，套用後可到「排程」頁隨時調整。`
+                : "";
+              reqItems = checkRequirements(
+                requirementText,
+                { nodes, edges, triggerParams, schedule, onFailureWorkflow },
+                { resolveSubflow: storeSubflowResolver },
+              );
+              unmet = reqItems.filter((i) => !i.met && !i.needsUser);
+            }
+          }
           if (unmet.length > 0) {
             // 「還缺需求」絕不是可交付的 ready。以前修正輪數用完後會掉進下面的
             // ready 分支，讓畫面宣稱流程已建好，實際卻把「每週手動上傳」做成沒有人
@@ -2040,7 +2152,7 @@ export async function buildWorkflow(
               const periodNote = triggerParams?.some((p) => p.key === "periodUnit")
                 ? "\n\n📅 這條流程可以在每次執行前選擇要抓哪一期的資料(執行時會跳出選擇表單)。"
                 : "";
-              const scheduleNote = schedule ? `\n\n⏰ 套用流程時會一併建立排程（${describeSuggestedSchedule(schedule.cron)}，台北時間）；草稿不會背景執行，設為正式後才生效。` : "";
+              const scheduleNote = schedule ? `\n\n⏰ 套用流程時會一併建立排程（${describeSuggestedSchedule(schedule.cron)}，台北時間）；草稿不會背景執行，設為正式後才生效。${scheduleAssumedNote}` : "";
               // 觸發全自動套用(GPT 體檢 #5):白話提到 webhook/捷徑/表單 → 套用時自動啟用並回網址,
               // 不再叫使用者自己進 ⚡ 面板按啟用
               const autoWebhook = wantsAutoWebhook(requirementText);

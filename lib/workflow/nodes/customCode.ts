@@ -91,14 +91,16 @@ export const customCodeNode: NodeDefinition = {
         result = sandboxResult.value;
       } catch (err) {
         if (err instanceof PermanentError) throw err;
-        throw new PermanentError(`自訂程式碼語法或安全執行錯誤：${err instanceof Error ? err.message : String(err)}`);
+        // 這段程式碼是 AI 自動寫的、使用者從不會看(見上方檔案註解)——訊息白話在前，
+        // 讓「讓 AI 修」看得懂該修什麼是次要目的,原句留在後面給修復迴圈當燃料(2026-08 UI/UX 審計 G2)。
+        throw new PermanentError(`這一步的自訂程式碼執行時出錯了，需要讓 AI 重新產生。（技術細節：${err instanceof Error ? err.message : String(err)}）`);
       }
     } else {
       let fn: (ctx: unknown) => Promise<unknown>;
       try {
         fn = new AsyncFunction("ctx", code);
       } catch (err) {
-        throw new PermanentError(`自訂程式碼語法錯誤：${err instanceof Error ? err.message : String(err)}`);
+        throw new PermanentError(`這一步的自訂程式碼有語法問題，需要讓 AI 重新產生。（技術細節：${err instanceof Error ? err.message : String(err)}）`);
       }
       result = await fn(ctx);
     }
@@ -107,7 +109,7 @@ export const customCodeNode: NodeDefinition = {
     // 老實報錯讓修復迴圈有具體燃料,不准靜默把資料弄丟。
     if (Array.isArray(result)) {
       throw new PermanentError(
-        "自訂程式碼回傳了陣列——請改成回傳物件並把陣列放進具名欄位,例如 return { ...ctx.input, 結果清單: 陣列 }(下游才能用 {{結果清單}} 引用)",
+        "這一步算出來的資料格式不對，需要讓 AI 重新產生。（技術細節：自訂程式碼回傳了陣列，應改成回傳物件並把陣列放進具名欄位，例如 return { ...ctx.input, 結果清單: 陣列 }，下游才能用 {{結果清單}} 引用）",
       );
     }
     const output = result && typeof result === "object" ? (result as Record<string, unknown>) : { result };

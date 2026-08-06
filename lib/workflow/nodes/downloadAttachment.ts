@@ -43,8 +43,8 @@ export const downloadAttachmentNode: NodeDefinition = {
   icon: "📥",
   configSchema: [
     { key: "nameContains", label: "附件檔名關鍵字(留空=抓第一個附件)", type: "text", default: "" },
-    { key: "downloadLinkSelector", label: "下載連結選擇器", type: "text", default: 'a[href*="/cgi-bin/downfile"], a[href*="download" i], a[href$=".xlsx"], a[href$=".csv"], a[href$=".pdf"]' },
-    { key: "attachmentBlockSelector", label: "附件區塊選擇器", type: "text", default: ".AttBlock, [class*='attach' i], [data-filename]" },
+    { key: "downloadLinkSelector", label: "下載連結選擇器", type: "text", default: 'a[href*="/cgi-bin/downfile"], a[href*="download" i], a[href$=".xlsx"], a[href$=".csv"], a[href$=".pdf"]', advanced: true },
+    { key: "attachmentBlockSelector", label: "附件區塊選擇器", type: "text", default: ".AttBlock, [class*='attach' i], [data-filename]", advanced: true },
   ],
   outputs: "attachmentPath(下載的附件本機路徑), filename(附件檔名)",
   retryable: true,

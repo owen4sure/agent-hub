@@ -51,6 +51,38 @@ export function extractSheetHints(code: string): { sheets: string[]; tabs: strin
 }
 
 /**
+ * 從 custom-code 產生的程式碼裡挖出「實際拿來比對的具體業務關鍵字」(哪一頁的標題文字、
+ * 哪個文字方塊、哪個分頁名稱)——真實踩過的落差：使用者反映「替換投影片圖表」這種節點的
+ * intent 只寫得出「找目標頁與最大 image 元素」這種泛稱，實際「用哪些文字判斷是哪一頁」
+ * 只存在於已經產生的程式碼裡，intent/label 都看不到，使用者原話「不然數量一多起來根本
+ * 不知道幹了什麼了」。
+ * 只抓「明確拿來當比對條件」的字面值(.includes()/===/宣告成全大寫常數)，不是任意字串——
+ * 直接抓全部字串字面值會把 log/錯誤訊息用字串接變數組出來的半句話也混進來(例如
+ * `'簡報共 ' + n + ' 頁'` 只抓得到無意義的「簡報共」)，比沒有說明更誤導人。只留含中文的
+ * 字面值：純技術/英文命名不是使用者要看的東西，且此時多半是網址/API 欄位名而不是業務關鍵字。
+ */
+export function extractCodeTargets(code: string): string[] {
+  if (!code) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const patterns = [
+    /\.includes\(\s*['"]([^'"]{2,30})['"]/g,
+    /===\s*['"]([^'"]{2,30})['"]/g,
+    /['"]([^'"]{2,30})['"]\s*===/g,
+    /\b(?:const|let)\s+[A-Z_][A-Z0-9_]*\s*=\s*['"]([^'"]{2,30})['"]/g,
+  ];
+  for (const re of patterns) {
+    for (const m of code.matchAll(re)) {
+      const s = m[1].trim().replace(/[：:]+$/, "");
+      if (!s || !/[一-鿿]/.test(s) || seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+    }
+  }
+  return out.slice(0, 8);
+}
+
+/**
  * 把一個節點的實際設定翻成一句白話。集中在這裡(而不是散在 11 個節點檔)，
  * 讓維護者一眼看完整套說明用語，也保證每個節點都有解釋。
  */
@@ -245,13 +277,30 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
     }
 
     case "custom-code": {
-      // intent 與 code 是給產碼器的執行規格，常含 rows/headers、欄位代號、throw、輸出名稱等。
-      // 即使經過 plainLanguage 仍會變成又長又難懂的半技術說明；使用者只需要知道目的、是否
-      // 不猜資料，以及可直接用對話修改。實際資料來源／寫入位置由各自的讀寫節點負責顯示。
-      const purpose = nodeSummary("custom-code", c);
+      // intent 與 code 是給產碼器的執行規格，常含 rows/headers、欄位代號、throw、輸出名稱等，
+      // 即使經過 plainLanguage 仍會變成又長又難懂的半技術說明(實測: 抓出「YYYY」「MM」這種
+      // 格式碎片當成資料欄位)，不能直接顯示。但改用 nodeSummary() 的 4 種關鍵字分類一樣有問題:
+      // 分類太粗，同一條真實流程裡「判斷這次要更新哪一週」「開啟PPTX簡報並更新圖表」「執行週期
+      // 搬移歸檔並寫入新頭」等十幾個完全不同的步驟，只要 intent 裡提到「日期」兩個字，全部塌成
+      // 同一句「整理這次需要的日期與期間」——使用者說「看說明都還是不能確認是哪個」的真因就是這裡。
+      // 建圖時 AI 給每個 custom-code 節點取的 label 本來就是具體、白話、逐步不同的業務描述(標籤本身
+      // 就是最可靠的「這一步做什麼」來源，不必再從 intent 猜)；只有還沒被取過名字(仍是節點型別的
+      // 通用預設標籤)時才退回粗略分類。
+      const def = getNodeDef("custom-code");
+      const genericLabel = def?.label ?? "";
+      const labelPurpose = node.label.trim() && node.label.trim() !== genericLabel ? plainLanguage(node.label.trim(), {}) : "";
+      const purpose = labelPurpose || nodeSummary("custom-code", c);
+      // label 只講得出「替換投影片圖表」這種類別，講不出「換的是哪一頁」——那個具體到能
+      // 分辨「數量一多起來」時彼此差在哪的關鍵字，只存在於已經產生的程式碼裡(見上面
+      // extractCodeTargets 的說明)，這裡把它們也列出來，不再只靠 label 一句話交代整個步驟。
+      const codeTargets = extractCodeTargets(str(c, "code"));
+      const targetsPhrase = codeTargets.length ? `(程式碼裡會核對／找出：「${codeTargets.join("」「")}」)` : "";
       return {
-        text: `${purpose}。這一步會依已確認的規則處理資料；資料不完整或對不起來時會停下來提醒，不會自行猜測。想改規則時，直接在對話說你要改成什麼即可。`,
-        settings: [["這一步的目的", purpose]],
+        text: `${purpose}${targetsPhrase}。這一步會依已確認的規則處理資料；資料不完整或對不起來時會停下來提醒，不會自行猜測。想改規則時，直接在對話說你要改成什麼即可。`,
+        settings: [
+          ["這一步的目的", purpose],
+          ...(codeTargets.length ? ([["程式碼裡比對用的關鍵字", codeTargets.join("、")]] as [string, string][]) : []),
+        ],
       };
     }
 
@@ -375,9 +424,97 @@ function explainNode(node: WorkflowNode, h: (v: string) => string): { text: stri
     }
 
     case "slack-notify": {
+      const message = hstr("message", "（未設定訊息內容）");
+      const shown = message.length > 80 ? `${message.slice(0, 80)}…` : message;
       return {
-        text: "把訊息發到 Slack 頻道。第一次使用時，到設定頁的「通知串接」依畫面指引完成連接，並可先發一則測試訊息。",
-        settings: [],
+        text: `把訊息傳到你在設定頁串接的 Slack 頻道：「${shown}」。`,
+        settings: [["訊息內容", message]],
+      };
+    }
+
+    // 以下 7 種節點型別之前完全沒有對應的 case，全部落到最後的 default，只顯示同一種節點型別
+    // 共用的靜態說明(NodeDefinition.description)，看不出「這一個步驟實際換了哪一頁、傳了什麼
+    // 訊息、寄給誰」——使用者原話：「像是替換投影片那種，我就不知道是換了哪些啊，我想要看到」，
+    // 查出來就是這個 default 缺口。跟前面 custom-code 是同一類問題，只是這次是「完全沒寫」不是
+    // 「寫得太粗」。
+
+    case "telegram-notify": {
+      const message = hstr("message", "（未設定訊息內容）");
+      const shown = message.length > 80 ? `${message.slice(0, 80)}…` : message;
+      return {
+        text: `把訊息傳到你在設定頁串接的 Telegram：「${shown}」。`,
+        settings: [["訊息內容", message]],
+      };
+    }
+
+    case "line-notify": {
+      const message = hstr("message", "（未設定訊息內容）");
+      const shown = message.length > 80 ? `${message.slice(0, 80)}…` : message;
+      const target = str(c, "target").trim();
+      return {
+        text: `把訊息傳到${target ? `「${h(target)}」` : "你在設定頁綁定的 LINE"}：「${shown}」。`,
+        settings: [["訊息內容", message], ["傳送對象", target ? h(target) : "（設定頁的 User ID）"]],
+      };
+    }
+
+    case "webmail-send": {
+      const to = hstr("to").trim();
+      const cc = hstr("cc").trim();
+      const subject = hstr("subject", "（未設主旨）");
+      const attach = hstr("attachPaths").trim();
+      const sig = str(c, "signature").trim();
+      return {
+        text: `用網頁信箱寄一封主旨「${subject}」的信給「${to || "（未填收件人）"}」${cc ? `，副本給「${cc}」` : ""}${attach ? `，附上「${attach}」` : ""}${sig ? `，附加簽名檔「${sig}」` : ""}。登入資料要先在設定頁填好。`,
+        settings: [
+          ["收件人", to || "（未填）"],
+          ...(cc ? ([["副本", cc]] as [string, string][]) : []),
+          ["主旨", subject],
+          ...(attach ? ([["附件", attach]] as [string, string][]) : []),
+        ],
+      };
+    }
+
+    case "google-slides-replace-image": {
+      const page = hstr("pageTitleContains", "（未指定頁面）");
+      const presentation = hstr("presentationUrl", "（未指定簡報）");
+      const image = hstr("imagePath", "上一步產生的圖片");
+      return {
+        text: `找到簡報裡標題含「${page}」的那一頁(必須剛好只有一張圖片，避免換錯)，把上面的圖換成「${image}」。`,
+        settings: [["要更新的簡報", presentation], ["用標題找哪一頁", page], ["新圖片來源", image]],
+      };
+    }
+
+    case "google-slides-refresh": {
+      const presentation = hstr("presentationUrl", "（未指定簡報）");
+      const spreadsheet = hstr("spreadsheetUrl", "（未指定試算表）");
+      const page = str(c, "pageTitleContains").trim();
+      return {
+        text: `直接更新「${presentation}」這份簡報裡、連到「${spreadsheet}」的圖表${page ? `(只更新標題含「${h(page)}」的那一頁)` : ""}。不用開瀏覽器找按鈕。`,
+        settings: [
+          ["要更新的簡報", presentation],
+          ["圖表資料來源試算表", spreadsheet],
+          ...(page ? ([["只更新哪一頁", h(page)]] as [string, string][]) : []),
+        ],
+      };
+    }
+
+    case "google-slides-create": {
+      const rawTitle = str(c, "title");
+      const templated = /\{\{\s*[^}]+\s*\}\}/.test(rawTitle);
+      const title = templated ? "依前面步驟的資料命名" : (rawTitle.trim() || "（未命名，執行時會用預設檔名）");
+      return {
+        text: `建立一份新的 Google 簡報，檔名「${title}」，內容依前一步整理好的投影片資料自動產生。`,
+        settings: [["新簡報檔名", title]],
+      };
+    }
+
+    case "excel-range-image": {
+      const input = hstr("inputPath", "上游的檔案");
+      const sheet = str(c, "sheet").trim();
+      const range = str(c, "range").trim() || "（未指定範圍）";
+      return {
+        text: `打開「${input}」${sheet ? `的「${h(sheet)}」分頁` : ""}，把「${range}」這個範圍畫成一張圖片，給後面的步驟用(例如換到簡報上)。`,
+        settings: [["來源檔案", input], ...(sheet ? ([["分頁", h(sheet)]] as [string, string][]) : []), ["範圍", range]],
       };
     }
 

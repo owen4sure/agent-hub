@@ -5,7 +5,7 @@ import { getWorkflowSecrets } from "@/lib/settingsStore";
 import { createSchedule, updateSchedule, isValidCron } from "@/lib/scheduler";
 import { clearHttpReadOnlyApprovals } from "@/lib/workflow/httpReadOnlyApproval";
 import { clearSafetyContract } from "@/lib/workflow/safetyContract";
-import { DEFAULT_MODEL } from "@/lib/models";
+import { defaultModelRef } from "@/lib/modelProviders";
 import { lintGraph } from "@/lib/workflow/graphLint";
 import type { Workflow, WorkflowNode, WorkflowEdge, ParamField } from "@/lib/workflow/types";
 import { importPortableScenarios } from "@/lib/workflow/scenarioTests";
@@ -154,7 +154,7 @@ export async function POST(req: Request) {
     builtin: false,
     description: body.description !== undefined ? String(body.description).slice(0, 2_000) : "",
     longDescription: body.longDescription !== undefined ? String(body.longDescription).slice(0, 20_000) : undefined,
-    defaultModel: typeof body.defaultModel === "string" && body.defaultModel ? body.defaultModel.slice(0, 160) : DEFAULT_MODEL,
+    defaultModel: typeof body.defaultModel === "string" && body.defaultModel ? body.defaultModel.slice(0, 160) : defaultModelRef(),
     requiresSecrets: requiresSecrets as Workflow["requiresSecrets"],
     triggerParams: triggerParams as ParamField[],
     importedUntrusted: true,

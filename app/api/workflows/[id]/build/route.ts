@@ -215,7 +215,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       const latestForTrust = getWorkflow(id);
       if (latestForTrust?.importedUntrusted && body.confirmImported !== true) {
         return NextResponse.json({
-          error: "這是外部匯入的流程，安全試跑前需要確認你信任來源。",
+          error: "這是外部匯入的流程，演練前需要確認你信任來源。",
           code: "IMPORTED_WORKFLOW_CONFIRMATION_REQUIRED",
         }, { status: 409 });
       }
@@ -231,7 +231,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       }
       const previewBuild = beginBuild(id, req.signal);
       buildSignal = previewBuild.signal;
-      setBuildStage(id, "🔍 安全試跑中：只讀資料與計算，不會寫入…", previewBuild.token);
+      setBuildStage(id, "🔍 演練中：只讀資料與計算，不會寫入…", previewBuild.token);
       try {
         previewInput.params = body.params ?? {};
         const preview = await runWorkflowPreview(id, previewInput, previewBuild.signal);
@@ -520,6 +520,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       result = await buildWorkflow(
         client, model, scrubbedHistory,
         {
+          id,
           nodes: cur.nodes,
           edges: cur.edges,
           triggerParams: cur.triggerParams,
@@ -831,11 +832,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       // 要等下次執行拿到錯的產出才發現。比對的是**真正寫進磁碟的內容**，不是模型的說明文字
       // (拿說明來比對＝讓它自己批改自己，它說有做就算有做，這層防護等於不存在)。
       // 比對範圍(只算這次真的被動到的節點、連型別與名稱一起算)的理由見 appliedTextForCoverage。
+      // 「這次被動到的節點」= 設定修改的節點 + 結構修改「新增」的節點——後者以前漏算，
+      // 使用者用一句話加功能(全部落在新節點的 config 裡)時，明明每個點名的值都落地了，
+      // 卻被警告「完全沒有出現」(真實踩過：A3:G16 就寫在新節點的 range 裡，照樣被點名缺席)。
+      const structureAddedIds = structureApplied?.ok
+        ? (result.structure?.addNodes ?? []).map((node) => node.id).filter((nid): nid is string => typeof nid === "string")
+        : [];
       const appliedText = rolledBackAfterFailedTest
         ? ""
         : appliedTextForCoverage(
           getWorkflow(id)?.nodes ?? [],
-          new Set(applied.map((edit) => edit.nodeId)),
+          new Set([...applied.map((edit) => edit.nodeId), ...structureAddedIds]),
           triggerParamsChanged ? getWorkflow(id)?.triggerParams ?? [] : undefined,
         );
       const coverageGaps = rolledBackAfterFailedTest ? [] : findCoverageGaps(rawLastUserCommandText, appliedText);

@@ -25,6 +25,7 @@ import { RecordActionCard } from "./RecordActionCard";
 import { OutputFolderPanel } from "./OutputFolderPanel";
 import { SlidesImageScriptCard } from "./SlidesImageScriptCard";
 import { WorkflowSettingsPanel } from "./WorkflowSettingsPanel";
+import { ManualLoginDialog } from "./ManualLoginDialog";
 import { setupNeedsFor } from "@/lib/workflow/setupNeeds";
 import {
   useWFChat, sendChatToAI, stopChatToAI, stopVerification, startAutoTest, stopAutoTest,
@@ -129,7 +130,7 @@ export default function WorkflowPage() {
   // 每按一次測試就跳一個瀏覽器把焦點搶走(使用者:「我電腦螢幕一直被拉走」)。想看畫面自己勾。
   const [watchPartial, setWatchPartial] = useState(false);
   // 部分執行預設「真的執行到底」(含寫入/發送)——使用者拍板:「圈起來執行的，那就執行到底，
-  // 除非我有說只測試不更改任何資料」。勾了這個才走只讀安全排練(不寫入/不發送/不動外部系統)。
+  // 除非我有說只測試不更改任何資料」。勾了這個才走只讀演練(不寫入/不發送/不動外部系統)。
   const [partialTestOnly, setPartialTestOnly] = useState(false);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [activeRunStatus, setActiveRunStatus] = useState<string | null>(null);
@@ -279,13 +280,18 @@ export default function WorkflowPage() {
   const urlReadAbortRef = useRef<AbortController | null>(null);
   const [starting, setStarting] = useState(false); // 按「▶ 執行」到真正開跑之間的空窗，用來 disable 按鈕防重複點
   const [dragOver, setDragOver] = useState(false);
-  const [showHistory, setShowHistory] = useState(false);
-  const [showSchedule, setShowSchedule] = useState(false);
-  const [showExplain, setShowExplain] = useState(false);
-  const [showDataFlow, setShowDataFlow] = useState(false);
-  const [showEvidence, setShowEvidence] = useState(false);
-  const [showN8nMigration, setShowN8nMigration] = useState(false);
-  const [showVersions, setShowVersions] = useState(false);
+  // 右側同一塊空間互斥切換的 7 種面板，單一狀態取代原本 7 個各自 useState 的 showXxx——
+  // 之前每顆按鈕/每個 onClose 都要自己列舉「順便清掉其他 6 個」，漏列一個就會在關掉目前面板後
+  // 冒出使用者沒點過的舊面板(真實踩過的 bug，F5)。只有一個變數，就不存在「忘記清誰」這件事。
+  type SidePanelKind = "history" | "schedule" | "explain" | "dataFlow" | "evidence" | "n8nMigration" | "versions";
+  const [activePanel, setActivePanel] = useState<SidePanelKind | null>(null);
+  const showHistory = activePanel === "history";
+  const showSchedule = activePanel === "schedule";
+  const showExplain = activePanel === "explain";
+  const showDataFlow = activePanel === "dataFlow";
+  const showEvidence = activePanel === "evidence";
+  const showN8nMigration = activePanel === "n8nMigration";
+  const showVersions = activePanel === "versions";
   const [showRunForm, setShowRunForm] = useState(false);
   const [executionPlan, setExecutionPlan] = useState<{ plan: ExecutionPlanData; missingSettings: { key: string; label: string; type: string }[] } | null>(null);
   const [pendingPlanRun, setPendingPlanRun] = useState<{ params: Record<string, string>; headed?: boolean; partial?: { startAtNodeId?: string; onlyNodeIds?: string[] }; graphFingerprint: string } | null>(null);
@@ -297,12 +303,48 @@ export default function WorkflowPage() {
       window.history.replaceState(null, "", window.location.pathname);
     } else if (query.get("history")) {
       const runId = query.get("history")!;
-      queueMicrotask(() => { setFocusedHistoryRun(runId); setShowHistory(true); });
+      queueMicrotask(() => { setFocusedHistoryRun(runId); setActivePanel("history"); });
       window.history.replaceState(null, "", window.location.pathname);
     }
   }, [id]);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [showRecorder, setShowRecorder] = useState(false);
+  const [showManualLoginDialog, setShowManualLoginDialog] = useState(false);
+  const [manualLoginWatching, setManualLoginWatching] = useState(false);
+  // 使用者以前反應「怎麼知道已經完成了？平台上都沒顯示成功或沒成功」——手動登入視窗關掉後完全沒有
+  // 回饋。開視窗期間輪詢「是否還開著」，一偵測到從開變關，後端這時已經(或即將)自動驗證這次登入是否
+  // 真的生效(manualLogin.ts 的 runVerification)，這裡把結果用 toast 講出來；剛關閉那一瞬間驗證
+  // 可能還沒跑完，就繼續下一輪(最多等 20 輪＝約 40 秒)再放棄。
+  // 這個 hook 要放在下面「if (!wf) return …」這條早退路徑之前——放在它後面會變成條件式呼叫
+  // useEffect，違反 Hooks 規則(react-hooks/rules-of-hooks，第一次寫的時候放錯位置被 lint 抓到)。
+  useEffect(() => {
+    if (!manualLoginWatching) return;
+    let cancelled = false;
+    let sawOpen = false;
+    let attemptsAfterClose = 0;
+    async function poll() {
+      try {
+        const res = await fetch(`/api/workflows/${id}/manual-login`);
+        const data = (await res.json().catch(() => ({}))) as { open?: boolean; verification?: { verified: boolean; detail: string } | null };
+        if (cancelled) return;
+        if (data.open) { sawOpen = true; return; }
+        if (!sawOpen) return; // 還沒真的看過視窗開著，先不要誤判(避免請求還沒送達就判斷成已關閉)
+        if (data.verification) {
+          flashToast(data.verification.verified ? `✅ ${data.verification.detail}` : `⚠️ ${data.verification.detail}`);
+          setManualLoginWatching(false);
+          return;
+        }
+        attemptsAfterClose++;
+        if (attemptsAfterClose >= 20) {
+          flashToast("視窗已關閉，但驗證一直沒有結果——可以到「⋯」再打開一次確認登入狀態");
+          setManualLoginWatching(false);
+        }
+      } catch { /* 下一輪再試 */ }
+    }
+    poll();
+    const iv = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [manualLoginWatching, id, flashToast]);
   const [showSlidesImageScript, setShowSlidesImageScript] = useState(false);
   const [showWorkflowSettings, setShowWorkflowSettings] = useState(false);
   const [setupBannerDismissed, setSetupBannerDismissed] = useState(false);
@@ -316,7 +358,8 @@ export default function WorkflowPage() {
   // 的模型代號完全不在這份清單裡——固定下拉會逼使用者只能選一個對自己服務不存在的模型(踩過的
   // 開源可攜性缺口)。預設仍是下拉(對用內建免費服務的人最省事)，但可以切換成文字輸入自訂代號；
   // 目前存的 model 若本來就不在清單裡(表示已經自訂過)，直接視覺上以自訂模式呈現。
-  const [extraModels, setExtraModels] = useState<{ ref: string; model: string; providerLabel: string }[]>([]);
+  const [extraModels, setExtraModels] = useState<{ ref: string; model: string; providerLabel: string; local?: boolean }[]>([]);
+  const [builtinUsableModels, setBuiltinUsableModels] = useState<string[] | null>(null);
   const [sidePanelWidth, setSidePanelWidth] = useState(440);
   const [panelWidthReady, setPanelWidthReady] = useState(false);
   const [chainStepIndex, setChainStepIndex] = useState(0);
@@ -499,6 +542,9 @@ export default function WorkflowPage() {
     setNodeAttachParts([]);
     setNodeInstruction("");
     setSelectedNode(nodeId);
+    // 選節點必為單一焦點：任何其他面板都要跟著收起，不然關掉節點面板時，
+    // 先前沒被個別按鈕清乾淨的面板會忽然冒出來(F5)——單一 activePanel 讓這裡一行就夠。
+    if (nodeId) setActivePanel(null);
   }, []);
   const processFilesForNode = useCallback(async (files: File[]) => {
     const { parts: newParts, truncatedCount } = await extractParts(files);
@@ -567,7 +613,7 @@ export default function WorkflowPage() {
       resolve.then((files) => {
         if (!files.length) return;
         if (selectedNode) processFilesForNode(files);
-        else { selectNode(null); setShowHistory(false); processFiles(files); }
+        else { selectNode(null); setActivePanel(null); processFiles(files); }
       });
     };
     const onDragLeave = (e: DragEvent) => { if (!e.relatedTarget) setDragOver(false); };
@@ -578,7 +624,7 @@ export default function WorkflowPage() {
         .filter((f): f is File => !!f);
       if (!imgs.length) return;
       if (selectedNode) processFilesForNode(imgs);
-      else { selectNode(null); setShowHistory(false); processFiles(imgs); }
+      else { selectNode(null); setActivePanel(null); processFiles(imgs); }
     };
     window.addEventListener("dragover", onDragOver);
     window.addEventListener("drop", onDrop);
@@ -634,7 +680,11 @@ export default function WorkflowPage() {
     void (async () => {
       try {
         const d = await (await fetch("/api/model-providers")).json();
-        setExtraModels((d.choices ?? []).filter((c: { providerId: string }) => c.providerId !== "default"));
+        const all = (d.choices ?? []) as { ref: string; model: string; providerId: string; providerLabel: string; usable: boolean; local?: boolean }[];
+        setExtraModels(all.filter((c) => c.providerId !== "default"));
+        // 內建那組只列「現在真的叫得動的」。全新安裝沒填 Base URL/金鑰時這裡會是空的——
+        // 列一堆使用者根本沒有的模型代號，只會讓他選了才發現不能用。
+        setBuiltinUsableModels(all.filter((c) => c.providerId === "default" && c.usable).map((c) => c.model));
       } catch { /* 沒接自訂來源時就是空的，不算錯誤 */ }
     })();
   }, []);
@@ -1035,7 +1085,7 @@ export default function WorkflowPage() {
         const cur = wfRef.current;
         if (cur) {
           const names = cur.nodes.filter((n) => removed.includes(n.id)).map((n) => n.label);
-          if (!window.confirm(`確定要刪除這 ${removed.length} 個節點嗎？(${names.join("、")})`)) {
+          if (!window.confirm(`確定要刪除這 ${removed.length} 個步驟嗎？(${names.join("、")})`)) {
             load(); // 取消刪除：從伺服器重載，把節點還原回來
             return;
           }
@@ -1305,7 +1355,7 @@ export default function WorkflowPage() {
     return (
       <div className="flex flex-col items-center justify-center h-screen gap-3 text-center px-6">
         <div className="text-4xl">🔍</div>
-        <p className="font-medium">找不到這個 workflow</p>
+        <p className="font-medium">找不到這個流程</p>
         <p className="text-sm muted">它可能已被刪除，或網址不正確。</p>
         <button onClick={() => router.push("/")} className="btn btn-primary mt-2">回首頁</button>
       </div>
@@ -1322,7 +1372,7 @@ export default function WorkflowPage() {
     else alert((await res.json()).error ?? "刪除失敗");
   }
 
-  async function run(params: Record<string, string>, headed?: boolean, partial?: { startAtNodeId?: string; onlyNodeIds?: string[] }, skipExecutionPlan = false, expectedGraphFingerprint?: string) {
+  async function run(params: Record<string, string>, headed?: boolean, partial?: { startAtNodeId?: string; onlyNodeIds?: string[] }, skipExecutionPlan = false, expectedGraphFingerprint?: string, dryRunOverride?: boolean, testSendOverride?: string) {
     if (starting) return; // 啟動請求還在飛就別重複按
     if (!wf!.nodes.some((node) => node.type !== "trigger")) {
       selectNode(null);
@@ -1356,7 +1406,7 @@ export default function WorkflowPage() {
       const inProgress = cur.find((r) => r.status === "running" || r.status === "queued");
       if (inProgress) {
         setActiveRunId(inProgress.id);
-        setShowHistory(false);
+        setActivePanel(null);
         // 剛才按的這次執行(可能是只選了某幾步)沒有真的送出——接上的是已經在跑的那一次，
         // 範圍可能完全不同。不講清楚的話，使用者會以為自己剛才選的那幾步正在跑，其實看到的是別次執行。
         flashToast("已有一次執行正在進行中，先顯示那一次的進度(剛才這個請求沒有另外送出)");
@@ -1383,8 +1433,13 @@ export default function WorkflowPage() {
       let res = await fetch(`/api/workflows/${id}/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // 部分執行預設真的執行;只有勾了「只測試,不更改資料」才帶 dryRun:true 走安全排練
-        body: JSON.stringify({ params, headed, startAtNodeId: partial?.startAtNodeId, onlyNodeIds: partial?.onlyNodeIds, dryRun: partial ? partialTestOnly : undefined, expectedGraphFingerprint }),
+        // 部分執行預設真的執行;只有勾了「只演練，不更改資料」才帶 dryRun:true 走演練。
+        // 完整執行則看使用者在「執行前計畫」畫面勾的演練選項(dryRunOverride)。
+        // 注意順序：partial 存在時一定要用 partialTestOnly，不能讓 dryRunOverride 蓋過去——
+        // dryRunOverride 走過計畫畫面後永遠是明確的 true/false(不是 undefined)，
+        // 用 ?? 判斷永遠會贏，導致使用者勾的「只演練」被計畫畫面預設的 false 蓋掉、真的寫入了
+        // (2026-08 code review 抓到的真實 bug：程式碼跟這段註解原本講的意圖對不起來)。
+        body: JSON.stringify({ params, headed, startAtNodeId: partial?.startAtNodeId, onlyNodeIds: partial?.onlyNodeIds, dryRun: partial ? partialTestOnly : dryRunOverride, expectedGraphFingerprint, testSendOverride }),
       });
       let data = await res.json();
       if (res.status === 409 && data.code === "IMPORTED_WORKFLOW_CONFIRMATION_REQUIRED") {
@@ -1395,7 +1450,9 @@ export default function WorkflowPage() {
         res = await fetch(`/api/workflows/${id}/run`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ params, headed, startAtNodeId: partial?.startAtNodeId, onlyNodeIds: partial?.onlyNodeIds, dryRun: partial ? partialTestOnly : undefined, confirmImported: true, expectedGraphFingerprint }),
+          // 信任來源後的重跑請求：跟上面第一次送出用同一條 dryRun 判斷式，
+          // 否則使用者在「執行前計畫」勾的演練選項會在這個分支被悄悄丟掉(同一顆 bug 的第二個現場)。
+          body: JSON.stringify({ params, headed, startAtNodeId: partial?.startAtNodeId, onlyNodeIds: partial?.onlyNodeIds, dryRun: partial ? partialTestOnly : dryRunOverride, confirmImported: true, expectedGraphFingerprint, testSendOverride }),
         });
         data = await res.json();
         if (res.ok) await load();
@@ -1404,7 +1461,7 @@ export default function WorkflowPage() {
         setNodeRuns({});
         setActiveRunId(data.runId);
         setFinishedSummary(null);
-        setShowHistory(false);
+        setActivePanel(null);
       } else if (data.code === "MISSING_REQUIRED_SETTINGS" && Array.isArray(data.missing) && data.missing.length > 0) {
         // 缺帳密不是「一句錯誤」能解決的——直接在對話掛出安全輸入卡讓使用者填(值只進本機設定)。
         // 關掉節點面板,對話區才看得到卡。
@@ -1415,7 +1472,7 @@ export default function WorkflowPage() {
         // 歷史驗收與目前圖版本不同時，不把使用者丟給一個技術錯誤；直接轉進安全只讀驗收。
         // 這條路不會寫入外部資料，且完成後會重新蓋證據護照，之後使用者再按一次即可正式執行。
         setShowRunForm(false);
-        flashToast("流程內容已改過，先用真實資料安全試跑確認；確認通過後就能正式執行");
+        flashToast("流程內容已改過，先用真實資料演練確認；確認通過後就能正式執行");
         void runAutoTest();
       } else if (data.code === "ACCEPTANCE_SPEC_OUTDATED") {
         // 驗收答案綁的是舊圖時，正式執行不能硬闖，也不能把錯誤碼丟給小白；
@@ -1468,9 +1525,8 @@ export default function WorkflowPage() {
 
   // 「🔐 手動登入一次」：Google/Microsoft 這類網站會用機器人偵測擋自動化登入(帳密全對也擋)。
   // 開一個真 Chrome 讓使用者親手登入,cookies 自動存進這條流程的瀏覽器狀態,之後執行直接是已登入。
-  async function manualLogin() {
-    const url = prompt("要開哪個網站讓你手動登入？(登入完成後直接關掉那個視窗即可)", "https://accounts.google.com/");
-    if (!url) return;
+  // 要開哪個網站由 ManualLoginDialog 收(平台自己的對話框,不是 window.prompt)。
+  async function manualLogin(url: string) {
     try {
       const res = await fetch(`/api/workflows/${id}/manual-login`, {
         method: "POST",
@@ -1478,10 +1534,30 @@ export default function WorkflowPage() {
         body: JSON.stringify({ url }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) { alert((data as { error?: string }).error ?? "無法開啟瀏覽器"); return; }
-      flashToast("🔐 已開啟登入視窗——親手登入完成後關掉那個視窗即可");
+      if (!res.ok) { flashToast((data as { error?: string }).error ?? "無法開啟瀏覽器"); return; }
+      flashToast("🔐 已開啟登入視窗——親手登入完成後關掉那個視窗即可，關掉後這裡會自動告訴你有沒有成功");
+      setManualLoginWatching(true);
     } catch {
-      alert("連不上伺服器，請再試一次");
+      flashToast("連不上伺服器，請再試一次");
+    }
+  }
+
+  // ✉️ 測試寄送(webmail-send 節點專用)：用這一步真正的主旨/內容/附件寄一封信，但收件人是後端 API
+  // 強制鎖死成這裡傳的信箱，不管節點設定的 to/cc/bcc 是什麼——安全保證在 API 那層做(見
+  // app/api/workflows/[id]/nodes/[nid]/test-send/route.ts)，這裡只是呼叫它並把結果講清楚。
+  async function testSendToSelf(testEmail: string) {
+    if (!selNode) return;
+    try {
+      const res = await fetch(`/api/workflows/${id}/nodes/${selNode.id}/test-send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ testEmail }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { flashToast((data as { error?: string }).error ?? "測試寄送失敗"); return; }
+      flashToast(`✉️ 測試信已送出，只會寄到 ${testEmail}，稍等一下去收信匣確認`);
+    } catch {
+      flashToast("連不上伺服器，請再試一次");
     }
   }
 
@@ -1534,19 +1610,14 @@ export default function WorkflowPage() {
 
   /** 啟用檢查不是死文字：小白點「下一步」就直接到正確的工作面板。 */
   function openReadinessAction(actionCode?: string) {
-    setShowSchedule(false);
-    setShowHistory(false);
-    setShowExplain(false);
-    setShowEvidence(false);
-    setShowVersions(false);
-    setShowN8nMigration(false);
+    setActivePanel(null);
     selectNode(null);
     if (actionCode === "open-settings") {
       window.location.href = "/settings";
       return;
     }
     if (actionCode === "open-n8n-review") {
-      setShowN8nMigration(true);
+      setActivePanel("n8nMigration");
       return;
     }
     if (actionCode === "start-safe-test") {
@@ -1554,7 +1625,7 @@ export default function WorkflowPage() {
       return;
     }
     if (actionCode === "open-safety") {
-      setShowSchedule(true);
+      setActivePanel("schedule");
       window.setTimeout(() => document.querySelector("[data-readiness-safety]")?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
       return;
     }
@@ -1613,7 +1684,7 @@ export default function WorkflowPage() {
     const allUrls = [...new Set(text.match(/https?:\/\/[^\s，。、）)】」]+/g) ?? [])];
     // Google 簡報圖表「重新整理」的兩個網址只是官方 API 的目標，不該先花 20~50 秒打開
     // 私人 Google 文件。直接把網址和目的交給 builder，套用後由 google-slides-refresh 在
-    // 安全試跑中驗證 OAuth/簡報/圖表；一般「讀 Google Sheet 內容」仍照舊真的讀取。
+    // 演練中驗證 OAuth/簡報/圖表；一般「讀 Google Sheet 內容」仍照舊真的讀取。
     const directGoogleUrls = directGoogleSlidesRefreshUrls(text, allUrls);
     const readableUrls = allUrls.filter((url) => !directGoogleUrls.includes(url));
     const urls = readableUrls.slice(0, 3);
@@ -1724,13 +1795,13 @@ export default function WorkflowPage() {
       applied.onFailureLinked ? `\n🆘 失敗時會自動執行「${applied.onFailureLinked}」(已建立關聯)。` : "",
       applied.onFailureMissing ? `\n⚠️ 找不到叫「${applied.onFailureMissing}」的流程,失敗備援沒有建立——確認名稱後跟我說一聲。` : "",
     ].join("");
-    appendAssistantNote(id, `✅ 已套用到畫布，共 ${count} 個節點。${extras}`);
+    appendAssistantNote(id, `✅ 已套用到畫布，共 ${count} 個步驟。${extras}`);
     announceSheetSetupIfNeeded(id, pendingGraph.nodes);
     void announceSlidesOAuthSetupIfNeeded(id, pendingGraph.nodes);
     // 真實踩過的落差：對話裡自動套用(applyPendingGraphFromChat)會讀 API 回傳的 missingSecrets
     // 立刻掛出安全輸入卡，但畫面上這顆「套用到畫布」按鈕走的是同一支 API、卻從沒讀過這個欄位——
     // 使用者從這顆按鈕套用時，缺帳密只會在真正執行失敗時才發現，而不是套用當下就看到安全輸入卡。
-    // Google Slides 有專屬的「存好就只讀驗證」授權卡(announceSlidesOAuthSetupIfNeeded 已經處理)，
+    // Google Slides 有專屬的「存好就演練驗證」授權卡(announceSlidesOAuthSetupIfNeeded 已經處理)，
     // 一般帳密欄位才需要這裡補上，避免兩張卡搶著顯示。
     const slidesKeys = new Set(["googleOAuthClientId", "googleOAuthClientSecret", "googleOAuthRefreshToken"]);
     const usesSlides = pendingGraph.nodes.some((node) => node.type === "google-slides-refresh" || node.type === "google-slides-create");
@@ -1834,6 +1905,27 @@ export default function WorkflowPage() {
       flashToast(error instanceof Error ? error.message : "模型儲存失敗");
     }
   }
+  /**
+   * 「跑起來用哪顆」「做不到要不要停」——跟上面的 changeModel 分開存。
+   * 兩件事都用同一支 PATCH，沒送的欄位伺服器端會保持原值。
+   */
+  async function changeRunPolicy(patch: { runModel?: string; strict?: boolean }) {
+    const previous = { runModel: wfRef.current?.runModel ?? "", strict: wfRef.current?.strict === true };
+    setWf((w) => (w ? { ...w, ...patch } : w));
+    try {
+      const response = await fetch(`/api/workflows/${id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error((data as { error?: string }).error ?? "設定儲存失敗");
+      // 重讀一次是為了刷新「這條流程實際會用哪顆」的預覽——那是伺服器算出來的，
+      // 樂觀更新算不出來，不重讀的話使用者剛改完看到的還是舊的判斷結果。
+      void load();
+    } catch (error) {
+      setWf((current) => (current ? { ...current, ...previous } : current));
+      flashToast(error instanceof Error ? error.message : "設定儲存失敗");
+    }
+  }
   async function copy() {
     const res = await fetch(`/api/workflows/${id}/copy`, { method: "POST" });
     const data = (await res.json().catch(() => ({}))) as { id?: string; error?: string; warning?: string };
@@ -1878,7 +1970,7 @@ export default function WorkflowPage() {
               onBlur={commitOrCancelWfName}
               onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") { wfNameCancelledRef.current = true; e.currentTarget.blur(); } }}
               className="input font-semibold tracking-tight max-w-[220px] h-8 py-0"
-              aria-label="workflow 名稱"
+              aria-label="流程名稱"
             />
           ) : (
             <button
@@ -1894,7 +1986,7 @@ export default function WorkflowPage() {
           {wf.builtin && <span className="badge badge-neutral shrink-0 whitespace-nowrap">內建範例</span>}
           {evidenceState && evidenceState.passport && (
             <button
-              onClick={() => { setShowEvidence((v) => !v); setShowHistory(false); setShowSchedule(false); setShowExplain(false); setShowVersions(false); selectNode(null); }}
+              onClick={() => { setActivePanel((p) => (p === "evidence" ? null : "evidence")); selectNode(null); }}
               className="badge shrink-0 whitespace-nowrap"
               style={{
                 color: evidenceState.drifted ? "var(--amber)" : "var(--green)",
@@ -1907,7 +1999,7 @@ export default function WorkflowPage() {
           )}
           {wf.n8nMigration && ((wf.n8nMigration.reviewCount + wf.n8nMigration.unsupportedCount) > 0 || n8nGraphNeedsReview(wf)) && (
             <button
-              onClick={() => { setShowN8nMigration((v) => !v); setShowHistory(false); setShowSchedule(false); setShowExplain(false); setShowVersions(false); setShowEvidence(false); selectNode(null); }}
+              onClick={() => { setActivePanel((p) => (p === "n8nMigration" ? null : "n8nMigration")); selectNode(null); }}
               className="badge shrink-0 whitespace-nowrap"
               style={{ color: "var(--amber)", borderColor: "color-mix(in srgb, var(--amber) 35%, var(--border))" }}
               title="從 n8n 搬過來時，有幾步沒辦法直接對應，要你確認一下"
@@ -1917,12 +2009,12 @@ export default function WorkflowPage() {
           )}
           {wf.n8nMigration && wf.status === "official" && n8nAutomationReady === false && (
             <button
-              onClick={() => { setShowSchedule(true); setShowHistory(false); setShowExplain(false); setShowVersions(false); setShowEvidence(false); setShowN8nMigration(false); selectNode(null); }}
+              onClick={() => { setActivePanel("schedule"); selectNode(null); }}
               className="badge shrink-0 whitespace-nowrap"
               style={{ color: "var(--amber)", borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))" }}
-              title="這條從 n8n 帶過來的流程還沒成功跑過一次安全試跑（只讀、不會改到任何資料）——點這裡看下一步"
+              title="這條從 n8n 帶過來的流程還沒成功跑過一次演練（只讀、不會改到任何資料）——點這裡看下一步"
             >
-              ⚠️ 還沒安全試跑過
+              ⚠️ 還沒演練過
             </button>
           )}
           <div className="workflow-toolbar-actions ml-auto flex items-center gap-1.5">
@@ -1932,7 +2024,7 @@ export default function WorkflowPage() {
                 點一下直接跳回對話面板，跟關掉節點面板的視覺回饋一致。 */}
             {thinking && (selNode || showHistory || showSchedule || showExplain || showDataFlow || showVersions || showEvidence || showN8nMigration) && (
               <button
-                onClick={() => { selectNode(null); setShowHistory(false); setShowSchedule(false); setShowExplain(false); setShowDataFlow(false); setShowVersions(false); setShowEvidence(false); setShowN8nMigration(false); }}
+                onClick={() => { selectNode(null); setActivePanel(null); }}
                 className="btn btn-ghost shrink-0 text-xs"
                 style={{ color: "var(--accent)" }}
                 title="AI 還在處理你的對話，點一下回去看"
@@ -1945,7 +2037,7 @@ export default function WorkflowPage() {
               <button
                 onClick={() => setDrawer((d) => (d?.mode === "add" ? null : { mode: "add" }))}
                 className="btn btn-ghost shrink-0"
-                title="加步驟：瀏覽所有積木,點了加進畫布(也可以直接用白話跟 AI 說)"
+                title="加步驟：瀏覽所有步驟,點了加進畫布(也可以直接用白話跟 AI 說)"
                 style={drawer?.mode === "add" ? { borderColor: "var(--accent)", color: "var(--accent)" } : undefined}
               >
                 ＋ 加步驟
@@ -1970,10 +2062,16 @@ export default function WorkflowPage() {
                 {starting ? "啟動中…" : "▶ 執行"}
               </button>
             )}
-            <button onClick={() => { setShowExplain((v) => !v); setShowHistory(false); setShowSchedule(false); setShowVersions(false); setShowEvidence(false); selectNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showExplain ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="說明：這個流程每一步在做什麼" aria-label="說明">📖</button>
-            <button onClick={() => { setShowDataFlow((v) => !v); setShowHistory(false); setShowSchedule(false); setShowExplain(false); setShowVersions(false); setShowEvidence(false); setShowN8nMigration(false); selectNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showDataFlow ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="查看每一步收到與產生的資料欄位" aria-label="資料流">🔗</button>
-            <button onClick={() => { setShowHistory((v) => !v); setShowSchedule(false); setShowExplain(false); setShowVersions(false); setShowEvidence(false); selectNode(null); loadRuns(); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showHistory ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="紀錄：最近的執行結果" aria-label="紀錄">📋</button>
-            <button onClick={() => { setShowSchedule((v) => !v); setShowHistory(false); setShowExplain(false); setShowVersions(false); setShowEvidence(false); selectNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showSchedule ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="設定這條流程何時自動開始：固定時間、收到檔案、收到信件或收到訊息" aria-label="設定自動開始">⚡</button>
+            {/* 「說明」文字原本跟其他三顆一樣要 1400px 寬才顯示，等於平常只看得到一個 📖，沒人會點——
+                使用者原話：「我是要進去工作流裡面看完整到底做了什麼」，這個面板本來就是做這件事的，
+                只是沒人找得到(找不到的功能等於不存在)。這顆是「使用者想知道這條流程在幹嘛」最直接
+                的入口，比其他三顆(資料流/紀錄/自動開始，比較偏進階/操作用途)更值得優先讓文字露出來，
+                所以只把這一顆的門檻大幅降低；其他三顆維持 1400px，避免重新踩到「1440 寬就被截斷」
+                那個已經修過的工具列溢位問題。 */}
+            <button onClick={() => { setActivePanel((p) => (p === "explain" ? null : "explain")); selectNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showExplain ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="說明：這個流程每一步在做什麼" aria-label="說明">📖 <span className="hidden sm:inline">說明</span></button>
+            <button onClick={() => { setActivePanel((p) => (p === "dataFlow" ? null : "dataFlow")); selectNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showDataFlow ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="查看每一步收到與產生的資料欄位" aria-label="資料流">🔗 <span className="hidden min-[1400px]:inline">資料流</span></button>
+            <button onClick={() => { setActivePanel((p) => (p === "history" ? null : "history")); selectNode(null); loadRuns(); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showHistory ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="紀錄：最近的執行結果" aria-label="紀錄">📋 <span className="hidden min-[1400px]:inline">紀錄</span></button>
+            <button onClick={() => { setActivePanel((p) => (p === "schedule" ? null : "schedule")); selectNode(null); }} className="btn btn-ghost shrink-0" style={{ paddingLeft: 10, paddingRight: 10, ...(showSchedule ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }} title="設定這條流程何時自動開始：固定時間、收到檔案、收到信件或收到訊息" aria-label="設定自動開始">⚡ <span className="hidden min-[1400px]:inline">自動開始</span></button>
             {/* 次要動作收進「⋯」：工具列擠到溢出要橫向捲(1440 寬就被截斷)是真實踩過的 UX 問題 */}
             <div className="relative shrink-0" ref={moreMenuRef}>
               <button
@@ -1995,7 +2093,7 @@ export default function WorkflowPage() {
                       <div className="menu-sep" />
                     </>
                   )}
-                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); setShowVersions(true); setShowHistory(false); setShowSchedule(false); setShowExplain(false); setShowEvidence(false); selectNode(null); }}>
+                  <button className="menu-item" onClick={() => { setShowMoreMenu(false); setActivePanel("versions"); selectNode(null); }}>
                     <span>🕓</span> 版本備份
                   </button>
                   <button className="menu-item" onClick={() => { setShowMoreMenu(false); arrange(); }}>
@@ -2250,10 +2348,10 @@ export default function WorkflowPage() {
                   <input type="checkbox" checked={watchPartial} onChange={(e) => setWatchPartial(e.target.checked)} />
                   看畫面
                 </label>
-                {/* 預設「真的執行」(含寫入/發送)——使用者拍板:圈起來就是要執行到底;勾了才走只讀安全排練 */}
+                {/* 預設「真的執行」(含寫入/發送)——使用者拍板:圈起來就是要執行到底;勾了才走只讀演練 */}
                 <label className="flex items-center gap-1 text-xs faint cursor-pointer select-none" title="勾了就只測試:不寫入、不發送、不動任何外部資料">
                   <input type="checkbox" checked={partialTestOnly} onChange={(e) => setPartialTestOnly(e.target.checked)} />
-                  只測試,不更改資料
+                  只演練，不更改資料
                 </label>
                 <button
                   onClick={() => { flashToast(`▶ ${partialTestOnly ? "只測" : "執行"}選取的 ${picked.length} 步${watchPartial ? "" : "(背景執行,不開視窗)"}`); void run({}, watchPartial, { onlyNodeIds: picked }); }}
@@ -2330,12 +2428,17 @@ export default function WorkflowPage() {
         <WorkflowSettingsPanel
           workflowName={wf.name}
           model={wf.model}
-          builtinModels={MODELS.filter((m) => (KNOWN_WORKING_MODELS as readonly string[]).includes(m) || m.startsWith("claude-code"))}
+          builtinModels={builtinUsableModels ?? MODELS.filter((m) => (KNOWN_WORKING_MODELS as readonly string[]).includes(m) || m.startsWith("claude-code"))}
           extraModels={extraModels}
           onChangeModel={(m) => changeModel(m)}
+          runModel={wf.runModel ?? ""}
+          onChangeRunModel={(m) => void changeRunPolicy({ runModel: m })}
+          strictModel={wf.strict === true}
+          onChangeStrictModel={(s) => void changeRunPolicy({ strict: s })}
+          modelPlan={wf.modelPlan}
           outputFolder={wf.outputFolder ?? null}
           onOpenOutputFolder={() => { setShowWorkflowSettings(false); setShowOutputFolder(true); }}
-          onManualLogin={() => { setShowWorkflowSettings(false); void manualLogin(); }}
+          onManualLogin={() => { setShowWorkflowSettings(false); setShowManualLoginDialog(true); }}
           onOpenRecorder={() => { setShowWorkflowSettings(false); setShowRecorder(true); }}
           slidesImage={{
             used: wf.nodes.some((n) => n.type === "google-slides-replace-image"),
@@ -2346,6 +2449,12 @@ export default function WorkflowPage() {
         />
       )}
       {showSlidesImageScript && <SlidesImageScriptCard workflowId={id} onClose={() => { setShowSlidesImageScript(false); void load(); }} />}
+      {showManualLoginDialog && (
+        <ManualLoginDialog
+          onSubmit={(url) => { setShowManualLoginDialog(false); void manualLogin(url); }}
+          onClose={() => setShowManualLoginDialog(false)}
+        />
+      )}
       {showRecorder && (
         <RecordActionCard
           workflowId={id}
@@ -2362,7 +2471,7 @@ export default function WorkflowPage() {
             {selNode ? (
               <>
                 <p className="text-sm font-medium">放開以附加到「{selNode.label}」這一步</p>
-                <p className="text-xs muted mt-1">只給這個節點看，不會送進整條流程的對話</p>
+                <p className="text-xs muted mt-1">只給這個步驟看，不會送進整條流程的對話</p>
               </>
             ) : (
               <>
@@ -2423,7 +2532,7 @@ export default function WorkflowPage() {
               <div className="border-t p-4 shrink-0 space-y-3">
                 {autoTest.ok ? (
                   <div className="flex items-center gap-2">
-                    <span className="text-sm" style={{ color: autoTest.canPromote ? "var(--green)" : "var(--amber)" }}>{autoTest.canPromote ? "已用真實資料完成只讀驗證！" : "流程接線通過，仍需要真實資料驗證。"}</span>
+                    <span className="text-sm" style={{ color: autoTest.canPromote ? "var(--green)" : "var(--amber)" }}>{autoTest.canPromote ? "已用真實資料完成演練驗證！" : "流程接線通過，仍需要真實資料驗證。"}</span>
                     {autoTest.canPromote && <button onClick={() => { closeAutoTest(id); promote(); }} className="btn btn-ghost ml-auto" style={{ color: "var(--green)" }}>設為正式</button>}
                     <button onClick={() => closeAutoTest(id)} className="btn btn-ghost">關閉</button>
                   </div>
@@ -2499,6 +2608,7 @@ export default function WorkflowPage() {
             failureResolution={runResolution?.failedNode === selNode.id ? runResolution.resolution : null}
             failureReason={runResolution?.failedNode === selNode.id ? runResolution.reason : null}
             onRunOnlyThis={() => { flashToast(`▶ 只${partialTestOnly ? "測" : "執行"}「${selNode.label}」這一步${watchPartial ? "" : "(背景執行,不開視窗)"}`); void run({}, watchPartial, { onlyNodeIds: [selNode.id] }); }}
+            onTestSendToSelf={testSendToSelf}
             watchRun={watchPartial}
             onWatchRunChange={setWatchPartial}
             testOnly={partialTestOnly}
@@ -2515,8 +2625,8 @@ export default function WorkflowPage() {
             runs={runs}
             nodeLabels={Object.fromEntries(wf.nodes.map((n) => [n.id, n.label]))}
             focusRunId={focusedHistoryRun}
-            onClose={() => setShowHistory(false)}
-            onPickFailedNode={(nodeId, runId) => { setShowHistory(false); loadHistoricalRunNode(runId); selectNode(nodeId); }}
+            onClose={() => setActivePanel(null)}
+            onPickFailedNode={(nodeId, runId) => { setActivePanel(null); loadHistoricalRunNode(runId); selectNode(nodeId); }}
             onResume={async (runId) => {
               // 從失敗那步續跑：成功回 null 並讓畫布開始追蹤這次執行；失敗回錯誤訊息給紀錄卡顯示
               try {
@@ -2525,7 +2635,7 @@ export default function WorkflowPage() {
                 if (!res.ok) return (data as { error?: string }).error ?? "續跑失敗";
                 setNodeRuns({});
                 setActiveRunId(runId);
-                setShowHistory(false);
+                setActivePanel(null);
                 flashToast("▶ 從失敗那步續跑中(前面的步驟沿用上次結果)");
                 return null;
               } catch {
@@ -2541,7 +2651,7 @@ export default function WorkflowPage() {
                 if (!nextRunId) return "伺服器沒有回傳新的執行紀錄";
                 setNodeRuns({});
                 setActiveRunId(nextRunId);
-                setShowHistory(false);
+                setActivePanel(null);
                 flashToast("↻ 已用目前版本從頭重試(不沿用舊版中間結果)");
                 return null;
               } catch {
@@ -2557,7 +2667,7 @@ export default function WorkflowPage() {
                 if (!nextRunId) return "伺服器沒有回傳新的安全重播紀錄";
                 setNodeRuns({});
                 setActiveRunId(nextRunId);
-                setShowHistory(false);
+                setActivePanel(null);
                 flashToast("🧪 已用失敗當下的輸入安全重播這一步(只讀、不重跑上游)");
                 return null;
               } catch {
@@ -2575,7 +2685,7 @@ export default function WorkflowPage() {
                 if (!res.ok) return (data as { error?: string }).error ?? "無法處理不確定的外部動作";
                 setNodeRuns({});
                 setActiveRunId(runId);
-                setShowHistory(false);
+                setActivePanel(null);
                 flashToast(decision === "confirmed" ? "✅ 已記下你確認的外部結果，繼續後面的步驟" : "↻ 已確認沒有完成，只重試這個外部動作");
                 return null;
               } catch {
@@ -2584,15 +2694,15 @@ export default function WorkflowPage() {
             }}
           />
         ) : showSchedule ? (
-          <SchedulePanel workflowId={id} onClose={() => setShowSchedule(false)} automationReadiness={automationReadiness} automationPassport={automationPassport} onReadinessAction={openReadinessAction} />
+          <SchedulePanel workflowId={id} onClose={() => setActivePanel(null)} automationReadiness={automationReadiness} automationPassport={automationPassport} onReadinessAction={openReadinessAction} />
         ) : showExplain ? (
-          <ExplainPanel workflowId={id} onClose={() => setShowExplain(false)} onPickNode={(nodeId) => { setShowExplain(false); selectNode(nodeId); }} />
+          <ExplainPanel workflowId={id} onClose={() => setActivePanel(null)} onPickNode={(nodeId) => { setActivePanel(null); selectNode(nodeId); }} />
         ) : showDataFlow ? (
-          <DataFlowPanel workflowId={id} onClose={() => setShowDataFlow(false)} onPickNode={(nodeId) => { setShowDataFlow(false); selectNode(nodeId); }} />
+          <DataFlowPanel workflowId={id} onClose={() => setActivePanel(null)} onPickNode={(nodeId) => { setActivePanel(null); selectNode(nodeId); }} />
         ) : showN8nMigration && wf.n8nMigration ? (
-          <N8nMigrationPanel workflow={wf} onClose={() => setShowN8nMigration(false)} onInspect={(nodeId) => {
+          <N8nMigrationPanel workflow={wf} onClose={() => setActivePanel(null)} onInspect={(nodeId) => {
             const target = wf.nodes.find((node) => node.id === nodeId);
-            setShowN8nMigration(false);
+            setActivePanel(null);
             selectNode(nodeId);
             if (target) rfInstance.current?.setCenter(target.position.x + 85, target.position.y + 50, { zoom: 0.95, duration: 300 });
             flashToast("請檢查右側設定；看完後回到「安全搬家檢查」再確認這一步");
@@ -2606,9 +2716,9 @@ export default function WorkflowPage() {
             else flashToast((await response.json().catch(() => ({})) as { error?: string }).error ?? "遷移確認失敗");
           }} />
         ) : showEvidence && evidenceState?.passport ? (
-          <EvidencePanel evidence={evidenceState} onClose={() => setShowEvidence(false)} onRetest={() => { setShowEvidence(false); runAutoTest(); }} />
+          <EvidencePanel evidence={evidenceState} onClose={() => setActivePanel(null)} onRetest={() => { setActivePanel(null); runAutoTest(); }} />
         ) : showVersions ? (
-          <VersionsPanel workflowId={id} onClose={() => setShowVersions(false)} onRestored={() => { setShowVersions(false); setNodeRuns({}); setActiveRunId(null); load(); }} />
+          <VersionsPanel workflowId={id} onClose={() => setActivePanel(null)} onRestored={() => { setActivePanel(null); setNodeRuns({}); setActiveRunId(null); load(); }} />
         ) : (
           <div className="flex flex-col h-full">
             <div className="h-14 px-5 border-b flex items-center text-sm font-medium">
@@ -2712,9 +2822,9 @@ export default function WorkflowPage() {
               {pendingTrust && (
                 <div className="card p-3 space-y-2" style={{ borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))" }}>
                   <p className="text-sm font-medium">先確認外部流程來源</p>
-                  <p className="text-xs muted leading-relaxed">只讀試跑不會寫入，但仍可能讀本機檔案或開啟外部網站。只有你確認信任後才會開始。</p>
+                  <p className="text-xs muted leading-relaxed">演練不會寫入，但仍可能讀本機檔案或開啟外部網站。只有你確認信任後才會開始。</p>
                   <div className="flex flex-wrap gap-2">
-                    <button type="button" className="btn btn-primary text-xs" onClick={() => trustImportedAndContinue(id)}>信任來源並安全試跑</button>
+                    <button type="button" className="btn btn-primary text-xs" onClick={() => trustImportedAndContinue(id)}>信任來源並演練</button>
                     <button type="button" className="btn btn-ghost text-xs" onClick={() => cancelPendingTrust(id)}>取消</button>
                   </div>
                 </div>
@@ -2741,10 +2851,10 @@ export default function WorkflowPage() {
                     )}
                     <p className="text-sm font-medium break-words">
                       {activeExecution.status === "failed"
-                        ? activeExecution.mode === "preview" ? "只讀安全試跑未通過" : "正式執行失敗"
+                        ? activeExecution.mode === "preview" ? "只演練未通過" : "正式執行失敗"
                         : activeExecution.status === "cancelled"
-                        ? activeExecution.mode === "preview" ? "已停止只讀試跑" : "已停止"
-                        : activeExecution.mode === "preview" ? "只讀安全試跑中" : "正式執行中"}
+                        ? activeExecution.mode === "preview" ? "已停止演練" : "已停止"
+                        : activeExecution.mode === "preview" ? "只演練中" : "正式執行中"}
                     </p>
                   </div>
                   {activeExecution.reason && <p className="text-xs muted leading-relaxed [overflow-wrap:anywhere]">{activeExecution.reason}</p>}
@@ -2803,7 +2913,7 @@ export default function WorkflowPage() {
                   <p className="text-xs muted leading-relaxed">
                     {pendingExecution.needsImportedConfirmation
                       ? "它是從外部檔案匯入的，可能讀取本機檔案或連線外部服務。請先確認來源可信；正式執行仍會使用上方已核對的參數。"
-                      : `上面的安全試跑已攔住 ${pendingExecution.plannedWrites} 個寫入步驟。請先核對數字；正式執行會重新抓一次最新資料並寫入外部服務。`}
+                      : `上面的演練已攔住 ${pendingExecution.plannedWrites} 個寫入步驟。請先核對數字；正式執行會重新抓一次最新資料並寫入外部服務。`}
                   </p>
                   <div className="flex flex-wrap gap-2">
                     <button
@@ -2854,8 +2964,8 @@ export default function WorkflowPage() {
               <textarea
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendChat(); }}
-                placeholder="直接說要做什麼；也可傳檔案、文件、網址或截圖。例如：測試能不能看到資料，但不要改動（⌘+Enter 送出）"
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
+                placeholder="直接說要做什麼；也可傳檔案、文件、網址或截圖。例如：測試能不能看到資料，但不要改動（Enter 送出，Shift+Enter 換行）"
                 rows={3}
                 className="input resize-none"
               />
@@ -2969,8 +3079,10 @@ export default function WorkflowPage() {
         <ExecutionPlanPanel
           plan={executionPlan.plan}
           missingSettings={executionPlan.missingSettings}
+          isPartial={Boolean(pendingPlanRun?.partial)}
+          partialTestOnly={partialTestOnly}
           onCancel={() => { setExecutionPlan(null); setPendingPlanRun(null); }}
-          onContinue={() => {
+          onContinue={(dryRun, testSendEmail) => {
             const pending = pendingPlanRun;
             setExecutionPlan(null);
             setPendingPlanRun(null);
@@ -2978,7 +3090,7 @@ export default function WorkflowPage() {
               promptForMissingSecrets(id, executionPlan.missingSettings as { key: string; label?: string; type?: "text" | "password" }[]);
               return;
             }
-            if (pending) void run(pending.params, pending.headed, pending.partial, true, pending.graphFingerprint);
+            if (pending) void run(pending.params, pending.headed, pending.partial, true, pending.graphFingerprint, dryRun, testSendEmail);
           }}
         />
       )}

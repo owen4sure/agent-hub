@@ -3,8 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 
 /**
- * 節點庫抽屜:「＋ 加步驟」與「連線上插一步」共用的積木目錄。
- * 手動模式的入口——瀏覽 30 種積木、搜尋、點了就加(跟 AI 建圖並行,雙模式都是一等公民)。
+ * 節點庫抽屜:「＋ 加步驟」與「連線上插一步」共用的步驟目錄。
+ * 手動模式的入口——瀏覽全部步驟、搜尋、點了就加(跟 AI 建圖並行,雙模式都是一等公民)。
+ * (數量請看 lib/workflow/registry.ts 的 ALL 陣列——這裡故意不寫死數字,新增節點時不用回來改註解)
  */
 
 export interface ParamFieldLite {
@@ -16,6 +17,7 @@ export interface ParamFieldLite {
   options?: string[];
   derived?: boolean;
   allowEmpty?: boolean;
+  advanced?: boolean;
 }
 export interface NodeDefLite {
   type: string;
@@ -116,16 +118,16 @@ export function AddNodePanel({
           autoFocus
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="搜尋積木…(例如:簽核、分流、Excel)"
+          placeholder="搜尋步驟…(例如:簽核、分流、Excel)"
           className="input text-sm"
           onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}
         />
       </div>
       <div className="flex-1 overflow-auto p-3 space-y-4">
-        {error && <p className="text-xs" style={{ color: "var(--red)" }}>載入節點庫失敗,請關掉重開一次。</p>}
+        {error && <p className="text-xs" style={{ color: "var(--red)" }}>載入步驟庫失敗,請關掉重開一次。</p>}
         {!defs && !error && <p className="text-xs muted">載入中…</p>}
-        {defs && grouped.length === 0 && <p className="text-xs muted">沒有符合「{query}」的積木——也可以直接用白話跟 AI 說你要做什麼。</p>}
-        {/* 使用者自己存的步驟放最上面：那是他親手調通的東西，比任何內建積木都更該先看到。
+        {defs && grouped.length === 0 && <p className="text-xs muted">沒有符合「{query}」的步驟——也可以直接用白話跟 AI 說你要做什麼。</p>}
+        {/* 使用者自己存的步驟放最上面：那是他親手調通的東西，比任何內建步驟都更該先看到。
             這一區的存在本身就是在回答「現成的沒有我要的功能怎麼辦」。 */}
         {onPickUserStep && userSteps.filter((step) => !query.trim()
           || step.name.toLowerCase().includes(query.trim().toLowerCase())

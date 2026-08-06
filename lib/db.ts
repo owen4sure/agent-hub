@@ -402,6 +402,10 @@ function init(): Database.Database {
   addColumnIfMissing(db, "runs", "trigger_params_json", "trigger_params_json TEXT");
   addColumnIfMissing(db, "runs", "secret_overrides_json", "secret_overrides_json TEXT");
   addColumnIfMissing(db, "runs", "node_config_overrides_json", "node_config_overrides_json TEXT");
+  // 「這次的通知/寄信先都寄給我自己」——使用者測試會真的寄信/發通知的流程時，不想不小心驚動
+  // 正式收件人。只存一個信箱字串(不是帳密，不用加密)；execute 時由 webmail-send/send-email
+  // 節點自己讀 ctx.testSendOverride 覆寫收件人，不動存檔的節點設定，執行完也不用還原任何東西。
+  addColumnIfMissing(db, "runs", "test_send_override", "test_send_override TEXT");
   // 安全試跑失敗後若從原處續跑，必須沿用「只讀」身分。沒存這欄會讓續跑的下游寫入步驟變正式執行。
   addColumnIfMissing(db, "runs", "dry_run", "dry_run INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "runs", "owner_pid", "owner_pid INTEGER");
@@ -409,6 +413,12 @@ function init(): Database.Database {
   // 盲挑「最近一次成功過的 run」，可能把已經改過設定/日期區間的舊邏輯結果，靜默當成今天的資料沿用。
   addColumnIfMissing(db, "runs", "graph_fingerprint", "graph_fingerprint TEXT");
   addColumnIfMissing(db, "runs", "scenario_id", "scenario_id TEXT");
+  // 「建流程用哪顆」跟「流程跑起來用哪顆」以前共用 wf_model.model 這一個欄位，所以表達不出
+  // 「建置用雲端、執行用地端」這個組合(使用者的公司審查要求：流程中間做判斷的模型必須在自己的
+  // 機器上，但建流程本來就用雲端的 Claude Code，公司也認可)。run_model 空字串 = 沿用 model，
+  // 行為跟改動前完全一樣；strict_model=1 才會關掉自動換備援(見 lib/modelPolicy.ts)。
+  addColumnIfMissing(db, "wf_model", "run_model", "run_model TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, "wf_model", "strict_model", "strict_model INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "workflow_scenarios", "controls_json", "controls_json TEXT NOT NULL DEFAULT '{}'");
   addColumnIfMissing(db, "workflow_health_checks", "last_graph_fingerprint", "last_graph_fingerprint TEXT");
   // 正式流程無人值守失敗的背景修法提案改用整圖感知修復(aiRepairGraph)後，真正原因可能在別的節點

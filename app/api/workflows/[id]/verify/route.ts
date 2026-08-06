@@ -13,7 +13,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ error: "請求內容不是有效的 JSON 物件" }, { status: 400 });
   }
   const previewBuild = beginBuild(id, req.signal);
-  setBuildStage(id, "🔍 安全試跑中：只讀資料與計算，不會寫入…", previewBuild.token);
+  setBuildStage(id, "🔍 演練中：只讀資料與計算，不會寫入…", previewBuild.token);
   try {
     return NextResponse.json(await runWorkflowPreview(id, body, previewBuild.signal));
   } catch (error) {

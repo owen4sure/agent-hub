@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import Link from "next/link";
 
 export function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
   return (
@@ -12,10 +13,15 @@ export function PageHeader({ title, subtitle, actions }: { title: string; subtit
   );
 }
 
-export function StatCard({ label, value, tone, icon }: { label: string; value: ReactNode; tone?: "green" | "red" | "accent"; icon?: string }) {
+/**
+ * `href` 有給就整張卡可點——首頁「草稿」卡曾經是全頁最大的數字，點了卻沒反應
+ * (使用者真實回報，[[feedback_discoverability]] 的第三個案例)。可點的卡片額外加
+ * hover 底色 + 游標樣式，讓「這張卡可以點」在點下去之前就看得出來。
+ */
+export function StatCard({ label, value, tone, icon, href }: { label: string; value: ReactNode; tone?: "green" | "red" | "accent"; icon?: string; href?: string }) {
   const color = tone === "green" ? "var(--green)" : tone === "red" ? "var(--red)" : tone === "accent" ? "var(--accent)" : "var(--text)";
-  return (
-    <div className="card px-4 py-3.5 flex-1 min-w-[130px] flex items-center gap-3">
+  const content = (
+    <>
       {icon && (
         <span
           className="grid place-items-center w-10 h-10 rounded-xl text-lg shrink-0"
@@ -32,8 +38,17 @@ export function StatCard({ label, value, tone, icon }: { label: string; value: R
         <div className="text-xs faint">{label}</div>
         <div className="text-[26px] leading-none font-semibold mt-1 tracking-tight tabular-nums" style={{ color }}>{value}</div>
       </div>
-    </div>
+    </>
   );
+  const className = "card px-4 py-3.5 flex-1 min-w-[130px] flex items-center gap-3" + (href ? " hover:bg-[var(--surface-2)] transition-colors cursor-pointer" : "");
+  if (href) {
+    return (
+      <Link href={href} className={className} title={`看${label}`}>
+        {content}
+      </Link>
+    );
+  }
+  return <div className={className}>{content}</div>;
 }
 
 export function EmptyState({ icon, title, hint, action }: { icon: string; title: string; hint?: string; action?: ReactNode }) {

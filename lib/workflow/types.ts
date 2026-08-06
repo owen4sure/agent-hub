@@ -15,6 +15,10 @@ export interface ParamField {
    * 沒標的欄位空值會被引擎自動補回預設值(防 AI 把選擇器清壞)——代價是永遠無法刻意清空;
    * 標了 allowEmpty 的欄位,明確存成空字串("")就真的是空,不會被補回預設(undefined/null 仍補)。 */
   allowEmpty?: boolean;
+  /** 網頁技術碼(CSS 選擇器、內部系統代號)這類一般使用者看不懂、也幾乎不用手動改的欄位——
+   * 「直接改設定」快速編輯區把它收進預設收合的「進階設定」，不要跟「標題關鍵字」這種
+   * 一看就懂的欄位混在一起。壞了的話本來就該用「讓 AI 修」讀真實畫面調整，不是要人手動改。 */
+  advanced?: boolean;
 }
 
 /** 一個節點在 workflow 圖裡的定義（存進 workflow json） */
@@ -150,6 +154,10 @@ export interface NodeContext {
   /** 只讀驗證模式:節點若會寫出/發送，看到這個是 true 就別真的做(引擎已在外層略過已知的寫出型節點；
    * custom-code 另會在受限 VM 執行，並以唯讀能力包住瀏覽器與檔案介面)。 */
   dryRun?: boolean;
+  /** 使用者這次執行勾了「通知/寄信先都寄給我自己」時填的信箱。webmail-send/send-email 節點看到
+   * 這個就把收件人改成它(不動存檔的節點設定)，讓使用者能真的跑到底、看到算出來的內容，又不會
+   * 誤觸正式收件人。只在真的要送出時才有意義；dryRun 本來就不會真的送。 */
+  testSendOverride?: string;
   log: (msg: string) => void;
   /** 登記一個產出檔，讓它出現在 dashboard 的檔案清單/可下載 */
   // kind 省略 = 'output'(交付產出,會列在「產出檔案」頁)；'intermediate' = 抓進來給下游/AI 對話

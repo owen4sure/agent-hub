@@ -14,7 +14,7 @@ export async function GET(req: Request) {
   const clientId = (secrets.googleOAuthClientId ?? "").trim();
   if (!clientId) {
     return NextResponse.json({
-      error: "還沒有 Google 用戶端 ID。請先到設定頁填入 googleOAuthClientId 與 googleOAuthClientSecret（在 Google Cloud Console →「憑證」建立，只需要做一次）。",
+      error: "還沒有 Google 用戶端 ID。請先到設定頁填入「用戶端 ID」與「用戶端密鑰」（在 Google Cloud Console →「憑證」建立，只需要做一次）。",
     }, { status: 400 });
   }
 

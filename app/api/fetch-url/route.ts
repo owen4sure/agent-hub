@@ -42,7 +42,7 @@ export async function POST(req: Request) {
     }
     const workflowId = body?.workflowId?.trim();
     if (workflowId && (!isValidWorkflowId(workflowId) || !getWorkflow(workflowId))) {
-      return NextResponse.json({ error: "網址所屬的 workflow 不存在" }, { status: 404 });
+      return NextResponse.json({ error: "網址所屬的流程不存在" }, { status: 404 });
     }
     hostname = new URL(url).hostname;
     const guardOn = !privateUrlsAllowed();

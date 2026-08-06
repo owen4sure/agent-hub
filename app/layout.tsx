@@ -8,7 +8,7 @@ const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"]
 
 export const metadata: Metadata = {
   title: "Agent Hub",
-  description: "白話建構的視覺化 workflow 自動化平台",
+  description: "白話建構的視覺化流程自動化平台",
 };
 
 const themeScript = `(function(){try{var t=localStorage.getItem('theme');if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}})();`;

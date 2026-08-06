@@ -2,7 +2,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
-import { chromium, type Browser, type Page, type BrowserContextOptions } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 import { getDb } from "../db";
 import { decryptSecret, encryptSecret } from "../secretVault";
 import { getGlobalSettings, getWorkflowModel, getWorkflowSecretsForKeys, getMaxConcurrent } from "../settingsStore";
@@ -23,6 +23,8 @@ import { workflowExecutionFingerprint } from "./fingerprint";
 import { assertCurrentEvidence } from "./evidencePassport";
 import { AcceptanceSpecOutdatedError, acceptanceSpecOutdated } from "./acceptanceSpec";
 import { collectRunSeeds, downstreamNodeIds, type RunSeedRow } from "./partialRun";
+import { resolveSharedSessionKeyForGraph, sharedSessionFileName } from "./sharedLoginSession";
+import { loadSessionState, saveSessionState } from "./browserSessionFile";
 import { ExternalPreflightError, preflightExternalIntegrations } from "./preflight";
 import { isPlaceholderCode } from "./codegen";
 import { PermanentError, RetryableError, WaitingForHuman } from "./types";
@@ -73,12 +75,28 @@ interface QueueItem {
   secretOverrides?: Record<string, string>;
   /** 同上：本輪對話貼的來源網址可暫時替換唯一對應的讀取步驟，不存回 workflow。 */
   nodeConfigOverrides?: Record<string, Record<string, unknown>>;
+  /** 使用者這次執行勾了「通知/寄信先都寄給我自己」時的信箱；不是 secret，值只存這個 run 自己的
+   * 紀錄，不動 workflow 存檔的節點設定。見 lib/workflow/nodes/webmailSend.ts、sendEmail.ts。 */
+  testSendOverride?: string;
   /** 只限情境 dry-run：指定每個 wait-approval 要模擬 approved/rejected。 */
   scenarioApprovalDecisions?: Record<string, "approved" | "rejected">;
   /** 只限情境 dry-run：在指定節點進入 execute 前故意模擬失敗，驗證 error 備援出口。 */
   scenarioForcedFailures?: Record<string, string>;
   /** 安全重播只把失敗步驟當下收到的 input 注入該步；不得與一般流程輸入混用。 */
   replayNodeInput?: { nodeId: string; input: Record<string, unknown> };
+  /**
+   * 這個 run 是「執行子流程」節點呼叫出來的子流程，不是獨立觸發的執行。
+   *
+   * 為什麼要另外標記：母流程呼叫子流程時是整個停下來等(runWorkflowAndWait)，不會跟子流程同時做事——
+   * 兩者本來就是輪流、不是並行。但舊版 processQueue() 用同一個 activeCount 算「同時執行中」名額，
+   * 母流程自己傻等就已經佔滿依序模式(maxConcurrent=1)唯一的名額，子流程永遠排不進去，變成死結
+   * (2026-08 使用者原話：「基本上都不需要有並行的時候，全部都輪流就好了」——並行設定是全站共用的，
+   * 為了讓一組子流程呼叫跑得動而把它調成併行，會連帶讓其他互不相干、真的需要嚴格輪流的排程
+   * 也一起被放行併行執行，這是不必要的副作用)。標記成 nestedSubWorkflowCall 的 run 不佔用
+   * activeCount 名額(只受 runningWorkflows 的「同一條流程不能同時兩個 run」與排隊總量上限約束)，
+   * 讓它能立刻跟母流程「輪流」執行，不需要調整全站的併行設定。
+   */
+  nestedSubWorkflowCall?: boolean;
 }
 
 const queue: QueueItem[] = [];
@@ -165,18 +183,17 @@ export function safeParseJson(raw: string | null): Record<string, unknown> {
   }
 }
 
-function makeSession(headed: boolean, workflowId: string): RunSession {
+/**
+ * sharedSessionKey 有給的話，這次執行讀寫的是「多條流程共用」的那一份登入狀態，不是這條流程
+ * 自己專屬的檔案——用在像 Mail2000 這種「一登入新的地方就把舊的踢掉」的網站，多條流程各自維護
+ * 一份登入狀態只會互踢，共用同一份才不會(見 sharedLoginSession.ts 的完整說明)。
+ * 由呼叫端(startWorkflowRun)在跑之前掃過整張圖決定要不要傳這個參數，這裡不重新判斷。
+ */
+function makeSession(headed: boolean, workflowId: string, sharedSessionKey?: string | null): RunSession {
   let browser: Browser | null = null;
   let page: Page | null = null;
   const stateDir = path.join(process.cwd(), "data", "browser-sessions");
-  const statePath = path.join(stateDir, `${workflowId}.json`);
-  const loadState = (): BrowserContextOptions["storageState"] | undefined => {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(statePath, "utf8")) as { cookies?: unknown; origins?: unknown };
-      if (!Array.isArray(parsed.cookies) || !Array.isArray(parsed.origins)) return undefined;
-      return parsed as BrowserContextOptions["storageState"];
-    } catch { return undefined; }
-  };
+  const statePath = path.join(stateDir, sharedSessionKey ? sharedSessionFileName(sharedSessionKey) : `${workflowId}.json`);
   return {
     async getBrowser() {
       // AutomationControlled 特徵(navigator.webdriver=true)是 Google 這類網站判定機器人的主要訊號之一,
@@ -187,7 +204,7 @@ function makeSession(headed: boolean, workflowId: string): RunSession {
     async getPage() {
       if (!page) {
         const b = await this.getBrowser();
-        const storageState = loadState();
+        const storageState = loadSessionState(statePath);
         const context = await b.newContext({ acceptDownloads: true, ...(storageState ? { storageState } : {}) });
         page = await context.newPage();
       }
@@ -205,16 +222,7 @@ function makeSession(headed: boolean, workflowId: string): RunSession {
     async saveState() {
       if (!page) return;
       const state = await page.context().storageState();
-      fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-      if (process.platform !== "win32") fs.chmodSync(stateDir, 0o700);
-      const temp = `${statePath}.${process.pid}-${randomUUID().slice(0, 8)}.tmp`;
-      try {
-        fs.writeFileSync(temp, JSON.stringify(state), { mode: 0o600 });
-        fs.renameSync(temp, statePath);
-        if (process.platform !== "win32") fs.chmodSync(statePath, 0o600);
-      } finally {
-        fs.rmSync(temp, { force: true });
-      }
+      saveSessionState(statePath, state);
     },
     async close() {
       if (browser) await browser.close().catch(() => {});
@@ -269,7 +277,7 @@ function topoOrder(wf: Workflow): WorkflowNode[] {
 export function startWorkflowRun(
   workflowId: string,
   triggerParams: Record<string, unknown> = {},
-  options: { headed?: boolean; trigger?: TriggerSource; dryRun?: boolean; secretOverrides?: Record<string, string>; nodeConfigOverrides?: Record<string, Record<string, unknown>>; scenarioApprovalDecisions?: Record<string, "approved" | "rejected">; scenarioForcedFailures?: Record<string, string>; confirmedPreview?: boolean; startAtNodeId?: string; onlyNodeIds?: string[]; replayNodeInput?: { nodeId: string; input: Record<string, unknown> } } = {},
+  options: { headed?: boolean; trigger?: TriggerSource; dryRun?: boolean; secretOverrides?: Record<string, string>; nodeConfigOverrides?: Record<string, Record<string, unknown>>; scenarioApprovalDecisions?: Record<string, "approved" | "rejected">; scenarioForcedFailures?: Record<string, string>; confirmedPreview?: boolean; startAtNodeId?: string; onlyNodeIds?: string[]; replayNodeInput?: { nodeId: string; input: Record<string, unknown> }; nestedSubWorkflowCall?: boolean; testSendOverride?: string } = {},
 ): string {
   const db = getDb();
   const wf = getWorkflow(workflowId);
@@ -351,8 +359,8 @@ export function startWorkflowRun(
   // DB 裡的 running/queued 若不記進程歸屬，另一個進程(daemon + dev 同時開)開機做崩潰復原時
   // 會把「別的進程其實還在跑的 run」一起誤標失敗。見 recoverCrashedRuns。
   db.prepare(
-    `INSERT INTO runs (id, workflow_id, status, trigger_type, headed, trigger_params_json, secret_overrides_json, node_config_overrides_json, dry_run, owner_pid, graph_fingerprint, started_at)
-     VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+    `INSERT INTO runs (id, workflow_id, status, trigger_type, headed, trigger_params_json, secret_overrides_json, node_config_overrides_json, dry_run, owner_pid, graph_fingerprint, test_send_override, started_at)
+     VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
   ).run(
     runId, workflowId, trigger, headed ? 1 : 0, JSON.stringify(triggerParams),
     options.confirmedPreview && options.secretOverrides ? encryptSecret(JSON.stringify(options.secretOverrides)) : null,
@@ -360,6 +368,7 @@ export function startWorkflowRun(
     dryRun ? 1 : 0,
     process.pid,
     graphFingerprint,
+    options.testSendOverride?.trim() || null,
   );
 
   for (const node of wf.nodes) {
@@ -435,6 +444,8 @@ export function startWorkflowRun(
     scenarioApprovalDecisions: dryRun ? options.scenarioApprovalDecisions : undefined,
     scenarioForcedFailures: dryRun ? options.scenarioForcedFailures : undefined,
     replayNodeInput: options.replayNodeInput,
+    nestedSubWorkflowCall: options.nestedSubWorkflowCall === true,
+    testSendOverride: options.testSendOverride?.trim() || undefined,
   });
   processQueue();
   return runId;
@@ -500,7 +511,7 @@ export function resumeRun(
 ): { ok: boolean; error?: string } {
   const db = getDb();
   const run = db.prepare(`SELECT * FROM runs WHERE id = ?`).get(runId) as
-    | { id: string; workflow_id: string; status: string; failed_node: string | null; trigger_type: string; headed: number; trigger_params_json: string | null; secret_overrides_json: string | null; node_config_overrides_json: string | null; dry_run: number }
+    | { id: string; workflow_id: string; status: string; failed_node: string | null; trigger_type: string; headed: number; trigger_params_json: string | null; secret_overrides_json: string | null; node_config_overrides_json: string | null; dry_run: number; test_send_override: string | null }
     | undefined;
   if (!run) return { ok: false, error: "找不到這次執行紀錄(可能已被自動清理)，請直接重新執行。" };
   const wf = getWorkflow(run.workflow_id);
@@ -601,6 +612,7 @@ export function resumeRun(
     dryRun: Boolean(run.dry_run),
     secretOverrides,
     nodeConfigOverrides,
+    testSendOverride: run.test_send_override ?? undefined,
     resume: { seeds, seedPorts, rerunNodeIds: [...rerun], preResolved: opts.preResolved },
   });
   processQueue();
@@ -773,7 +785,7 @@ function waitForRunCompletion(runId: string, timeoutMs: number, signal?: AbortSi
 export function runWorkflowAndWait(
   workflowId: string,
   triggerParams: Record<string, unknown>,
-  options: { headed?: boolean; timeoutMs?: number; dryRun?: boolean; secretOverrides?: Record<string, string>; nodeConfigOverrides?: Record<string, Record<string, unknown>>; scenarioApprovalDecisions?: Record<string, "approved" | "rejected">; scenarioForcedFailures?: Record<string, string>; signal?: AbortSignal } = {},
+  options: { headed?: boolean; timeoutMs?: number; dryRun?: boolean; secretOverrides?: Record<string, string>; nodeConfigOverrides?: Record<string, Record<string, unknown>>; scenarioApprovalDecisions?: Record<string, "approved" | "rejected">; scenarioForcedFailures?: Record<string, string>; signal?: AbortSignal; nestedSubWorkflowCall?: boolean } = {},
 ): Promise<RunFinal> {
   const runId = startWorkflowRun(workflowId, triggerParams, {
     headed: options.headed,
@@ -783,6 +795,7 @@ export function runWorkflowAndWait(
     nodeConfigOverrides: options.nodeConfigOverrides,
     scenarioApprovalDecisions: options.scenarioApprovalDecisions,
     scenarioForcedFailures: options.scenarioForcedFailures,
+    nestedSubWorkflowCall: options.nestedSubWorkflowCall,
   });
   // 呼叫端(autofix 的總時間預算)可以給更短的上限，但不能超過引擎預設的天花板
   const timeoutMs = Math.min(Math.max(options.timeoutMs ?? RUN_WAIT_TIMEOUT_MS, 10_000), RUN_WAIT_TIMEOUT_MS);
@@ -998,6 +1011,20 @@ async function proposeFixInBackground(workflowId: string, runId: string, nodeId:
 }
 
 function processQueue() {
+  // 「執行子流程」呼叫出來的子流程：母流程整個停下來等它(runWorkflowAndWait)，兩者本來就是輪流、
+  // 不是同時做事，所以不佔用 activeCount 名額——只要子流程自己那條流程當下沒有別的 run 在跑，
+  // 就直接放行，不受全站併行上限影響(見 QueueItem.nestedSubWorkflowCall 的完整說明)。
+  // 用迴圈而不是單次掃描：一次 processQueue() 呼叫時佇列裡可能同時有好幾筆這種項目在等。
+  for (;;) {
+    const idx = queue.findIndex((q) => q.nestedSubWorkflowCall && !runningWorkflows.has(q.workflowId));
+    if (idx === -1) break;
+    const [item] = queue.splice(idx, 1);
+    runningWorkflows.add(item.workflowId);
+    executeWorkflow(item).finally(() => {
+      runningWorkflows.delete(item.workflowId);
+      processQueue();
+    });
+  }
   if (activeCount >= getMaxConcurrent(DEFAULT_MAX_CONCURRENT)) return;
   const idx = queue.findIndex((q) => !runningWorkflows.has(q.workflowId));
   if (idx === -1) return;
@@ -1129,7 +1156,7 @@ async function executeWorkflow(item: QueueItem) {
     // 只讀試跑可暫用對話這一輪附的讀取設定；正式 run 在入隊時已強制丟棄 overrides。
     ...approvedOverrides,
   };
-  const session = makeSession(headed, workflowId);
+  const session = makeSession(headed, workflowId, resolveSharedSessionKeyForGraph(wf.nodes));
   activeSessions.set(runId, session); // 讓 cancelRun() 找得到這個 run 的分頁，能立刻強制中斷
   const abortController = new AbortController();
   cancelSignals.set(runId, abortController); // 讓 cancelRun() 能中斷不靠瀏覽器分頁的 fetch/AI 呼叫
@@ -1388,6 +1415,7 @@ async function executeWorkflow(item: QueueItem) {
       debugDir,
       session,
       dryRun,
+      testSendOverride: item.testSendOverride,
       scenarioApprovalDecisions: dryRun ? item.scenarioApprovalDecisions : undefined,
       cancelSignal: abortController.signal,
       log: (msg: string) => log(runId, node.id, msg),

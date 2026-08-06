@@ -22,7 +22,7 @@
 
 import { getDb } from "./db";
 import { getGlobalSettings } from "./settingsStore";
-import { MODELS, VISION_MODELS } from "./models";
+import { DEFAULT_MODEL, MODELS, VISION_MODELS } from "./models";
 import { CLAUDE_CODE_MODEL } from "./claudeCodeShared";
 
 export const DEFAULT_PROVIDER_ID = "default";
@@ -43,6 +43,15 @@ export interface ModelProvider {
   models: string[];
   /** 這個來源的模型看不看得懂圖片(由使用者宣告——平台無法為未知模型硬編碼) */
   vision: boolean;
+  /**
+   * 這個來源是不是在使用者自己掌控的機器上。
+   *
+   * **只能由使用者宣告，平台不可以自己猜**：地端模型不一定長得像地端。使用者的 gemma 掛在
+   * 一個公開網域後面(自己架的反向代理)，用網址判斷會判成雲端；反過來，一個公司內網網址也
+   * 可能其實是轉出去的。這個欄位的用途是執行紀錄上標「🏠 地端／☁️ 雲端」給公司審查看，
+   * 猜錯比不標更糟——所以預設 false，使用者自己勾。
+   */
+  local?: boolean;
   /**
    * 這個來源可以等多久(毫秒)。
    *
@@ -70,6 +79,7 @@ function readList(): ModelProvider[] {
         apiKey: String(p.apiKey ?? ""),
         models: Array.isArray(p.models) ? p.models.map((m) => String(m).trim()).filter(Boolean) : [],
         vision: p.vision === true,
+        local: p.local === true,
         ...(Number.isFinite(p.timeoutMs) ? { timeoutMs: Number(p.timeoutMs) } : {}),
       }))
       .filter((p) => p.id && p.id !== DEFAULT_PROVIDER_ID && p.baseUrl);
@@ -94,12 +104,30 @@ function builtinProvider(): ModelProvider {
     apiKey,
     models: [...MODELS],
     vision: true, // 內建這組的逐一能力仍由 models.ts 的實測清單判斷
+    local: false, // 內建那組是共用的雲端服務；Claude Code 走本機 CLI 但資料仍離開這台機器
     builtin: true,
   };
 }
 
 export function listProviders(): ModelProvider[] {
   return [builtinProvider(), ...readList()];
+}
+
+/**
+ * 新流程預設用哪顆模型——**推導出來的，不是寫死的**。
+ *
+ * `DEFAULT_MODEL` 是「開發這個專案時用的那個免費 gateway 上實測最穩的模型」。對已經填好
+ * Base URL / 金鑰的人(例如作者本人)它是對的；對一個剛 clone 下來、只裝了 Claude Code 的人，
+ * 那個代號在他的環境裡根本不存在——新流程一建好就預設選了一顆叫不動的模型，
+ * 打第一句話就失敗，而且看不出原因。
+ *
+ * 使用者的原話：「其他人都是只有預設 claude code，然後有其他的代碼就是自己在設定裡面做，
+ * 而不是我預設給一堆」。所以：有內建 gateway 就沿用原本的預設(既有使用者行為完全不變)，
+ * 沒有就預設 Claude Code。
+ */
+export function defaultModelRef(): string {
+  const { baseUrl, apiKey } = getGlobalSettings();
+  return baseUrl && apiKey ? DEFAULT_MODEL : CLAUDE_CODE_MODEL;
 }
 
 export function saveProvider(input: Omit<ModelProvider, "builtin">): ModelProvider {
@@ -116,6 +144,7 @@ export function saveProvider(input: Omit<ModelProvider, "builtin">): ModelProvid
     apiKey: input.apiKey ?? "",
     models,
     vision: input.vision === true,
+    local: input.local === true,
     // 10 秒～10 分鐘：比 10 秒短沒有任何模型來得及回，比 10 分鐘長的話使用者會以為當掉了
     timeoutMs: Math.min(Math.max(Number(input.timeoutMs) || DEFAULT_TIMEOUT_MS, 10_000), 600_000),
   };

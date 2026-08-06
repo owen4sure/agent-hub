@@ -101,7 +101,7 @@ export function missingWorkflowSecretFields(snapshot: WorkflowSecretStatus, excl
 }
 export interface ChatExecutionState {
   runId: string;
-  /** preview=只讀安全試跑；formal=使用者已確認的正式執行。UI 和續跑都不能混淆這個邊界。 */
+  /** preview=只演練；formal=使用者已確認的正式執行。UI 和續跑都不能混淆這個邊界。 */
   mode: "preview" | "formal";
   status: "starting" | "queued" | "running" | "waiting" | "success" | "failed" | "cancelled";
   reason?: string;
@@ -127,7 +127,7 @@ export function needsWorkflowConstructionBeforePreview(nodes: { type?: unknown }
 async function isBlankWorkflowForPreview(id: string): Promise<boolean> {
   try {
     const response = await fetch(`/api/workflows/${id}`);
-    if (!response.ok) return false; // 讀取暫時失敗時維持原本安全試跑語意，不偷偷改成建圖
+    if (!response.ok) return false; // 讀取暫時失敗時維持原本演練語意，不偷偷改成建圖
     const data = await response.json() as { workflow?: { nodes?: { type?: unknown }[] } };
     return needsWorkflowConstructionBeforePreview(data.workflow?.nodes);
   } catch {
@@ -147,7 +147,7 @@ export interface WFChatState {
   editToast: { labels: string[]; token: number } | null;
   // 「驗證看懂(只讀)」正在跑:讀使用者的檔案、實際算給他看(不會寫回/發送)。切走畫面也不中斷。
   verifying: boolean;
-  /** 對話安全試跑完成、等使用者核對後確認真正執行。沒有確認就絕不寫出。 */
+  /** 對話演練完成、等使用者核對後確認真正執行。沒有確認就絕不寫出。 */
   pendingExecution: PendingExecution | null;
   /** 只有人能提供的執行參數/帳密，直接在對話內收集；值只送設定 API，不會放進 chat 或送模型。 */
   pendingInput: PendingChatInput | null;
@@ -155,7 +155,7 @@ export interface WFChatState {
   activeExecution: ChatExecutionState | null;
   /** 正式流程停在 wait-approval 時，直接在同一對話核准/拒絕。 */
   pendingApproval: PendingChatApproval | null;
-  /** 外部匯入流程連只讀試跑都先要求信任來源，避免一句模糊的測試就開本機檔案/外部網站。 */
+  /** 外部匯入流程連演練都先要求信任來源，避免一句模糊的測試就開本機檔案/外部網站。 */
   pendingTrust: boolean;
 }
 
@@ -196,7 +196,7 @@ function set(id: string, patch: Partial<WFChatState>) {
 }
 
 /**
- * 安全輸入卡本身只含欄位名稱、說明和下一個「只讀驗證」動作，從不含使用者剛打的值。
+ * 安全輸入卡本身只含欄位名稱、說明和下一個「演練驗證」動作，從不含使用者剛打的值。
  * 這個小型白名單讓它可以跨重整保存，同時不信任 localStorage／server state 裡任意塞進來的形狀。
  */
 function restorePendingInput(raw: unknown): PendingChatInput | null {
@@ -354,7 +354,7 @@ async function applyPendingGraphFromChat(id: string, history: ChatMsg[], announc
   // 先讓 Google Slides 專用卡取得優先權；若兩段非同步 fetch 同時回來，通用帳密卡可能
   // 先寫進 pendingInput，反而把「存好就驗證簡報」這條重要的專用流程遮住。
   await announceSlidesOAuthSetupIfNeeded(id, graph.nodes);
-  // Google Slides 有「存好就只讀驗證」的專用授權卡；其餘連線資料(收寄信、LINE、Telegram、Slack…)
+  // Google Slides 有「存好就演練驗證」的專用授權卡；其餘連線資料(收寄信、LINE、Telegram、Slack…)
   // 則優先用套用 API 直接回傳的結果立刻給安全輸入卡。這避免「先存圖、再 GET 最新狀態」的非同步
   // 間隙讓卡片偶發消失；GET 分支只保留給舊版/外部呼叫端的相容備援。
   const slidesKeys = new Set(["googleOAuthClientId", "googleOAuthClientSecret", "googleOAuthRefreshToken"]);
@@ -382,7 +382,7 @@ async function announceWorkflowSecretsAfterApply(id: string, nodes: PendingGraph
     const slidesKeys = ["googleOAuthClientId", "googleOAuthClientSecret", "googleOAuthRefreshToken"];
     const needsSlidesSetup = nodes.some((node) => node.type === "google-slides-refresh" || node.type === "google-slides-create");
     const missing = missingWorkflowSecretFields(snapshot, needsSlidesSetup ? slidesKeys : []);
-    // 另一張安全卡正在顯示時不覆蓋它；使用者存好後，安全試跑仍會精準補出下一組缺少的資料。
+    // 另一張安全卡正在顯示時不覆蓋它；使用者存好後，演練仍會精準補出下一組缺少的資料。
     if (missing.length === 0 || get(id).pendingInput) return;
     promptForMissingSecrets(
       id,
@@ -430,7 +430,7 @@ export function announceSheetScriptFailureIfNeeded(id: string, nodeLabel: string
       role: "assistant",
       isControl: true,
       parts: [
-        { kind: "text", text: `「${nodeLabel}」這步剛剛執行失敗，原因是 Google 試算表那端的 Apps Script 有問題(不是這條流程的設定錯)，AI 改節點設定沒有用。多半是腳本需要重新部署一個新版本，或部署時沒有正確綁定在目標試算表上。跟著下面的卡片重新複製、貼上、部署一次(只影響這個「${nodeLabel}」用到的試算表，不會動到你其他流程)，完成後把新網址貼回來，我再幫你重跑這一步。` },
+        { kind: "text", text: `「${nodeLabel}」這步剛剛執行失敗，原因是 Google 試算表那端的 Apps Script 有問題(不是這條流程的設定錯)，AI 改步驟設定沒有用。多半是腳本需要重新部署一個新版本，或部署時沒有正確綁定在目標試算表上。跟著下面的卡片重新複製、貼上、部署一次(只影響這個「${nodeLabel}」用到的試算表，不會動到你其他流程)，完成後把新網址貼回來，我再幫你重跑這一步。` },
         { kind: "sheet-script", nodeLabels: [nodeLabel] },
       ],
     }],
@@ -439,15 +439,11 @@ export function announceSheetScriptFailureIfNeeded(id: string, nodeLabel: string
 
 /**
  * Google Slides API 沒有像 Apps Script 那樣「貼上同一份範本」的一鍵設定路——OAuth 一定要使用者自己
- * 在 Google Cloud Console 走過一輪(建專案/開 API/建憑證)，帳號綁定、任何人都不能代勞。這裡能做的
- * 是把完整步驟做成對話裡可逐步展開的設定卡，讓「使用開源這份 workflow 的任何人」都能照著做完，
- * 不用另外去找教學檔案。
- *
- * 措辭鐵則(真實踩過的教訓)：使用者可能完全不知道 API/OAuth/Client ID 是什麼，只是想讓簡報自動更新
- * ——第一版寫得技術正確但每一步只丟術語(「OAuth 同意畫面設定好」「拿到 Client ID 和 Client Secret」)，
- * 對完全沒碰過 Google Cloud Console 的人等於天書。每一步都要講清楚「為什麼要點這裡」+「會看到什麼畫面」
- * +「該點哪個字」，尤其是 Google 自己會跳出來嚇人的「未經驗證應用程式」警告一定要先安撫，不然使用者
- * 會以為自己點錯、中途放棄。結尾邀請使用者卡住時直接截圖貼過來，讓真人 AI 對話接手，不強迫他一次看懂整段。
+ * 的 Google 帳號同意，任何人都不能代勞。**唯一該教的路徑是「設定」頁「Google 帳號」卡的一鍵授權**
+ * (2026-08 UI/UX 審計 M1 拍板)：那邊四步就能拿到這裡需要的三個 secret，使用者完全不用手動複製貼上。
+ * 這裡的對話卡只負責指路過去；下面這個安全欄位表單保留給「已經有這三串值」的少數情況(例如同一組
+ * 憑證在別的地方也用過)，不再是主要教學路徑，所以標題語氣要相符——不能寫「最後一步」暗示前面
+ * 一定要先走過某段教學。
  */
 // 純函式本體移到 lib/googleSlidesApi.ts(沒有 "use client")，讓 build/route.ts(伺服器端) 也能共用
 // 同一份判斷——這裡重新匯出，維持既有 import 路徑不用改。
@@ -457,12 +453,12 @@ export function slidesOAuthInputCard(nodeIds: string[] = []): PendingChatInput {
   return {
     token: Date.now(),
     kind: "settings",
-    title: "最後一步：把 Google 給你的三串代碼安全貼到這裡",
-    description: "這三串只會加密保存在這台電腦，不會出現在對話紀錄，也不會交給 AI。填完後，我會立刻只讀確認 Google 授權有效；不會建立、更新或刪除任何簡報。",
+    title: "已經有這三串值了？貼在這裡",
+    description: "還沒有的話，到「設定」頁的「Google 帳號」卡走一次一鍵授權即可，不用手動找這三串值。這三個欄位只會加密保存在這台電腦，不會出現在對話紀錄，也不會交給 AI。填完後，我會立刻只讀確認 Google 授權有效；不會建立、更新或刪除任何簡報。",
     fields: [
-      { key: "googleOAuthClientId", label: "1. Client ID", type: "text", required: true },
-      { key: "googleOAuthClientSecret", label: "2. Client Secret", type: "password", required: true },
-      { key: "googleOAuthRefreshToken", label: "3. Refresh Token", type: "password", required: true },
+      { key: "googleOAuthClientId", label: "用戶端 ID", type: "text", required: true },
+      { key: "googleOAuthClientSecret", label: "用戶端密鑰", type: "password", required: true },
+      { key: "googleOAuthRefreshToken", label: "重新整理權杖(Refresh Token)", type: "password", required: true },
     ],
     ...(nodeIds.length ? { afterSave: { kind: "verify-google-slides" as const, nodeIds } } : {}),
   };
@@ -495,7 +491,7 @@ export async function announceSlidesOAuthSetupIfNeeded(id: string, nodes: Pendin
       isControl: true,
       parts: [{
         kind: "text",
-        text: `「${labels.join("」「")}」第一次要連到你的 Google 簡報。這是直接使用 Google 的官方簡報功能建立或更新內容，不是模擬點網頁。請依下面卡片逐步完成；只需要設定一次，約 10–15 分鐘。`,
+        text: `「${labels.join("」「")}」第一次要連到你的 Google 簡報。這是直接使用 Google 的官方簡報功能建立或更新內容，不是模擬點網頁。到「設定」頁連結一次 Google 帳號就好（大約 3 分鐘），下面卡片會告訴你怎麼去。`,
       }, { kind: "slides-oauth-setup", nodeLabels: labels }],
     }],
     // 新手不該看完一大段教學後還要自己猜「要去哪裡貼」。直接在同一個對話給安全欄位；
@@ -581,6 +577,20 @@ function appendSetupCards(baseChat: ChatMsg[], data: Record<string, unknown>): {
 }
 
 /**
+ * 只有 phase:"ready" 才會真的附上 pendingGraph、也才會由這裡自動掛「(下方預覽新流程，確認後按
+ * 「套用」)」這句提示(見下面 phase:"ready" 分支)。但這句話一旦掛過一次，就會留在對話歷史裡被
+ * 當成「AI 之前說過的話」送回模型——弱模型看得到這個句型，之後在別的 phase(尤其 phase:"clarify"，
+ * 它可以自由決定要不要先描述一份完整方案再確認)有機會照樣抄一句類似的話當成自己講的，實際上
+ * 那一輪根本沒有 pendingGraph 可看(2026-08 使用者實測踩到：對話文字明講「下方預覽新流程」，
+ * 畫面卻完全沒有預覽卡，查證後端資料證實那一輪真的沒有存下任何 pendingGraph)。
+ * phase 不是 "ready" 的訊息一律過這道濾網，寧可少一句「聽起來很像有預覽」的話，也不能讓使用者
+ * 對著不存在的東西按「套用」或空等。
+ */
+export function stripReadyOnlyPromise(message: string): string {
+  return message.replace(/[(（]\s*下方預覽新流程[，,]\s*確認後按[「"]套用[」"]\s*[)）]/g, "").replace(/[ \t]+\n/g, "\n").trim();
+}
+
+/**
  * 送一則訊息給 AI 建/改流程。fetch 在這裡發動(模組層)，就算使用者馬上切走畫面，
  * 這個 async 仍會跑完並把 AI 回覆寫回 store，回到該流程就看得到。
  */
@@ -629,7 +639,7 @@ export async function sendChatToAI(id: string, history: ChatMsg[]) {
       const state = get(id);
       const pending = state.pendingExecution;
       if (state.pendingTrust) await trustImportedAndContinue(id);
-      else if (!pending) appendAssistantNote(id, "目前沒有一筆等你確認的安全試跑。先說「測試看看」，我會跑到寫入前並把結果列給你核對。");
+      else if (!pending) appendAssistantNote(id, "目前沒有一筆等你確認的演練。先說「測試看看」，我會跑到寫入前並把結果列給你核對。");
       else await confirmPendingExecution(id, Boolean(pending.needsImportedConfirmation));
     } else if (command === "cancel") await stopAllChatWork(id);
     else if (command === "repair-run") await startAutoTest(id, undefined, { source: "chat" });
@@ -666,7 +676,7 @@ export async function sendChatToAI(id: string, history: ChatMsg[]) {
     if (res.ok && data.phase === "preview") {
       const preview = data.preview as PreviewResponse | undefined;
       commit({
-        chat: [...history, { role: "assistant", parts: [{ kind: "text", text: data.message ?? "安全試跑已完成" }] }],
+        chat: [...history, { role: "assistant", parts: [{ kind: "text", text: stripReadyOnlyPromise(data.message ?? "演練已完成") }] }],
         pendingExecution: preview && !(preview.missingSecrets?.length) && preview.runId && preview.graphFingerprint && (preview.plannedWrites?.length ?? 0) > 0
           ? {
               previewRunId: preview.runId,
@@ -692,7 +702,7 @@ export async function sendChatToAI(id: string, history: ChatMsg[]) {
         : "";
       const labels = changes.map((c: { label: string }) => c.label);
       const nextToken = (get(id).reloadToken ?? 0) + 1;
-      const newChat: ChatMsg[] = [...history, { role: "assistant", parts: [{ kind: "text", text: `${data.message}${detailBlock}` }] }];
+      const newChat: ChatMsg[] = [...history, { role: "assistant", parts: [{ kind: "text", text: `${stripReadyOnlyPromise(data.message)}${detailBlock}` }] }];
       const { chat: chatWithCards, slidesSetupNodeIds } = appendSetupCards(newChat, data);
       commit({
         chat: chatWithCards,
@@ -709,7 +719,7 @@ export async function sendChatToAI(id: string, history: ChatMsg[]) {
       // (不是 phase:edits，沒有改動任何節點)，之前完全沒有接上面兩張卡的邏輯，AI 只能用文字回答
       // 「下方會出現安全輸入卡」，但卡片實際上不會出現，使用者反覆問也拿不到。這裡跟 phase:edits
       // 用同一份邏輯(server 端已判斷是否符合「明確要求重看卡片」)，補上同樣的卡片與安全欄位。
-      const { chat: chatWithCards, slidesSetupNodeIds } = appendSetupCards([...history, { role: "assistant", parts: [{ kind: "text", text: data.message ?? "…" }] }], data);
+      const { chat: chatWithCards, slidesSetupNodeIds } = appendSetupCards([...history, { role: "assistant", parts: [{ kind: "text", text: stripReadyOnlyPromise(data.message ?? "…") }] }], data);
       commit({
         chat: chatWithCards,
         ...(slidesSetupNodeIds ? { pendingInput: get(id).pendingInput ?? slidesOAuthInputCard(slidesSetupNodeIds) } : {}),
@@ -721,7 +731,7 @@ export async function sendChatToAI(id: string, history: ChatMsg[]) {
         pendingInput: {
           token: Date.now(),
           kind: "model-settings",
-          title: "先連接一個 AI 模型",
+          title: "填一次就好的帳密",
           description: "API Key 會直接存進本機設定，不會放進聊天紀錄。填完後我會自動重新處理剛才的需求。",
           fields: [
             { key: "baseUrl", label: "模型服務網址", type: "text", default: "https://api.openai.com/v1", help: "你的服務商提供的 OpenAI 相容 Base URL" },
@@ -743,7 +753,7 @@ export async function sendChatToAI(id: string, history: ChatMsg[]) {
         pendingInput: {
           token: Date.now(),
           kind: "settings",
-          title: "填入這條流程需要的帳密",
+          title: "填一次就好的帳密",
           description: "值只會存進本機設定，不會放進聊天紀錄，也不會傳給 AI。存好後我會自動接著處理。",
           fields: missingSecrets.map((f) => ({
             key: f.key,
@@ -795,7 +805,7 @@ function latestUserText(history: ChatMsg[]): string {
  */
 async function ensureDateRangeInputs(id: string, range: DateRange): Promise<boolean> {
   set(id, { thinking: true });
-  appendAssistantNote(id, `你指定了 ${range.start} 到 ${range.end}，但這條舊流程還沒有真正接上可選區間。我現在先把開始／結束日期接進實際運算步驟，完成後會直接用這段日期安全試跑，不會叫你去別處設定。`);
+  appendAssistantNote(id, `你指定了 ${range.start} 到 ${range.end}，但這條舊流程還沒有真正接上可選區間。我現在先把開始／結束日期接進實際運算步驟，完成後會直接用這段日期演練，不會叫你去別處設定。`);
   try {
     const instruction = [
       "請修改現有流程，讓它每次執行前都能由使用者自行選擇開始日期與結束日期。",
@@ -815,7 +825,7 @@ async function ensureDateRangeInputs(id: string, range: DateRange): Promise<bool
     }
     const detail = data.changes?.map((change) => `${change.label}：${change.detail}`).join("；");
     set(id, { reloadToken: get(id).reloadToken + 1 });
-    appendAssistantNote(id, `✅ 已把開始／結束日期接成執行時選項${detail ? `（${detail}）` : ""}。現在接著用你指定的區間安全試跑。`);
+    appendAssistantNote(id, `✅ 已把開始／結束日期接成執行時選項${detail ? `（${detail}）` : ""}。現在接著用你指定的區間演練。`);
     return true;
   } catch (error) {
     appendAssistantNote(id, `⚠️ 準備指定區間時連線失敗：${error instanceof Error ? error.message : "未知錯誤"}。沒有拿其他日期代替。`);
@@ -859,8 +869,8 @@ async function prepareChatPreview(
       continuations.set(id, { kind: "preview", history, params });
       set(id, {
         pendingInput: {
-          token: Date.now(), kind: "params", title: "這次要用哪些資料？",
-          description: "填完我就自動接著安全試跑；這些值只拿來執行，不需要懂流程設定。",
+          token: Date.now(), kind: "params", title: "這次執行要用的資料",
+          description: "填完我就自動接著演練；這些值只拿來執行，不需要懂流程設定。",
           fields: visible.map((field) => ({ ...field, required: missing.some((item) => item.key === field.key) })),
         },
       });
@@ -869,7 +879,7 @@ async function prepareChatPreview(
     }
     await previewWorkflowFromChat(id, history, params);
   } catch (error) {
-    appendAssistantNote(id, `⚠️ 準備安全試跑時出錯了：${error instanceof Error ? error.message : "未知錯誤"}`);
+    appendAssistantNote(id, `⚠️ 準備演練時出錯了：${error instanceof Error ? error.message : "未知錯誤"}`);
   }
 }
 
@@ -902,10 +912,10 @@ async function previewWorkflowFromChat(id: string, history: ChatMsg[], params: R
     const envelope = await res.json() as { phase?: string; preview?: PreviewResponse; error?: string; code?: string };
     if (res.status === 409 && envelope.code === "IMPORTED_WORKFLOW_CONFIRMATION_REQUIRED") {
       set(id, { pendingTrust: true });
-      appendAssistantNote(id, "這是外部匯入的流程。即使現在只做不寫入的測試，它仍可能讀本機檔案或開啟外部網站；請先確認來源可信，再按下面的「信任來源並安全試跑」。");
+      appendAssistantNote(id, "這是外部匯入的流程。即使現在只做不寫入的測試，它仍可能讀本機檔案或開啟外部網站；請先確認來源可信，再按下面的「信任來源並演練」。");
       return;
     }
-    const data: PreviewResponse = envelope.preview ?? { ok: false, error: envelope.error ?? "安全試跑沒有回傳結果" };
+    const data: PreviewResponse = envelope.preview ?? { ok: false, error: envelope.error ?? "演練沒有回傳結果" };
     if (!res.ok || !data.ok) {
       // 真實踩過的落差：runWorkflowPreview 會不管這次試跑成功或失敗都算出 missingSecrets
       // (見 preview.ts)，但這裡以前一律當成「壞掉了」丟一句籠統錯誤，完全沒檢查失敗會不會
@@ -916,7 +926,7 @@ async function previewWorkflowFromChat(id: string, history: ChatMsg[], params: R
       if (missingOnFailure.length > 0) {
         appendAssistantNote(
           id,
-          `⚠️ 安全試跑停在「${data.failedNode ?? "某一步"}」，原因是還缺 ${missingOnFailure.map((item) => item.label).join("、")}——不是流程設定有問題。直接在下面安全欄位補好，我會自動接著重跑預覽。`,
+          `⚠️ 演練停在「${data.failedNode ?? "某一步"}」，原因是還缺 ${missingOnFailure.map((item) => item.label).join("、")}——不是流程設定有問題。直接在下面安全欄位補好，我會自動接著重跑預覽。`,
         );
         set(id, {
           activeExecution: data.runId ? { runId: data.runId, mode: "preview", status: "failed", reason: data.error ?? undefined, failedNode: data.failedNode } : null,
@@ -924,14 +934,14 @@ async function previewWorkflowFromChat(id: string, history: ChatMsg[], params: R
           // 不能悄悄蓋掉它讓使用者已經填到一半的內容消失——跟這個檔案其他地方(見
           // announceSlidesOAuthSetupIfNeeded 等)的既有保護同一套慣例：get(id).pendingInput ?? 新卡片。
           pendingInput: get(id).pendingInput ?? {
-            token: Date.now(), kind: "settings", title: "補上只有你知道的資料",
+            token: Date.now(), kind: "settings", title: "填一次就好的帳密",
             description: "內容會直接存進本機加密設定，不會出現在對話紀錄，也不會送給 AI。填完會自動繼續。",
             fields: missingOnFailure.map((item) => ({ ...item, type: /密碼|password|token|secret/i.test(`${item.key} ${item.label}`) ? "password" : "text", required: true })),
           },
         });
         return;
       }
-      appendAssistantNote(id, `⚠️ 安全試跑沒有通過，停在「${data.failedNode ?? "某一步"}」：${data.error ?? "未知錯誤"}\n\n沒有執行任何寫入。`);
+      appendAssistantNote(id, `⚠️ 演練沒有通過，停在「${data.failedNode ?? "某一步"}」：${data.error ?? "未知錯誤"}\n\n沒有執行任何寫入。`);
       set(id, { activeExecution: data.runId ? { runId: data.runId, mode: "preview", status: "failed", reason: data.error ?? undefined, failedNode: data.failedNode } : null });
       return;
     }
@@ -942,7 +952,7 @@ async function previewWorkflowFromChat(id: string, history: ChatMsg[], params: R
     const writeLines = formatPlannedWriteLines(data.plannedWrites ?? []);
     const missing = data.missingSecrets ?? [];
     const message = [
-      "✅ 安全試跑完成。以下是實際抓到、算出的結果：",
+      "✅ 演練完成。以下是實際抓到、算出的結果：",
       valueLines.length ? valueLines.join("\n") : "（沒有可顯示的短數值）",
       "\n🔒 原本準備寫入的步驟已攔住，預計送出的內容：",
       writeLines.length ? writeLines.join("\n") : "（這條流程沒有偵測到寫入步驟）",
@@ -956,7 +966,7 @@ async function previewWorkflowFromChat(id: string, history: ChatMsg[], params: R
         // 同上：不能悄悄蓋掉使用者已經在填的另一張卡(code review 提醒這裡跟失敗分支是同一個
         // 既有落差，一併對齊這個檔案其他地方的既有慣例)。
         pendingInput: get(id).pendingInput ?? {
-          token: Date.now(), kind: "settings", title: "補上只有你知道的資料",
+          token: Date.now(), kind: "settings", title: "填一次就好的帳密",
           description: "內容會直接存進本機加密設定，不會出現在對話紀錄，也不會送給 AI。填完會自動繼續。",
           fields: missing.map((item) => ({ ...item, type: /密碼|password|token|secret/i.test(`${item.key} ${item.label}`) ? "password" : "text", required: true })),
         },
@@ -976,10 +986,10 @@ async function previewWorkflowFromChat(id: string, history: ChatMsg[], params: R
     }
   } catch (error) {
     if (controller.signal.aborted) {
-      appendAssistantNote(id, "已停止安全試跑，沒有執行任何寫入。");
+      appendAssistantNote(id, "已停止演練，沒有執行任何寫入。");
       return;
     }
-    appendAssistantNote(id, `⚠️ 安全試跑連線失敗：${error instanceof Error ? error.message : "未知錯誤"}。沒有執行任何寫入。`);
+    appendAssistantNote(id, `⚠️ 演練連線失敗：${error instanceof Error ? error.message : "未知錯誤"}。沒有執行任何寫入。`);
   } finally {
     if (verificationControllers.get(id) === controller) {
       verificationControllers.delete(id);
@@ -989,7 +999,7 @@ async function previewWorkflowFromChat(id: string, history: ChatMsg[], params: R
 }
 
 export function stopVerification(id: string) {
-  verificationControllers.get(id)?.abort(new Error("使用者已停止安全試跑"));
+  verificationControllers.get(id)?.abort(new Error("使用者已停止演練"));
   // 中斷瀏覽器 fetch 不保證 Next.js 立刻收到 disconnect；同步通知 server 中止真正的 run/外部呼叫。
   void fetch(`/api/workflows/${id}/stop-build`, { method: "POST" }).catch(() => {});
 }
@@ -1000,7 +1010,7 @@ export function cancelPendingExecution(id: string) {
   appendAssistantNote(id, "已取消，不會寫入任何資料。");
 }
 
-/** 使用者看過安全試跑結果後明確確認，才啟動一次正式執行。 */
+/** 使用者看過演練結果後明確確認，才啟動一次正式執行。 */
 export async function confirmPendingExecution(id: string, confirmImported = false) {
   const pending = get(id).pendingExecution;
   if (!pending || pending.running) return;
@@ -1023,7 +1033,7 @@ export async function confirmPendingExecution(id: string, confirmImported = fals
     };
     if (start.status === 409 && started.code === "WORKFLOW_CHANGED_SINCE_PREVIEW") {
       set(id, { pendingExecution: null });
-      appendAssistantNote(id, "流程在安全預覽後被修改過；我不會拿舊預覽去執行新版本。現在自動重新安全試跑，請再核對一次。");
+      appendAssistantNote(id, "流程在演練後被修改過；我不會拿舊預覽去執行新版本。現在自動重新演練，請再核對一次。");
       await prepareChatPreview(id, get(id).chat, pending.params);
       return;
     }
@@ -1035,7 +1045,7 @@ export async function confirmPendingExecution(id: string, confirmImported = fals
     }
     if (start.status === 409 && started.code === "PREVIEW_INPUT_EXPIRED") {
       set(id, { pendingExecution: null });
-      appendAssistantNote(id, "安全預覽時用的附件／網址已過期，或確認鍵被重複送出；我不會改拿別份資料執行。現在重新安全試跑，請再核對一次。");
+      appendAssistantNote(id, "演練時用的附件／網址已過期，或確認鍵被重複送出；我不會改拿別份資料執行。現在重新演練，請再核對一次。");
       await prepareChatPreview(id, get(id).chat, pending.params);
       return;
     }
@@ -1049,7 +1059,7 @@ export async function confirmPendingExecution(id: string, confirmImported = fals
       set(id, {
         pendingExecution: { ...pending, running: false },
         pendingInput: {
-          token: Date.now(), kind: "settings", title: "正式執行前還差一點資料",
+          token: Date.now(), kind: "settings", title: "填一次就好的帳密",
           description: "內容只存進本機設定，不會放進對話或送給 AI；填完會自動繼續執行。",
           // 優先用節點宣告的欄位型別,只有沒帶 type 時才退回猜文字(猜錯會讓 webhook 網址這類機密明文顯示)
           fields: started.missing.map((item) => ({ ...item, type: item.type ?? (/密碼|password|token|secret/i.test(`${item.key} ${item.label}`) ? "password" : "text"), required: true })),
@@ -1102,7 +1112,7 @@ async function monitorChatRun(id: string, runId: string) {
           .find((lines) => lines.length > 0) ?? [];
         const resultNote = output.length ? `\n\n這次得到的結果：\n${output.map((line) => `• ${line}`).join("\n")}` : "";
         appendAssistantNote(id, mode === "preview"
-          ? `✅ 只讀安全試跑完成。這次沒有寫入或發送任何內容。${resultNote}`
+          ? `✅ 只演練完成。這次沒有寫入或發送任何內容。${resultNote}`
           : `✅ 正式執行完成。需要寫出的內容已經真的完成。${resultNote}`);
         return;
       }
@@ -1140,12 +1150,12 @@ async function monitorChatRun(id: string, runId: string) {
       }
       appendAssistantNote(id, cancelled
         ? mode === "preview"
-          ? "已停止只讀安全試跑；這次沒有寫入或發送任何內容。"
+          ? "已停止只演練；這次沒有寫入或發送任何內容。"
           : "已停止正式執行。已經完成的外部寫入不會自動回滾；尚未執行的步驟不會再繼續。"
         : data.run.resolution === "needs-human"
           ? `⚠️ 停在「${data.run.failed_node ?? "某一步"}」：${data.run.reason ?? "還缺少只有你手上才有的資料"}\n\n這不是改流程能猜出來的問題。我已經指出需要補的資料；補好後直接再試，不會叫 AI 白跑。`
         : mode === "preview"
-          ? `⚠️ 只讀安全試跑停在「${data.run.failed_node ?? "某一步"}」：${data.run.reason ?? "未知錯誤"}\n\n沒有執行任何寫入。可以讓 AI 修流程，或以只讀模式從失敗處再試。`
+          ? `⚠️ 只演練停在「${data.run.failed_node ?? "某一步"}」：${data.run.reason ?? "未知錯誤"}\n\n沒有執行任何寫入。可以讓 AI 修流程，或以只讀模式從失敗處再試。`
           : `⚠️ 正式執行停在「${data.run.failed_node ?? "某一步"}」：${data.run.reason ?? "未知錯誤"}\n\n可以直接按下面「讓 AI 修到會跑」，或說「再試一次」從失敗處續跑；不用自己去翻紀錄找原因。`);
       return;
     }
@@ -1217,7 +1227,7 @@ export function seedImportWelcome(id: string, summary: ImportWelcomeSummary) {
     points.push(`有 ${summary.n8nReviewCount} 個 n8n 步驟需要重新確認，因為原本的參數、帳密或寫入方向不能直接視為安全等價；請先看畫布上的黃色步驟，再按「🪄 測到會跑」。`);
   }
   if ((summary.n8nUnsupportedCount ?? 0) > 0) {
-    points.push(`有 ${summary.n8nUnsupportedCount} 個 n8n 步驟目前沒有安全的一對一積木，已保留成待重新描述的步驟；它們不會被偷偷執行。`);
+    points.push(`有 ${summary.n8nUnsupportedCount} 個 n8n 步驟目前沒有安全的一對一步驟可對應，已保留成待重新描述的步驟；它們不會被偷偷執行。`);
   }
   // 排程能不能帶回是「有沒有東西要補」以外的另一件事——不是需要你動手的安全機制，
   // 純粹告知帶了幾筆、且解釋為什麼不會馬上開始跑(草稿狀態)，所以獨立於上面的 points 之外處理。
@@ -1237,7 +1247,7 @@ export function seedImportWelcome(id: string, summary: ImportWelcomeSummary) {
       pendingInput: {
         token: Date.now(),
         kind: "settings",
-        title: "填入這條流程需要的帳密",
+        title: "填一次就好的帳密",
         description: "值只會存進本機設定，不會放進聊天紀錄，也不會傳給 AI。",
         fields: summary.missingSecrets.map((f) => ({
           key: f.key,
@@ -1261,7 +1271,7 @@ export function promptForMissingSecrets(id: string, missing: { key: string; labe
     pendingInput: {
       token: Date.now(),
       kind: "settings",
-      title: "填入這條流程需要的帳密",
+      title: "填一次就好的帳密",
       description: "值只會存進本機設定，不會放進聊天紀錄，也不會傳給 AI。",
       // 優先用節點自己宣告的欄位型別；只有舊呼叫端沒帶 type 時才退回猜 key 名稱(例如 Slack webhook
       // 網址這種敏感值,key 名稱完全不含 pass/token/secret,猜錯就會讓機密明文顯示在畫面上)。
@@ -1295,7 +1305,7 @@ export async function submitChatInputs(id: string, values: Record<string, string
     set(id, { pendingInput: null });
     // 有後續工作才說「自動接著做」；沒有(例如執行前補帳密)就老實講下一步是使用者再按執行
     appendAssistantNote(id, afterSave?.kind === "verify-google-slides"
-      ? "✅ 已安全保存，內容沒有放進對話，也沒有傳給 AI。現在只讀驗證 Google 簡報連線，不會更新投影片。"
+      ? "✅ 已安全保存，內容沒有放進對話，也沒有傳給 AI。現在演練驗證 Google 簡報連線，不會更新投影片。"
       : continuation
         ? "✅ 已安全保存，內容沒有放進對話，也沒有傳給 AI。現在自動接著做。"
         : "✅ 已安全保存，內容沒有放進對話，也沒有傳給 AI。現在可以再按一次「執行」或「從這一步開始測」。");
@@ -1314,7 +1324,7 @@ export async function submitChatInputs(id: string, values: Record<string, string
     set(id, { pendingInput: null });
     appendAssistantNote(id, "✅ 收到這次要用的資料，現在自動接著做。");
   }
-  // Google Slides 是一個獨立的「存好就立刻只讀驗證」流程。即使這條 workflow 剛好還留著
+  // Google Slides 是一個獨立的「存好就立刻演練驗證」流程。即使這條 workflow 剛好還留著
   // 其他對話的 continuation，也絕不能優先重送舊需求而跳過驗證，否則使用者會以為授權設好了、
   // 卻沒有任何證據知道網址/權限/圖表是否真的正確。
   if (afterSave?.kind === "verify-google-slides") await verifyGoogleSlidesSetup(id, afterSave.nodeIds);
@@ -1322,7 +1332,7 @@ export async function submitChatInputs(id: string, values: Record<string, string
 }
 
 /**
- * Google Slides 的第一次授權填好後，直接只讀驗證「這一格」而不是叫新手回畫布猜要按哪個鍵。
+ * Google Slides 的第一次授權填好後，直接演練驗證「這一格」而不是叫新手回畫布猜要按哪個鍵。
  * onlyNodeIds 讓無關的登入/寫入步驟不會把驗證結果攪在一起；dryRun 保證不會送 batchUpdate。
  */
 async function verifyGoogleSlidesSetup(id: string, nodeIds: string[]) {
@@ -1381,7 +1391,7 @@ export async function continueChatWork(id: string) {
       }
       const nodeIds = state.pendingInput.afterSave.nodeIds;
       set(id, { pendingInput: null });
-      appendAssistantNote(id, "✅ 已確認授權資料存在，現在只讀驗證 Google 簡報連線，不會更新投影片。");
+      appendAssistantNote(id, "✅ 已確認授權資料存在，現在演練驗證 Google 簡報連線，不會更新投影片。");
       await verifyGoogleSlidesSetup(id, nodeIds);
       return;
     } catch {
@@ -1417,11 +1427,11 @@ export async function continueChatWork(id: string) {
     return;
   }
   if (state.pendingTrust) {
-    appendAssistantNote(id, "目前停在外部流程的來源確認。請按「信任來源並安全試跑」；模糊的「繼續」不會被當成安全授權。");
+    appendAssistantNote(id, "目前停在外部流程的來源確認。請按「信任來源並演練」；模糊的「繼續」不會被當成安全授權。");
     return;
   }
   if (state.pendingExecution) {
-    appendAssistantNote(id, "安全試跑已完成，正等你核對。若數字正確，請說「確認正式執行」或按下面的確認鍵；我不會把模糊的「繼續」當成寫入授權。");
+    appendAssistantNote(id, "演練已完成，正等你核對。若數字正確，請說「確認正式執行」或按下面的確認鍵；我不會把模糊的「繼續」當成寫入授權。");
     return;
   }
   if (state.activeExecution?.status === "failed") { await retryChatExecution(id); return; }
@@ -1432,7 +1442,7 @@ export async function trustImportedAndContinue(id: string) {
   const continuation = continuations.get(id);
   if (!get(id).pendingTrust || continuation?.kind !== "preview") return;
   set(id, { pendingTrust: false });
-  appendAssistantNote(id, "已收到信任確認。現在只做安全試跑，所有寫入與通知仍然會被攔住。");
+  appendAssistantNote(id, "已收到信任確認。現在只做演練，所有寫入與通知仍然會被攔住。");
   await previewWorkflowFromChat(id, continuation.history, continuation.params, true);
 }
 
@@ -1482,11 +1492,11 @@ export async function stopAllChatWork(id: string) {
 export async function reportChatStatus(id: string) {
   const state = get(id);
   if (state.thinking) { appendAssistantNote(id, "目前正在理解需求／建圖，還沒有卡住；可以隨時說「停止」。"); return; }
-  if (state.verifying) { appendAssistantNote(id, "目前正在安全試跑：讀取與計算會真的做，所有寫入都被攔住。可以隨時說「停止」。"); return; }
-  if (state.autoTest?.running) { appendAssistantNote(id, "目前正在自動測試與修復。它會反覆跑、看錯誤、修改再驗證，最多 15 分鐘；可以隨時說「停止」。"); return; }
+  if (state.verifying) { appendAssistantNote(id, "目前正在演練：讀取與計算會真的做，所有寫入都被攔住。可以隨時說「停止」。"); return; }
+  if (state.autoTest?.running) { appendAssistantNote(id, "目前正在「測到會跑」。它會反覆跑、看錯誤、修改再驗證，最多 15 分鐘；可以隨時說「停止」。"); return; }
   if (state.pendingInput) { appendAssistantNote(id, `目前停在「${state.pendingInput.title}」，等你填下面的欄位；填完會自動繼續。`); return; }
   if (state.pendingTrust) { appendAssistantNote(id, "目前等待你確認是否信任外部匯入流程；尚未開始讀檔或連線。"); return; }
-  if (state.pendingExecution) { appendAssistantNote(id, "安全試跑已完成，現在等你核對結果。沒有按確認前不會真的寫入。"); return; }
+  if (state.pendingExecution) { appendAssistantNote(id, "演練已完成，現在等你核對結果。沒有按確認前不會真的寫入。"); return; }
   if (state.activeExecution) {
     const labels: Record<ChatExecutionState["status"], string> = { starting: "準備啟動", queued: "排隊中", running: "執行中", waiting: "等待真人核准", success: "已完成", failed: "已失敗", cancelled: "已停止" };
     appendAssistantNote(id, `目前狀態：${labels[state.activeExecution.status]}。執行編號 ${state.activeExecution.runId}${state.activeExecution.reason ? `；${state.activeExecution.reason}` : ""}`);
@@ -1603,7 +1613,7 @@ export async function retryChatExecution(id: string) {
     runId = failed?.id;
     mode = failed?.dry_run ? "preview" : "formal";
   }
-  if (!runId) { appendAssistantNote(id, "找不到可以續跑的失敗紀錄。先說「測試看看」，我會從安全試跑開始。"); return; }
+  if (!runId) { appendAssistantNote(id, "找不到可以續跑的失敗紀錄。先說「測試看看」，我會從演練開始。"); return; }
   const response = await fetch(`/api/runs/${runId}/resume`, { method: "POST" });
   const data = await response.json() as { error?: string };
   if (!response.ok) { appendAssistantNote(id, `⚠️ 無法從失敗處續跑：${data.error ?? "未知錯誤"}`); return; }
@@ -1684,11 +1694,11 @@ function formatVerifyResult(d: {
   values?: { nodeLabel: string; computed: Record<string, unknown> }[]; skippedWrites?: string[];
 }): string {
   const skip = (d.skippedWrites ?? []).length
-    ? `\n\n🔒 只讀驗證：已略過「${(d.skippedWrites ?? []).join("、")}」——不會真的寫回試算表/發通知。`
+    ? `\n\n🔒 演練驗證：已略過「${(d.skippedWrites ?? []).join("、")}」——不會真的寫回試算表/發通知。`
     : "";
   if (!d.ok) {
     return `我實際讀+算到一半卡在「${d.failedNode ?? "某一步"}」：${(d.error ?? "").slice(0, 200)}。\n` +
-      `可能是這步的設定要調、或這份檔案跟流程預期的結構不一樣。你可以點那個節點用白話補充，我再修。${skip}`;
+      `可能是這步的設定要調、或這份檔案跟流程預期的結構不一樣。你可以點那一步用白話補充，我再修。${skip}`;
   }
   const lines = (d.values ?? []).map((v) => {
     const pairs = Object.entries(v.computed).map(([k, val]) => humanizePreviewPair(k, val)).join("、");
@@ -1758,7 +1768,7 @@ export async function startAutoTest(
     appendAssistantNote(id, "🛠 我會先用只讀模式實際跑，失敗就讀現場、修整張流程再重跑；外部寫入全部攔住。最多 15 分鐘，可隨時說「停止」。");
   }
   try {
-    // autorun 伺服器端一律強制安全排練(dryRun 永遠 true，不管這裡傳什麼)——這裡仍傳 true 只是
+    // autorun 伺服器端一律強制演練(dryRun 永遠 true，不管這裡傳什麼)——這裡仍傳 true 只是
     // 讓請求內容誠實反映實際行為，不是伺服器真的依賴這個值來決定要不要寫入。
     const res = await fetch(`/api/workflows/${id}/autorun`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -1773,7 +1783,7 @@ export async function startAutoTest(
       set(id, {
         autoTest: { running: false, steps: data.steps ?? [], ok: false, needsHuman: true, source },
         pendingInput: {
-          token: Date.now(), kind: "settings", title: "先補上只有你知道的資料",
+          token: Date.now(), kind: "settings", title: "填一次就好的帳密",
           description: "內容直接存本機，不會放進對話或交給 AI；填完會自動繼續修復測試。",
           // 優先用節點宣告的欄位型別,只有沒帶 type 時才退回猜文字(猜錯會讓 webhook 網址這類機密明文顯示)
           fields: data.missing.map((item) => ({ ...item, type: item.type ?? (/密碼|password|token|secret/i.test(`${item.key} ${item.label}`) ? "password" : "text"), required: true })),
@@ -1799,7 +1809,7 @@ export async function startAutoTest(
       }).join("\n");
       appendAssistantNote(id, data.ok
         ? data.canPromote
-          ? `✅ 已用真實資料完成只讀驗證；沒有真的寫入。${summary ? `\n\n${summary}` : ""}\n\n我現在再做一次安全預覽，把實際數字和預計寫入內容列給你確認。`
+          ? `✅ 已用真實資料完成演練驗證；沒有真的寫入。${summary ? `\n\n${summary}` : ""}\n\n我現在再做一次演練，把實際數字和預計寫入內容列給你確認。`
           : `🟡 流程接線已通過，但這輪使用了模擬資料，還不能當成正式驗收。${summary ? `\n\n${summary}` : ""}\n\n請提供一份真實但可安全測試的資料後再驗證一次。`
         : `⚠️ 這輪還沒完全修好。${summary ? `\n\n${summary}` : data.error ? `\n${data.error}` : ""}`);
       if (data.ok && data.canPromote) await previewWorkflowFromChat(id, get(id).chat, params);

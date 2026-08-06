@@ -5,7 +5,8 @@ import Link from "next/link";
 import { PageHeader } from "@/components/ui";
 
 /**
- * 可靠性總覽。
+ * 平台健康度(側欄/URL 仍是 reliability，只有畫面上的名字改了——2026-08 UI/UX 審計 IA-4，
+ * 「可靠性」對非工程背景的使用者太抽象)。
  *
  * 這一頁的存在理由：使用者最在意的三個問題(從零建得起來嗎、出問題 AI 修不修得了、
  * 排程能不能 100/100)，這個平台原本**一題都答不出來**，只能憑印象。
@@ -54,21 +55,28 @@ export default function ReliabilityPage() {
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState("");
 
+  async function load() {
+    setError("");
+    try {
+      const res = await fetch("/api/reliability");
+      if (!res.ok) throw new Error("讀取失敗");
+      setData(await res.json());
+    } catch {
+      setError("讀不到可靠性資料");
+    }
+  }
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    (async () => {
-      try {
-        const res = await fetch("/api/reliability");
-        if (!res.ok) throw new Error("讀取失敗");
-        setData(await res.json());
-      } catch {
-        setError("讀不到可靠性資料");
-      }
-    })();
+    load();
   }, []);
 
-  if (error) return <div className="p-6"><p className="text-sm" style={{ color: "var(--red)" }}>{error}</p></div>;
-  if (!data) return <div className="p-6"><p className="text-sm muted">載入中…</p></div>;
+  if (error) return (
+    <div className="max-w-4xl mx-auto px-4 sm:px-8 py-6 sm:py-8">
+      <p className="text-sm" style={{ color: "var(--red)" }}>{error}，<button onClick={load} className="underline">重試</button>。</p>
+    </div>
+  );
+  if (!data) return <div className="max-w-4xl mx-auto px-4 sm:px-8 py-6 sm:py-8"><p className="text-sm muted">載入中…</p></div>;
 
   const { schedule, repair, build } = data;
   const manual = data.allRuns.filter((r) => r.trigger_type === "manual");
@@ -76,8 +84,8 @@ export default function ReliabilityPage() {
   const manualTotal = manual.reduce((sum, r) => sum + r.n, 0);
 
   return (
-    <div className="p-6 space-y-6 max-w-4xl">
-      <PageHeader title="可靠性總覽" subtitle="這個平台到底靠不靠譜——用實際發生過的執行紀錄回答，不是憑印象" />
+    <div className="max-w-4xl mx-auto px-4 sm:px-8 py-6 sm:py-8 space-y-6">
+      <PageHeader title="平台健康度" subtitle="這個平台到底靠不靠譜——用實際發生過的執行紀錄回答，不是憑印象" />
 
       {/* 最該立刻處理的事放最上面 */}
       {schedule.blocked.length > 0 && (
@@ -99,26 +107,26 @@ export default function ReliabilityPage() {
         </section>
       )}
 
-      {/* 問題三 */}
+      {/* 問題一 */}
       <section className="card p-4 space-y-3">
         <div>
-          <h2 className="font-medium">③ 排程能不能準時、成功地跑完？</h2>
-          <p className="text-xs muted mt-0.5">只算「排程自己觸發」的執行，不含你手動按的。</p>
-        </div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-          <Stat big={String(schedule.total)} unit="次" label="排程總共觸發過幾次" />
-          <Stat big={String(schedule.enabledCount)} unit="個" label="目前開著的排程" />
-          <Stat big={rate(schedule.success, schedule.total)} label="成功率" />
-        </div>
-        {schedule.total < 10 && (
-          <p className="text-xs" style={{ color: "var(--amber, #b45309)" }}>
-            樣本太少，這個數字現在還不能當成可靠性指標。<b>大部分排程是每月/每季，所以要等時間累積。</b>
-            想快一點有數字，可以加一條每週執行、低風險的流程（例如固定抓一份資料存檔）。
+          <h2 className="font-medium">① 從零建流程，現成的步驟夠用嗎？</h2>
+          <p className="text-xs muted mt-0.5">
+            庫裡沒有對應步驟時，AI 會自己寫一段程式碼。這個比例越低，代表越多事情是用測試過的步驟完成的。
           </p>
-        )}
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <Stat big={String(build.workflows)} unit="條" label="流程總數" />
+          <Stat big={String(build.nodeTotal)} unit="個" label="步驟總數" />
+          <Stat
+            big={build.nodeTotal > 0 ? `${Math.round((build.customCode / build.nodeTotal) * 100)}%` : "—"}
+            label="需要 AI 自己寫程式碼的步驟"
+          />
+          <Stat big={`${build.workflowsWithoutCustomCode} / ${build.workflows}`} label="完全只用現成步驟的流程" />
+        </div>
         <p className="text-xs faint">
-          電腦關機或睡著時排程不會準時觸發，但醒來後會自動補跑一次（不會靜默漏掉）。
-          真的完全不能遲到的流程，需要一台不關機的機器。
+          AI 自己寫的程式碼在重新產生時品質會浮動。把已經調通的那一步用「⭐ 存成我的步驟」存起來，
+          它就不會再被重新產生。
         </p>
       </section>
 
@@ -139,7 +147,7 @@ export default function ReliabilityPage() {
         </div>
         {repair.attempts === 0 && (
           <p className="text-xs muted">
-            還沒有紀錄。這個量測是新加的，之後每次「讓 AI 修」或「幫我測到會跑」都會留下痕跡。
+            還沒有紀錄。這個量測是新加的，之後每次「讓 AI 修」或「測到會跑」都會留下痕跡。
             （在此之前修復迴圈跑完就結束，什麼都沒留下，所以這一題以前答不出來。）
           </p>
         )}
@@ -151,26 +159,26 @@ export default function ReliabilityPage() {
         </p>
       </section>
 
-      {/* 問題一 */}
+      {/* 問題三 */}
       <section className="card p-4 space-y-3">
         <div>
-          <h2 className="font-medium">① 從零建流程，現成的積木夠用嗎？</h2>
-          <p className="text-xs muted mt-0.5">
-            庫裡沒有對應節點時，AI 會自己寫一段程式碼。這個比例越低，代表越多事情是用測試過的積木完成的。
+          <h2 className="font-medium">③ 排程能不能準時、成功地跑完？</h2>
+          <p className="text-xs muted mt-0.5">只算「排程自己觸發」的執行，不含你手動按的。</p>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+          <Stat big={String(schedule.total)} unit="次" label="排程總共觸發過幾次" />
+          <Stat big={String(schedule.enabledCount)} unit="個" label="目前開著的排程" />
+          <Stat big={rate(schedule.success, schedule.total)} label="成功率" />
+        </div>
+        {schedule.total < 10 && (
+          <p className="text-xs" style={{ color: "var(--amber, #b45309)" }}>
+            樣本太少，這個數字現在還不能當成可靠性指標。<b>大部分排程是每月/每季，所以要等時間累積。</b>
+            想快一點有數字，可以加一條每週執行、低風險的流程（例如固定抓一份資料存檔）。
           </p>
-        </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <Stat big={String(build.workflows)} unit="條" label="流程總數" />
-          <Stat big={String(build.nodeTotal)} unit="個" label="步驟總數" />
-          <Stat
-            big={build.nodeTotal > 0 ? `${Math.round((build.customCode / build.nodeTotal) * 100)}%` : "—"}
-            label="需要 AI 自己寫程式碼的步驟"
-          />
-          <Stat big={`${build.workflowsWithoutCustomCode} / ${build.workflows}`} label="完全只用現成積木的流程" />
-        </div>
+        )}
         <p className="text-xs faint">
-          AI 自己寫的程式碼在重新產生時品質會浮動。把已經調通的那一步用「⭐ 存成我的步驟」存起來，
-          它就不會再被重新產生。
+          電腦關機或睡著時排程不會準時觸發，但醒來後會自動補跑一次（不會靜默漏掉）。
+          真的完全不能遲到的流程，需要一台不關機的機器。
         </p>
       </section>
 

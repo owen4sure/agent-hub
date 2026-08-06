@@ -40,6 +40,14 @@ export class ExternalPreflightError extends Error {
 const successfulUntil = new Map<string, number>();
 const SUCCESS_TTL_MS = 5 * 60 * 1000;
 
+// 真實踩過(兩次)：這裡原本收到任何錯誤就立刻放棄，同一支已經證實只是偶爾暫時性失敗的網址，
+// 只因為剛好被這個「開跑前的檢查」打到，就讓使用者連登入、抓信都還沒開始就整條流程失敗——
+// 比正式寫入節點本身還沒有耐受度，不合理。
+//
+// 重試現在統一放在 `probeSheetScript` 內部(見 googleSheet.ts 的 callSheetScriptWithRetry，
+// 那裡有實測到的延遲分佈與退避設定)，這一層**不再自己疊第二層重試**：疊起來會變成
+// 3 × 100 秒以上，一個真的已經失效的部署要卡五分多鐘才告訴使用者，反而更糟。
+
 export async function preflightExternalIntegrations(workflow: Workflow, signal?: AbortSignal): Promise<void> {
   for (const target of collectExternalPreflightTargets(workflow)) {
     if ((successfulUntil.get(target.endpoint) ?? 0) > Date.now()) continue;

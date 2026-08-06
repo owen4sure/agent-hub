@@ -102,10 +102,20 @@ export default function RunsPage() {
         </div>
       </div>
 
-      {error && <p className="text-sm" style={{ color: "var(--red)" }}>載入失敗,稍後會自動重試。</p>}
+      {error && <p className="text-sm" style={{ color: "var(--red)" }}>載入失敗，稍後會自動重試。</p>}
       {runs === null && !error && <p className="text-sm muted">載入中…</p>}
-      {runs !== null && visible.length === 0 && (
-        <EmptyState icon="☰" title="沒有符合條件的執行紀錄" hint="流程執行過後,每一筆都會出現在這裡(每條流程保留最近 20 筆)。" />
+      {/* 「真的還沒有任何紀錄」跟「篩選/搜尋後沒有結果」是兩種不同情況，以前共用同一句話，
+          搜尋打錯字看起來會像「這個平台從沒執行過任何東西」(2026-08 UI/UX 審計 IA-2)。 */}
+      {runs !== null && runs.length === 0 && (
+        <EmptyState icon="☰" title="還沒有任何執行紀錄" hint="流程執行過後，每一筆都會出現在這裡（每條流程保留最近 20 筆）。" action={<Link href="/" className="btn btn-primary">看流程列表</Link>} />
+      )}
+      {runs !== null && runs.length > 0 && visible.length === 0 && (
+        <EmptyState
+          icon="☰"
+          title="沒有符合條件的執行紀錄"
+          hint="換個關鍵字，或清除篩選看全部紀錄。"
+          action={<button onClick={() => { setSearch(""); setStatusFilter("all"); }} className="btn btn-ghost">清除篩選</button>}
+        />
       )}
 
       {/* 連成一張表的活動流:細分隔線 + 左側狀態色條,比一格一格浮卡更好掃、更耐看 */}

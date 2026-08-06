@@ -106,7 +106,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, message: `已寄出測試信到 ${secrets.smtpAccount}，去收信匣看看(也檢查垃圾信)` });
     }
 
-    return NextResponse.json({ ok: false, message: "不認識的動作" }, { status: 400 });
+    return NextResponse.json({ ok: false, message: "這個測試請求看起來不正確，請重新整理頁面再試一次。" }, { status: 400 });
   } catch (err) {
     // sendTelegram/sendLine 拋的錯誤本身就是給人看的中文(含下一步指引)，直接呈現
     const msg = err instanceof Error ? err.message : String(err);

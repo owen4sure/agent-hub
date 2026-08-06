@@ -65,8 +65,11 @@ export const GOOGLE_SLIDES_TEXT_UPDATE_RULES = `- 【更新 Google 簡報裡某�
   2. 讀簡報結構：GET https://slides.googleapis.com/v1/presentations/{fileId}(帶 Authorization: Bearer <access_token>)，拿到 presentation.slides 陣列。
   3. **找目標頁一律用「內容比對」，絕對不能假設固定頁碼／頁面順序**：遍歷 slides，對每一頁的 pageElements 檢查 shape.text.textElements 組出的文字內容，找出含有使用者指定的「這一頁一定會有的標題文字」(例如某個分類標籤)的那一頁。找不到就 throw，並在錯誤訊息列出目前每一頁掃到的文字內容(或至少前幾頁的摘要)，不准猜一個頁碼頂替。
   4. **在同一頁裡再找目標文字方塊，一樣用內容比對**：檢查該頁 pageElements 裡每個 shape.text 組出的文字，找出含有「這段話一定會有的關鍵詞」(例如某個固定不變的開頭字樣)的那個文字方塊，取得它的 objectId。同一頁有多個文字方塊時，比對條件要夠具體，避免命中錯誤的方塊；命中 0 個或命中超過 1 個都要 throw 說明比對到的候選內容。
-  5. **整段刪除、整段重新插入，不要嘗試只替換某幾個數字**：Google Slides 會依「格式邊界」把文字切成好幾個 textRun(即使肉眼看起來是同一段連續文字、同一種格式)，用 startIndex/endIndex 去精準定位單一數字的做法在下一次資料一變動就會全部錯位，非常不可靠。正確做法是呼叫 presentations.batchUpdate，一次送兩個 request：先 {deleteText: {objectId, textRange: {type: "ALL"}}} 清空整個文字方塊，緊接著 {insertText: {objectId, insertionIndex: 0, text: 新文字}} 填入完整的新文字(兩個 request 放在同一個陣列裡、同一次呼叫送出，deleteText 在前)。這樣即使原本的文字被使用者手動加過其他內容、格式邊界跟預期不同，也不會有「只改到一半」的殘留問題。
+  5. **改寫方式依「這個文字方塊裡的格式是不是均一」分兩種，選錯會把使用者排好的版面弄壞**：
+     (a) **整個方塊同一種格式**(例如「資料日期：2026/8/4」這種單行小字)→ 整段刪除重寫：presentations.batchUpdate 一次送兩個 request，先 {deleteText: {objectId, textRange: {type: "ALL"}}} 再 {insertText: {objectId, insertionIndex: 0, text: 新文字}}(同一個陣列、deleteText 在前)。
+     (b) **段落裡有混合格式**(部分數字粗體/不同字級/不同顏色——KPI 說明段落幾乎都是這種)→ **絕對不能整段刪除重寫，格式會全部變成同一種、使用者排好的粗體重點全部消失**(真實踩過)。正確做法是「只換數字那幾個字、並把原樣式套回」：①把 textElements 的 textRun 串成完整文字，**在執行當下用 regex 找出要換的數字的位置**(絕不能寫死 startIndex——寫死的索引在資料一變就全部錯位，這正是舊版禁止索引定位的原因；執行當下對「剛抓下來的文字」跑 regex 沒有這個問題)；②記下該範圍第一個字元所屬 textRun 的 style；③對每一處要換的數字送三個 request：{deleteText: {objectId, textRange: {type: "FIXED_RANGE", startIndex, endIndex}}}、{insertText: {objectId, insertionIndex: startIndex, text: 新值}}、{updateTextStyle: {objectId, textRange: {type: "FIXED_RANGE", startIndex, endIndex: startIndex+新值長度}, style: 記下的樣式, fields: "bold,italic,underline,fontSize,foregroundColor,fontFamily,weightedFontFamily"}}；④**多處替換一定要由後往前排序再送**(同一方塊內位置大的先改)，前面的替換才不會被後面的長度變化弄錯位；⑤新舊值相同就跳過不送(冪等：重跑不會亂改)。regex 比對不到預期的句型時要 throw 並附上目前整段文字，不准硬猜位置。
   6. 新文字要包含所有你要保留的固定文字(標題、單位、括號、標點)，只有其中的數字/日期是這次算出來的新值——組字串前務必看清楚原本的完整格式(換行位置、全形/半形符號、千分位逗號)，照原樣重現，不要自己改動措辭或標點。
+  6a. **換「日期」尤其危險，絕不能用 \\d{1,2}\\/\\d{1,2} 這種寬鬆 regex 在整段文字裡撈日期再替換**：使用者嘴上講的日期常是「8/4」這種短格式，但簡報上實際寫的往往是「資料日期：2026/8/4」——寬鬆 regex 會咬到年份中段撈出「26/8」，替換完整格變成亂碼(真實踩過的產碼 bug)。正確做法擇一：①錨定標籤，把「標籤：」後面到行尾整段換掉(例如比對「資料日期：」開頭的整行)；②regex 優先比對完整年份格式 \\d{4}[\\/\\-]\\d{1,2}[\\/\\-]\\d{1,2}，比不到才退回「前後都不是數字或斜線」的邊界式 M/D。兩種都要先 ctx.log 實際抓到的原文字串讓人核對。
   7. 這一步只做「找頁面＋找文字方塊＋刪除重寫文字」，不要在同一段程式碼裡順便呼叫 refreshSheetsChart 或動到其他頁面/圖表。`;
 
 /**
@@ -107,7 +110,8 @@ export const GOOGLE_SHEET_SCRIPT_CELL_RULES = `- 【custom-code 需要直接指�
   2. \`readCells\`：body 是 { action:"readCells", sheet, cells: ["G1","B2","C3",...] }——**cells 是「A1 位址字串陣列」，不是 range 字串、也不是 {range:"..."} 物件**。回應是 { ok:true, cells: [{a1,value}, {a1,value}, ...] }——**是攤平的物件陣列，不是二維 values 表格**，要讀某個位址的值必須自己在回傳的 cells 陣列裡找 a1 等於該位址的那個項目(或用固定順序索引，因為回應順序跟你傳入的 cells 陣列順序一致)，不能寫 res.values[0][0] 這種假設 Sheets API 慣例的存取法。
   3. \`writeCells\`：body 是 { action:"writeCells", sheet, cells: [{a1:"B1", value:"..."}, {a1:"B2", value:123}, ...] }——**cells 是「{a1,value} 物件陣列」**，一次可以送多格。回應 { ok:true, updated: 數量 }。
   4. \`updateTable\`：只用於「靠 A 欄列名比對寫入」的既有情境(跟 google-sheet-update 節點同一套)，不適用於直接指定任意儲存格；這裡列出來只是提醒不要跟 readCells/writeCells 的格式搞混。
-  5. 呼叫方式都是 fetch POST，Content-Type application/json，body 用 JSON.stringify({action, sheet, cells})；sheet 用試算表分頁名稱。回應若有 error 欄位要 throw 並附完整內容。`;
+  5. 呼叫方式都是 fetch POST，Content-Type application/json，body 用 JSON.stringify({action, sheet, cells})；sheet 用試算表分頁名稱。回應若有 error 欄位要 throw 並附完整內容。
+  6. 【res.ok 為 false 時，絕對不要把 \`await res.text()\` 整段原封不動塞進錯誤訊息】——真實踩過：部署失效時 Google 回的是一整頁 HTML(含 CSS、meta 標籤，動輒兩三千字)，直接塞進 throw 會讓使用者看到一坨完全看不懂的內容，是這個平台一路以來努力做到「白話說明」的反例。要比照這個模式分層：\`res.status === 404\` → throw 固定的中文提示「Apps Script 網址回 404——部署可能已被刪除或網址已失效，請到 Apps Script 專案重新『部署 → 管理部署』確認/建立新版本」；\`res.status >= 500\` → throw「Google 那邊暫時出錯(HTTP \${res.status})，稍後再試一次」；其餘狀態才把回應內容截到 300 字以內附上(\`(await res.text()).slice(0, 300)\`)，不要整段照貼。`;
 
 /**
  * 「固定寬度滾動視窗＋歸檔區」是這次實測驗證過兩次(不同工作流、不同分頁)都成立的通用模式：

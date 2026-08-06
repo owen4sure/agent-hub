@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { BUILDER_MAX_OUTPUT_TOKENS, authorizesImmediateBuild, bareTechnicalTokens, buildWorkflow, builderGatewayTimeoutMs, builderModelForHistory, describeSuggestedSchedule, effectiveRequirementText, existingGraphEditSystemPrompt, explicitTriggerInputKeys, inferAttachmentRoleHint, isLikelyExistingGraphEdit, looksLikeBrokenStructuredOutput, needsBusinessDataSourceClarification, normalizeBuilderGraphObject, readinessNotes, systemPrompt, trimHistoryForBuilder, userRequirementText, validateSuggestedSchedule, wantsAutoWebhook, wantsFullGraphReplacement, wireManualFileUpload } from "./builder";
 import { lintGraph, lintVarRefWarnings } from "./graphLint";
 import { checkRequirements } from "./requirementCheck";
+import { createWorkflow, deleteWorkflow, saveWorkflow } from "./store";
 import type { WorkflowNode } from "./types";
 
 test("builder schedule：接受常用中文需求會產生的排程", () => {
@@ -1352,14 +1355,57 @@ test("被丟棄那一輪自動移除的東西，不能寫進最後交付的說�
   const client = {
     chat: { completions: { create: async () => ({ choices: [{ message: { content: responses.shift() ?? "" }, finish_reason: "stop" }] }) } },
   } as never;
+  // 「排程自動執行」有講要排程、但沒講頻率——確定性補排程(scheduleSuggest)頻率不能猜、
+  // 會回 null，所以這一輪仍會照舊被丟棄餵回模型重畫，測試的「丟棄輪」前提才成立。
   const result = await buildWorkflow(
     client,
     "test-builder-model",
-    [{ role: "user", parts: [{ kind: "text", text: "每天早上九點自動整理一段固定文字" }] }],
+    [{ role: "user", parts: [{ kind: "text", text: "幫我排程自動執行：整理一段固定文字" }] }],
     { nodes: [], edges: [] },
   );
   assert.equal(result.phase, "ready");
   assert.ok(!/Telegram/.test(result.message), `講的是一張不存在的圖：${result.message}`);
+});
+
+// 反向情境(2026-08-05 診斷編號 fb2b1d95 的修法)：圖已完整、唯一缺口是排程、而且使用者原話
+// 講得出頻率——不再燒一輪模型重出，直接從原話確定性補上 cron，第一輪就交付。
+test("唯一缺排程且原話講得出頻率時，確定性補上、不再多燒一輪模型", async () => {
+  let calls = 0;
+  const client = {
+    chat: {
+      completions: {
+        create: async () => {
+          calls++;
+          return {
+            choices: [{
+              message: {
+                content: JSON.stringify({
+                  phase: "ready",
+                  message: "好了",
+                  nodes: [
+                    { id: "trigger", type: "trigger", label: "開始", config: {} },
+                    { id: "n1", type: "template-text", label: "整理", config: { template: "固定文字" } },
+                  ],
+                  edges: [{ from: "trigger", to: "n1" }],
+                  // 模型漏帶 schedule——以前這裡會整輪餵回重出
+                }),
+              },
+              finish_reason: "stop",
+            }],
+          };
+        },
+      },
+    },
+  } as never;
+  const result = await buildWorkflow(
+    client,
+    "test-builder-model",
+    [{ role: "user", parts: [{ kind: "text", text: "每天早上九點自動執行：整理一段固定文字" }] }],
+    { nodes: [], edges: [] },
+  );
+  assert.equal(result.phase, "ready");
+  assert.equal(calls, 1, "缺排程不該再燒第二輪模型");
+  assert.equal((result as { schedule?: { cron: string } }).schedule?.cron, "0 9 * * *");
 });
 
 // 使用者問「為什麼這一步抓不到 X」時，模型手上若剛好缺了那一段程式碼，它照樣會很有把握地解釋
@@ -1440,4 +1486,71 @@ test("模型說上下文塞不下時，改用精簡版重試，並告訴使用�
   assert.equal(result.phase, "answer");
   assert.ok(promptSizes.length >= 2 && promptSizes[1] < promptSizes[0], `重試時提示要變小：${promptSizes.join(" → ")}`);
   assert.match(result.message, /沒有看到/, "降級了就一定要講");
+});
+
+/**
+ * 2026-08 code review 抓到的真實 bug：existingWorkflowRefsSection 這個函式本身的
+ * excludeWorkflowId 邏輯是對的(已有獨立測試)，但 builder.ts 呼叫它的地方忘了真的傳入這條流程
+ * 自己的 id，等於這個參數在正式流程裡從來沒被填過——這條流程正在被修改時，如果使用者訊息裡
+ * 剛好提到自己的名字，會被builder 誤判成「可以呼叫的既有流程」，寫出一個呼叫自己的
+ * run-workflow 節點，執行時撞上「子流程不能呼叫自己」。這裡釘住呼叫點真的有把 id 傳過去，
+ * 不是只驗證函式本身的邏輯——被驗證過的函式參數沒被呼叫端使用，一樣是這個 bug 的完整重現。
+ */
+test("既有流程參考：builder 呼叫 existingWorkflowRefsSection 時要傳入這條流程自己的 id 排除自己", () => {
+  const source = fs.readFileSync(path.join(process.cwd(), "lib/workflow/builder.ts"), "utf8");
+  assert.match(
+    source,
+    /existingWorkflowRefsSection\(lastUserText, currentGraph\.id\)/,
+    "呼叫點要真的傳入 currentGraph.id 當 excludeWorkflowId，不能只呼叫 existingWorkflowRefsSection(lastUserText)",
+  );
+});
+
+test("既有流程參考：/build API 路由要把這條流程的 id 傳進 buildWorkflow 的 currentGraph，不然 builder 拿不到可以排除的 id", () => {
+  const source = fs.readFileSync(path.join(process.cwd(), "app/api/workflows/[id]/build/route.ts"), "utf8");
+  const callSite = source.slice(source.indexOf("result = await buildWorkflow("), source.indexOf("result = await buildWorkflow(") + 400);
+  assert.match(callSite, /\bid,\s*\n\s*nodes: cur\.nodes/, "傳給 buildWorkflow 的 currentGraph 物件要帶 id 欄位");
+});
+
+/**
+ * 2026-08 使用者原話(大意)：「不要用執行子流程呼叫，我要把既有的兩條流程裡面實際的每一個
+ * 步驟都複製貼進來，變成同一條新流程裡的真實節點」——而且「我可以自己在裡面把節點串接或分開」。
+ * 驗證 buildWorkflow 認出這種訊息時，完全不呼叫模型(0 次)就直接把來源流程真正的節點原封不動
+ * 接進來，回傳 phase:"ready" 讓使用者用既有的「套用到畫布」按鈕確認；且結果要通過 lintGraph
+ * (這是「套用到畫布」實際會擋下的檢查)。
+ */
+test("建圖：使用者明確要求複製既有流程的節點時，完全不呼叫模型、直接原封不動接進來", async () => {
+  const source = createWorkflow(`test-import-source-${Date.now()}`);
+  try {
+    saveWorkflow({
+      ...source, status: "official",
+      nodes: [
+        { id: "t", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
+        { id: "login", type: "custom-code", label: "登入", config: { intent: "登入", code: "return {...ctx.input};" }, position: { x: 300, y: 0 } },
+      ],
+      edges: [{ from: "t", to: "login" }],
+    });
+    let calls = 0;
+    const client = {
+      chat: { completions: { create: async () => { calls++; throw new Error("不應該呼叫模型"); } } },
+    } as never;
+    const result = await buildWorkflow(
+      client,
+      "test-builder-model",
+      [{ role: "user", parts: [{ kind: "text", text: `不要用執行子流程呼叫，把「${source.name}」這條流程裡面實際的步驟複製貼進來，我自己接` }] }],
+      {
+        id: "target-wf",
+        nodes: [{ id: "trigger", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } }],
+        edges: [],
+      },
+    );
+    assert.equal(calls, 0, "確定性比對到既有流程名稱+複製意圖時，不該還去呼叫模型重新生成節點");
+    assert.equal(result.phase, "ready");
+    if (result.phase !== "ready") return;
+    assert.ok(result.nodes.some((n) => n.label === "登入" && n.config.code === "return {...ctx.input};"), "來源流程的節點內容要原封不動出現");
+    assert.equal(result.nodes.filter((n) => n.type === "trigger").length, 1, "目標流程只能有一個觸發節點，來源的觸發節點不能被複製過來");
+    assert.deepEqual(lintGraph(result.nodes, result.edges), [], "套用到畫布實際會做 lintGraph 檢查，複製完的圖必須通過");
+    assert.match(result.message, /原封不動/);
+  } finally {
+    deleteWorkflow(source.id);
+  }
 });

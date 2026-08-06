@@ -49,6 +49,12 @@ export interface Workflow {
   nodes: WFNode[];
   edges: WFEdge[];
   model: string;
+  /** 流程**跑起來**時用哪顆模型。空字串 = 沿用 model(建流程那顆)，也就是原本的行為。 */
+  runModel?: string;
+  /** 執行時做不到就停下來，不自動換備援 */
+  strict?: boolean;
+  /** 跑之前就能看到的「會用哪顆、資料去哪」預覽 */
+  modelPlan?: { text: string; vision: string; captcha: string };
   /** 這條流程需要的帳密欄位(GET 時即時推導,含 custom-code 掃出來的)——搭配 secretsSet 算出缺哪些 */
   requiresSecrets?: { key: string; label: string; type: "text" | "password" }[];
   acceptanceSpec?: { expectedAnswer: string; graphFingerprint: string; savedAt: string };

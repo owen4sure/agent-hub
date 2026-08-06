@@ -46,7 +46,7 @@ export function N8nMigrationPanel({ workflow, onClose, onInspect, onReview, onAc
       )}
       {unresolved.length > 0 && <p className="text-xs muted">逐一確認後才能解鎖：已處理 {unresolved.filter((node) => Boolean(workflow.n8nMigrationReviews?.[node.agentHubNodeId])).length}/{unresolved.length} 個不確定步驟。</p>}
       {!workflow.n8nMigrationAcknowledgedAt && !graphReviewRequired && unresolved.every((node) => Boolean(workflow.n8nMigrationReviews?.[node.agentHubNodeId])) && <button className="btn btn-primary w-full" onClick={onAcknowledge}>我已看完映射，確認缺口後解鎖正式執行</button>}
-      {workflow.n8nMigrationAcknowledgedAt && <p className="text-xs" style={{ color: "var(--green)" }}>✓ 已確認此版本的遷移缺口；若節點或連線變更，系統會自動要求重新確認。</p>}
+      {workflow.n8nMigrationAcknowledgedAt && <p className="text-xs" style={{ color: "var(--green)" }}>✓ 已確認此版本的遷移缺口；若步驟或連線變更，系統會自動要求重新確認。</p>}
       <div className="space-y-2">
         <p className="font-medium">每一步目前要做什麼</p>
         {migration.originalNodes.map((node) => {

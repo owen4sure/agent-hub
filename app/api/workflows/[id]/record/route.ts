@@ -3,6 +3,7 @@ import { getWorkflow } from "@/lib/workflow/store";
 import {
   cancelRecording, describeRecording, finishRecording, recordingStatus, scrubRecordedSecrets, startRecording, toNodeCode,
 } from "@/lib/workflow/actionRecorder";
+import { resolveSharedSessionKeyForGraph } from "@/lib/workflow/sharedLoginSession";
 import { isPrivateHost, privateUrlsAllowed } from "@/lib/urlGuard";
 import { denyIfNotLocal } from "@/lib/requireLocal";
 import { recordAuditFromRequest } from "@/lib/auditLog";
@@ -24,7 +25,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const denied = denyIfNotLocal(req);
   if (denied) return denied;
   const { id } = await params;
-  if (!getWorkflow(id)) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
+  const wf = getWorkflow(id);
+  if (!wf) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
   const body = (await req.json().catch(() => null)) as { url?: unknown; finish?: unknown } | null;
 
   if (body?.finish === true) {
@@ -66,7 +68,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   }
 
   try {
-    startRecording(id, url);
+    startRecording(id, url, resolveSharedSessionKeyForGraph(wf.nodes));
     return NextResponse.json({
       ok: true,
       message: "已開啟錄製視窗——在那個瀏覽器裡把這件事做一次給我看，做完回來按「我做完了」。",

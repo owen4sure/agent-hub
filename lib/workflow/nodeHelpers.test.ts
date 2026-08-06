@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { captchaVisionPlan, cfgStr, normalizeCaptchaOcr, resolveJsonSafeTemplate } from "./nodeHelpers";
+import { cfgStr, normalizeCaptchaOcr, resolveJsonSafeTemplate } from "./nodeHelpers";
 import type { NodeContext } from "./types";
 
 function context(config: Record<string, unknown>, input: Record<string, unknown>) {
@@ -69,26 +69,8 @@ test("resolveJsonSafeTemplate：找不到的欄位保留原始 {{token}} 字面(
   assert.equal(resolveJsonSafeTemplate('{"x": "{{missing}}"}', ctx), '{"x": "{{missing}}"}');
 });
 
-test("驗證碼模型：Claude／純文字模型直接改用可靠視覺模型，且最多只有一個備援", () => {
-  assert.deepEqual(captchaVisionPlan("claude-code(本機訂閱)"), {
-    primary: "minimax-m3",
-    backup: "Qwen--3.5-max",
-    rerouted: true,
-  });
-  assert.deepEqual(captchaVisionPlan("glm-5.2"), {
-    primary: "minimax-m3",
-    backup: "Qwen--3.5-max",
-    rerouted: true,
-  });
-});
-
-test("驗證碼模型：已選可靠視覺模型就優先沿用，只補一個不同的備援", () => {
-  assert.deepEqual(captchaVisionPlan("Qwen--3.5-max"), {
-    primary: "Qwen--3.5-max",
-    backup: "minimax-m3",
-    rerouted: false,
-  });
-});
+// 「驗證碼該用哪顆模型」已經從這裡搬到 lib/modelPolicy.ts（使用者可以自己排主力/救援順序），
+// 對應的測試在 lib/modelPolicy.test.ts。
 
 test("本機驗證碼 OCR：去掉標點與信心值，只接受 4-6 個英數字", () => {
   assert.equal(normalizeCaptchaOcr("CDEZI® 1.0\n"), "CDEZI");

@@ -28,7 +28,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   }
 
   const wf = getWorkflow(proposal.workflow_id);
-  if (!wf) return NextResponse.json({ error: "workflow 已被刪除" }, { status: 404 });
+  if (!wf) return NextResponse.json({ error: "流程已被刪除" }, { status: 404 });
 
   const node = wf.nodes.find((n) => n.id === proposal.node_id);
   // 提案可能是好幾天前的：那個節點可能已經被刪、或這期間又被改過了。套用前先確認還適用，
@@ -55,7 +55,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   // before 快照，但真正寫入前不能再拿函式開頭那份 wf 整包蓋回去——就算這個 handler 自己中間沒有
   // await 空窗，也可能有另一個完全獨立的請求(例如使用者在節點面板手動微調)在這之前已經存了新版本。
   const fresh = getWorkflow(proposal.workflow_id);
-  if (!fresh) return NextResponse.json({ error: "workflow 已被刪除" }, { status: 404 });
+  if (!fresh) return NextResponse.json({ error: "流程已被刪除" }, { status: 404 });
   // 整圖感知修復可能同時改了主要節點以外的其他節點(extra_edits_json)——一起套用才是完整的修法，
   // 只套主要那格會留下「AI 說連同上游一起改了，實際上游還是舊設定」的半套狀態。跟主要節點一樣，
   // 每個額外節點也要核對「現在的設定是不是還跟提案建立當時一樣」，被改過的那個就跳過不套用，

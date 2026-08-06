@@ -184,6 +184,45 @@ export function setWorkflowModel(workflowId: string, model: string) {
   ).run(workflowId, model);
 }
 
+/**
+ * 「這條流程**跑起來**的時候用哪顆模型」，跟「建流程用哪顆」分開。
+ *
+ * 為什麼要分開(使用者的真實需求)：他公司用 Claude Code 建流程是被認可的，但建好的流程
+ * 在跑的時候，中間那些做判斷的步驟必須用自己機器上的模型，否則審查過不了。以前兩件事
+ * 共用 `wf_model.model` 一個欄位，表達不出這個組合。
+ *
+ * `runModel` 空字串 = 沿用 `model`，也就是完全維持改動前的行為——沒有這個需求的人
+ * 不會受到任何影響。
+ */
+export interface WorkflowModelPolicy {
+  /** 執行時用哪顆(空=沿用建流程那顆) */
+  runModel: string;
+  /** 做不到就停下來，不自動換備援 */
+  strict: boolean;
+}
+
+export function getWorkflowModelPolicy(workflowId: string): WorkflowModelPolicy {
+  const row = getDb()
+    .prepare(`SELECT run_model, strict_model FROM wf_model WHERE workflow_id = ?`)
+    .get(workflowId) as { run_model?: string; strict_model?: number } | undefined;
+  return { runModel: (row?.run_model ?? "").trim(), strict: Number(row?.strict_model ?? 0) === 1 };
+}
+
+export function setWorkflowModelPolicy(workflowId: string, patch: Partial<WorkflowModelPolicy>) {
+  const db = getDb();
+  const current = getWorkflowModelPolicy(workflowId);
+  const runModel = patch.runModel === undefined ? current.runModel : String(patch.runModel).trim();
+  const strict = patch.strict === undefined ? current.strict : patch.strict === true;
+  // wf_model 的 model 是 NOT NULL，這條流程可能還沒選過模型——用 DEFAULT_MODEL 補一筆，
+  // 不然 INSERT 會失敗、設定靜默存不進去。
+  db.prepare(
+    `INSERT INTO wf_model (workflow_id, model, run_model, strict_model, updated_at)
+     VALUES (?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(workflow_id) DO UPDATE SET
+       run_model = excluded.run_model, strict_model = excluded.strict_model, updated_at = excluded.updated_at`,
+  ).run(workflowId, getWorkflowModel(workflowId), runModel, strict ? 1 : 0);
+}
+
 // 帳密改成「依欄位名稱全域共用」：同一個 key(如 webmailAccount)只存一份，
 // 所有需要這個 key 的 workflow 都共用，設一次到處通。要用不同帳密的 workflow
 // 就在 requiresSecrets 宣告不同的 key 名稱(自然分開，不會互相蓋)。

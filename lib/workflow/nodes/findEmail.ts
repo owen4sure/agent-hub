@@ -43,8 +43,8 @@ export const findEmailNode: NodeDefinition = {
   configSchema: [
     { key: "date", label: "信件日期(YYYY-MM-DD 或相對變數)", type: "date-or-token", default: "{{targetDate}}" },
     { key: "subjectContains", label: "標題關鍵字", type: "text", default: "" },
-    { key: "searchBoxSelector", label: "搜尋框選擇器", type: "text", default: 'input[type="search"], input[placeholder*="搜尋"], input[name*="search" i]' },
-    { key: "subjectCellSelector", label: "信件標題欄選擇器", type: "text", default: "td.ML_Subject" },
+    { key: "searchBoxSelector", label: "搜尋框選擇器", type: "text", default: 'input[type="search"], input[placeholder*="搜尋"], input[name*="search" i]', advanced: true },
+    { key: "subjectCellSelector", label: "信件標題欄選擇器", type: "text", default: "td.ML_Subject", advanced: true },
     {
       key: "datePrefixFormat",
       label: "日期在標題裡的格式(留空=不比對標題裡的日期，改用純標題關鍵字搜尋，再從結果挑列上日期符合的那封)",
@@ -71,15 +71,33 @@ export const findEmailNode: NodeDefinition = {
       throw new Error(`找不到搜尋框(選擇器 ${searchSel})——選擇器可能不對，可按「讓 AI 修」讓 AI 依實際頁面調整`);
     }
     const searchBox = page.locator(searchSel).first();
-    const cellFor = () => (subject ? page.locator(subjectCellSel).filter({ hasText: subject }) : page.locator(subjectCellSel));
+    const allSubjectCells = page.locator(subjectCellSel);
+    const cellFor = () => (subject ? allSubjectCells.filter({ hasText: subject }) : allSubjectCells);
+    // 真實踩過：搜尋框確實填對了字(截圖裡看得到，逐字比對過跟正確查詢一模一樣)，按下 Enter 後畫面
+    // 卻還是完全沒篩選過的收件匣(556 封信、23 頁——跟搜尋前一模一樣)，害這步撈到的是「收件匣最上面
+    // 剛好符合標題關鍵字」的信，不是真正指定日期那封。平常找「今天最新一封」時就算踩到同一個問題也
+    // 不會發現(反正沒篩選的收件匣最上面剛好就是最新那封，恰好蒙對)，這次要找過去某一天的舊信，才
+    // 第一次真的暴露出來——這代表問題出在「Enter 這次沒有真的觸發搜尋」這種偶發的互動失敗，不是
+    // 查詢文字或編碼寫錯。用「搜尋前後，整個收件匣可見的信件總數有沒有真的變動」當作搜尋是否真的
+    // 生效的訊號(比用固定等待時間可靠——不管等多久，沒真的觸發的搜尋畫面就是不會變)；沒變動就整套
+    // (清空→填→按Enter)重來一次，最多重來 2 次，避免無止盡卡在同一個沒反應的搜尋。
     const runSearch = async (q: string): Promise<number> => {
-      // 每次搜尋前先清空搜尋框：不清的話某些 webmail 會把新字串接在舊字串後面，
-      // 變成「今日(A)今日(B)…」這種雙重日期的爛查詢(踩過)，永遠搜不到。
-      await searchBox.fill("");
-      await searchBox.fill(q);
-      await searchBox.press("Enter");
-      await page.waitForTimeout(1500);
-      return cellFor().count();
+      const baselineCount = await allSubjectCells.count().catch(() => -1);
+      let matched = 0;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        await searchBox.fill("");
+        await searchBox.fill(q);
+        await searchBox.press("Enter");
+        await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
+        await page.waitForTimeout(1200);
+        matched = await cellFor().count();
+        const afterCount = await allSubjectCells.count().catch(() => -1);
+        // 收件匣可見信件總數真的變了(不管變多變少)，代表這次搜尋確實生效，不用再重試；
+        // 沒有比對基準(baselineCount 抓失敗)或總數沒變才需要懷疑搜尋沒生效。
+        if (baselineCount < 0 || afterCount !== baselineCount) break;
+        if (attempt < 3) ctx.log(`搜尋「${q}」後收件匣看起來還是沒篩選過(信件總數沒變)，可能是這次點擊沒生效，重試第 ${attempt + 1} 次`);
+      }
+      return matched;
     };
 
     // ── 純標題搜尋模式(datePrefixFormat 留空) ──
@@ -175,8 +193,29 @@ export const findEmailNode: NodeDefinition = {
       );
     }
     if (usedDate !== rawDate) ctx.log(`指定日期 ${rawDate} 當天沒有這封信，改用最近一份 ${usedDate} 的報表(月結算數字相同)`);
-    if (count > 1) ctx.log(`搜到 ${count} 封符合，取第一封`);
-    const cell = cellFor();
+
+    // 真實踩過(最難抓的一個)：webmail 的搜尋不是「只留下完全符合這串字的信」，而是會把拆開的
+    // 關鍵字都算命中——搜「今日(20260801) ◯◯日報」，結果裡同時有 8/1 和 8/5 兩封，
+    // 因為兩封的標題都含「…日報」那段。原本這裡只用「標題關鍵字」篩完就 `.first()` 取最上面那封，
+    // 而清單預設是新的在上面 → 拿到的是 8/5 那封，附件內容完全是另一個月的。更糟的是這種錯誤
+    // 「看起來成功」：有下載到附件、節點全綠，只有最後算出來的數字默默不對。之前有一次剛好排序
+    // 讓 8/1 排在前面而「測起來是對的」，純粹是運氣。
+    // 正解：搜尋只當縮小範圍用，真正要點哪一封一定要用「標題裡的日期前綴」精準指定(prefix 就是
+    // 這一輪實際用的 usedDate 組出來的，例如「今日(20260801)」)。找不到就老實報錯，不准退回
+    // 「取最上面那封」——那正是會靜默拿錯資料的來源。
+    const usedPrefix = prefixFmt.replace("YYYYMMDD", usedDate).trim();
+    const exact = usedPrefix ? cellFor().filter({ hasText: usedPrefix }) : cellFor();
+    const exactCount = await exact.count();
+    if (exactCount === 0) {
+      await saveDebug(ctx, "01-no-exact-date");
+      throw new Error(
+        `搜尋結果裡沒有任何一封信的標題含「${usedPrefix}」——搜尋可能沒有真的篩選，或這一天的信件標題格式跟預期不同。`
+        + `為了避免拿到別天的信(附件內容會是錯的月份)，這裡直接停下來，不會改抓最上面那封。`,
+      );
+    }
+    if (exactCount > 1) ctx.log(`標題含「${usedPrefix}」的信有 ${exactCount} 封，取第一封`);
+    else if (count > 1) ctx.log(`搜尋結果有 ${count} 封含標題關鍵字，用日期「${usedPrefix}」精準挑出目標那封`);
+    const cell = exact;
     await cell.first().click({ timeout: 10000 });
     await page.waitForTimeout(1500);
     await saveDebug(ctx, "02-opened");

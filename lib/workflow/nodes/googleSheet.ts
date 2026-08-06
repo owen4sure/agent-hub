@@ -50,6 +50,46 @@ export async function appendViaScript(
   return { row: typeof parsed.row === "number" ? parsed.row : undefined };
 }
 
+/**
+ * 對同一支 Apps Script 網址連打幾次、實測到的真實延遲分佈(同一分鐘內、同一個 readCells 請求)：
+ * 31.3 秒後回 404 錯誤頁 / 2.4 秒成功 / 9.4 秒成功 / 1.5 秒成功。也就是這個外部服務會「整段
+ * 幾十秒到一分多鐘不穩，然後自己恢復」——不是壞掉，是抖動。使用者實際執行時就撞上這種 80 秒
+ * 的壞窗：引擎層的 3 次重試(3s/9s 退避)全部落在同一個壞窗裡，整條流程就失敗了。
+ *
+ * 因此「可重試的呼叫」要自己再包一層更有耐心的重試，跟引擎層的重試相乘，才撐得過一次抖動；
+ * 只重試 RetryableError(連線中斷/逾時/404/5xx 這些已證實會自己恢復的狀況)，
+ * PermanentError(網址格式錯、腳本版本太舊、回應格式看不懂)重試再多次也不會變好，直接往外丟。
+ *
+ * ⚠️ 只有「重跑不會造成重複副作用」的動作可以用(updateTable 寫絕對值+讀回核對、readCells、
+ * capabilities)。**append 是往下加一列，重跑會多寫一列，絕對不能用**——它維持單次呼叫，
+ * 由節點層的 idempotencyKey 機制守住。
+ */
+const IDEMPOTENT_RETRY_BACKOFF_MS = [5_000, 12_000];
+
+async function callSheetScriptWithRetry(
+  scriptUrl: string,
+  payload: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= IDEMPOTENT_RETRY_BACKOFF_MS.length; attempt++) {
+    try {
+      return await callSheetScript(scriptUrl, payload, signal);
+    } catch (err) {
+      lastErr = err;
+      if (!(err instanceof RetryableError)) throw err;
+      if (signal?.aborted) throw err; // 使用者按了停止，別再等退避時間
+      const wait = IDEMPOTENT_RETRY_BACKOFF_MS[attempt];
+      if (wait === undefined) break;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, wait);
+        signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+      });
+    }
+  }
+  throw lastErr;
+}
+
 async function callSheetScript(
   scriptUrl: string,
   payload: Record<string, unknown>,
@@ -83,12 +123,27 @@ async function callSheetScript(
     clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
   }
-  if (res.status === 404) throw new PermanentError("寫入網址回 404——部署可能被刪除或網址貼錯，請到 Apps Script 重新「部署 → 管理部署」複製網址");
+  // 真實踩過：同一支網址、同一次完整執行裡，前面幾個寫入步驟成功，後面隨機某一步收到 404，
+  // 隔幾秒重跑整條流程又在不同步驟 404——連續三次真實執行，三次都卡在不同節點，直接證明是
+  // Apps Script 那端偶發的暫時性問題，不是部署真的被刪除(如果真的被刪除，同一次執行裡前面的
+  // 寫入步驟不可能成功)。改成可重試：真的是部署被刪除/網址貼錯，重試 3 次(引擎既有的
+  // retryable 機制，3 次含 3s/9s 退避)後一樣會用這句清楚的中文訊息失敗；如果只是暫時性的，
+  // 使用者根本不會看到這則錯誤，流程直接跑過去。
+  if (res.status === 404) throw new RetryableError("寫入網址回 404——部署可能被刪除或網址貼錯，請到 Apps Script 重新「部署 → 管理部署」複製網址");
   if (res.status >= 500) throw new RetryableError(`Google 暫時錯誤(${res.status})`);
   // Apps Script 的執行期錯誤也會回 200 + HTML。以前把所有 HTML 都說成「需要登入」，
   // 結果舊版只支援 appendRow、收到 updateTable 後炸掉，也誤導使用者反覆調整權限。
   if (text.trimStart().startsWith("<")) {
-    throw new PermanentError(sheetScriptHtmlErrorMessage(text));
+    const htmlMessage = sheetScriptHtmlErrorMessage(text);
+    // 「找不到以下指令碼函式：doGet」是 200+HTML 但**實測確定是暫時性**的：同一份部署、完全沒改
+    // 任何設定，這次失敗、過一下重跑就成功(engine.ts 的 classifyFailure 早就把它標成 transient、
+    // 會排自動重跑，就是同一個觀察)。既然已知它會自己好，就該在這裡直接當可重試錯誤、讓上面那層
+    // 有耐心的重試立刻撐過去，而不是先讓整條流程失敗、再等排程晚點重跑一次——使用者中間看到的
+    // 是一次失敗通知，體感就是「又壞了」。真的是部署掛掉，重試完仍然會用同一句訊息失敗。
+    if (/找不到以下指令碼函式|Script function not found/i.test(`${htmlMessage} ${text}`)) {
+      throw new RetryableError(htmlMessage);
+    }
+    throw new PermanentError(htmlMessage);
   }
   try {
     const parsed = JSON.parse(text) as { ok?: boolean; error?: string } & Record<string, unknown>;
@@ -139,7 +194,7 @@ export function sheetScriptHtmlErrorMessage(html: string): string {
  */
 export function sheetScriptRuntimeErrorMessage(rawError: string): string {
   if (/Cannot read propert(?:y|ies) of (?:null|undefined) \(reading '(?:getSheetByName|getSheets|getRange|getDataRange|getActiveSheet|getLastRow)'\)/i.test(rawError)) {
-    return `${rawError}——這通常代表 Apps Script 需要重新部署一個新版本，或腳本專案沒有正確綁定在這份試算表上。請在這個寫入節點展開『第一次設定』，複製最新版程式碼貼進「這份試算表→擴充功能→Apps Script」的編輯器(確認不是另開一個獨立腳本專案)，然後用『管理部署作業→編輯→新版本』重新部署——只按儲存不會讓正式網址生效。部署完可以用上面的「🔎 檢查並套用」按鈕確認腳本版本正確，不用寫入真實資料就能驗。`;
+    return `Apps Script 需要重新部署一個新版本，或腳本專案沒有正確綁定在這份試算表上。請在這個寫入節點展開『第一次設定』，複製最新版程式碼貼進「這份試算表→擴充功能→Apps Script」的編輯器(確認不是另開一個獨立腳本專案)，然後用『管理部署作業→編輯→新版本』重新部署——只按儲存不會讓正式網址生效。部署完可以用上面的「🔎 檢查並套用」按鈕確認腳本版本正確，不用寫入真實資料就能驗。（技術細節：${rawError}）`;
   }
   // 真實踩過的案例：使用者堅持分頁名稱一直都對、沒改過，代表問題不在名稱本身，而是這支 Apps Script
   // 綁定到了另一份試算表(例如複製過一次試算表、或部署時不小心從另一份試算表的擴充功能開的)。
@@ -159,7 +214,8 @@ export function sheetScriptRuntimeErrorMessage(rawError: string): string {
  * 失敗才發現綁錯試算表(真實踩過：使用者因此重新部署了 5 次都對不到正確的表)。
  */
 export async function probeSheetScript(scriptUrl: string, signal?: AbortSignal): Promise<{ spreadsheetName?: string }> {
-  const parsed = await callSheetScript(scriptUrl, { action: "capabilities" }, signal);
+  // capabilities 純讀取、沒有副作用，可以放心重試撐過抖動
+  const parsed = await callSheetScriptWithRetry(scriptUrl, { action: "capabilities" }, signal);
   const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
   if (Number(parsed.agentHubVersion) < 3 || !actions.includes("updateTable") || !actions.includes("readCells")) {
     throw new PermanentError("這個 Apps Script 部署版本太舊，還不能在寫入後讀回核對。請在寫入節點展開教學，複製完整 v3 程式碼，並在『管理部署作業』選『新版本』後部署；若用『新增部署作業』，請把新產生的 /exec 網址貼回這個節點。");
@@ -229,7 +285,9 @@ export async function updateTableViaScript(
   input: { sheetName: string; headerRowLabel?: string; targetColumn: string; rows: { label: string; value: string | number | boolean }[] },
   signal?: AbortSignal,
 ): Promise<{ updated: number; cells: string[]; verified: boolean }> {
-  const parsed = await callSheetScript(scriptUrl, {
+  // updateTable 是「把指定格設成這個絕對值」+ 下面立刻讀回核對，重跑結果完全一樣(冪等)，
+  // 所以可以用有耐心的重試撐過 Apps Script 的抖動。
+  const parsed = await callSheetScriptWithRetry(scriptUrl, {
     action: "updateTable",
     sheet: input.sheetName,
     headerRowLabel: input.headerRowLabel || undefined,
@@ -239,7 +297,7 @@ export async function updateTableViaScript(
   const cells = Array.isArray(parsed.cells) ? parsed.cells.filter((cell): cell is string => typeof cell === "string") : [];
   // 寫入成功回應不足以證明真的填到正確格：部署錯腳本、公式覆蓋、權限或資料驗證都可能造成假成功。
   // 立即讀回 Apps Script 回報的 A1 位址，逐一核對此次要填的值，不一致就讓流程失敗交給修復/使用者處理。
-  const readback = await callSheetScript(scriptUrl, { action: "readCells", sheet: input.sheetName, cells }, signal);
+  const readback = await callSheetScriptWithRetry(scriptUrl, { action: "readCells", sheet: input.sheetName, cells }, signal);
   const returned = Array.isArray(readback.cells) ? readback.cells as { a1?: unknown; value?: unknown }[] : [];
   const expected = input.rows.map((row) => String(row.value));
   const actual = returned.map((cell) => String(cell.value ?? ""));
@@ -319,7 +377,12 @@ export const googleSheetUpdateNode: NodeDefinition = {
     { key: "rows", label: "要更新哪些列(一行一筆：列名=值，可用上游資料)", type: "textarea", default: "" },
   ],
   retryable: true,
-  timeoutMs: 60_000,
+  // 這一步實際會打兩次 Apps Script(寫入 + 讀回核對)，而且兩次都包了有耐心的重試撐過 Apps Script
+  // 抖動(見 callSheetScriptWithRetry 的實測數據)。最壞情況兩次各要 30s 逾時 + 5s/12s 退避，
+  // 加起來可能超過 3 分鐘——節點逾時如果還停在 60 秒，重試根本跑不完就被引擎判逾時砍掉
+  // (而且逾時是 PermanentError、不會再重跑)，等於白做。這裡放寬到 4 分鐘讓重試真的有機會生效；
+  // 正常情況這一步只要一兩秒，不會因為放寬就變慢。
+  timeoutMs: 240_000,
   async execute(ctx) {
     // fallback 只為尚未跑完資料遷移的舊流程；新資料一律存在節點本身。
     const scriptUrl = cfgStr(ctx, "scriptUrl", "").trim() || ctx.secrets.sheetAppendUrl;

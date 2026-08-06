@@ -16,7 +16,7 @@ export function EvidencePanel({ evidence, onClose, onRetest }: { evidence: Evide
             {evidence.drifted ? "⚠️ 這個版本需要重新驗收" : "✅ 這個版本已用真實資料驗收"}
           </div>
           <p className="muted text-xs mt-1">正式執行前會核對流程內容與來源檔案；內容改過或檔案換過，就不會偷偷沿用舊的綠燈。</p>
-          {evidence.drifted && <button onClick={onRetest} className="btn btn-primary text-xs mt-3">🪄 重新安全試跑</button>}
+          {evidence.drifted && <button onClick={onRetest} className="btn btn-primary text-xs mt-3">🪄 重新演練</button>}
         </div>
 
         <div>

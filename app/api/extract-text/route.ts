@@ -21,7 +21,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "缺少檔案內容" }, { status: 400 });
   }
   if (body.workflowId !== undefined && (!isValidWorkflowId(body.workflowId) || !getWorkflow(body.workflowId))) {
-    return NextResponse.json({ error: "附件所屬的 workflow 不存在" }, { status: 404 });
+    return NextResponse.json({ error: "附件所屬的流程不存在" }, { status: 404 });
   }
   // Buffer.from(base64) 會默默忽略 %%% 等非法字元，不會 throw，必須先嚴格驗證。
   const encoded = body.dataBase64.replace(/\s/g, "");

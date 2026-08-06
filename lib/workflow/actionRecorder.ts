@@ -26,6 +26,7 @@ import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { getSharedSecrets } from "../settingsStore";
+import { sharedSessionFileName } from "./sharedLoginSession";
 
 const SESSION_DIR = path.join(process.cwd(), "data", "browser-sessions");
 const RECORD_DIR = path.join(process.cwd(), "data", "recordings");
@@ -67,12 +68,19 @@ export function recordingStatus(workflowId: string): { recording: boolean; start
  * 開一個真的瀏覽器讓使用者自己操作，同時記下他做的每一步。
  * 用 Playwright 內建的錄製器(codegen)：它已經處理好「選出穩定的選擇器」這件事，
  * 不需要自己實作一個(而且自己做的一定比它差)。
+ *
+ * sharedSessionKey 有給的話(這條流程的 browser-login 節點開了「跟其他流程共用登入狀態」，見
+ * sharedLoginSession.ts)，帶進錄製視窗、也存回去的是那把共用代號的檔案，不是這條流程專屬的
+ * `<workflowId>.json`——不然錄製會讀不到共用的登入狀態，逼使用者在錄製視窗裡重新登入一次
+ * (2026-08 code review 抓到的真實 bug：這個檔案原本沒有跟 manualLogin.ts/engine.ts 一起改，
+ * shareLoginAcrossWorkflows 預設開啟後，共用登入狀態的節點實際存在共用檔案裡，這裡卻還在讀
+ * 每條流程各自一份的舊檔名，永遠讀不到)。
  */
-export function startRecording(workflowId: string, url: string): { ok: true } {
+export function startRecording(workflowId: string, url: string, sharedSessionKey?: string | null): { ok: true } {
   if (isRecording(workflowId)) throw new Error("這條流程已經有一個錄製視窗開著——先在那個視窗完成操作（或按停止）再開新的。");
   fs.mkdirSync(RECORD_DIR, { recursive: true });
   const outFile = path.join(RECORD_DIR, `${workflowId}-${randomUUID().slice(0, 8)}.js`);
-  const storage = path.join(SESSION_DIR, `${workflowId}.json`);
+  const storage = path.join(SESSION_DIR, sharedSessionKey ? sharedSessionFileName(sharedSessionKey) : `${workflowId}.json`);
 
   const args = ["playwright", "codegen", "--target", "javascript", "-o", outFile];
   // 有存過登入狀態就帶進去：使用者不用重新登入，錄製檔裡也不會多出帳密痕跡。

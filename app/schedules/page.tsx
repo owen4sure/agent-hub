@@ -20,6 +20,9 @@ export default function SchedulesPage() {
   const [workflows, setWorkflows] = useState<WorkflowRow[]>([]);
   const [maxConcurrent, setMaxConcurrent] = useState(1);
   const [editing, setEditing] = useState<string | null>(null);
+  // 沒有排程的正式流程，展開「加排程」表單時記住是哪一條(workflowId)——跟 editing 分開，
+  // 一個是改既有排程的 cron、一個是幫還沒有排程的流程新增第一筆。
+  const [creatingFor, setCreatingFor] = useState<string | null>(null);
   const [running, setRunning] = useState<Record<string, boolean>>({});
   const [runningAll, setRunningAll] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -166,37 +169,107 @@ export default function SchedulesPage() {
   }
 
   const officialWorkflows = workflows.filter((w) => w.status === "official");
+  const draftCount = workflows.filter((w) => w.status === "draft").length;
   const sequential = maxConcurrent <= 1;
+  // 之前這頁分成「所有排程」+「一鍵執行」兩份清單，後者其實把前者列過的正式流程又列了一次
+  // (2026-08 UI/UX 審計 M3)。合成一份：有排程的流程照舊顯示完整排程資訊，沒有排程的顯示
+  // 「未設定排程」+「立即執行」+「加排程」，同一條流程只會出現一次。
+  const scheduledWorkflowIds = new Set((schedules ?? []).map((s) => s.workflowId));
+  const unscheduledOfficial = officialWorkflows.filter((w) => !scheduledWorkflowIds.has(w.id));
+  // 使用者原話：「要把有在執行的和暫停的分開擺放」——之前混在同一份清單裡，只靠卡片上一顆小小的
+  // 「已暫停」badge 分辨，暫停的排程夾在還在跑的中間，掃過去很容易誤以為某條也還在自動執行。
+  // 拖曳排序(handleScheduleDrop)仍然操作同一個 schedules 陣列，只是渲染時依 enabled 分兩組顯示，
+  // 排序邏輯不用跟著拆。
+  const activeSchedules = (schedules ?? []).filter((s) => s.enabled);
+  const pausedSchedules = (schedules ?? []).filter((s) => !s.enabled);
+
+  function renderScheduleCard(s: ScheduleRow) {
+    // s.enabled 是資料庫存的 0/1(number)，不是真正的 boolean——`s.enabled && X` 在 enabled=0 時
+    // 短路的結果是數字 0(不是 false)，React 會把它當成合法子元素直接印出來，畫面上多一個裸的
+    // 「0」字元(2026-08 分「執行中/已暫停」兩組時才真的被看見：已暫停的排程本來混在清單裡不顯眼，
+    // 現在獨立成一區，這個舊 bug 反而變得很明顯)。先轉成真正的 boolean 再參與判斷式。
+    const enabled = Boolean(s.enabled);
+    return (
+      <div
+        key={s.id}
+        className="card p-4 space-y-3"
+        style={{
+          ...(dropTargetId === s.id && dragId !== s.id ? { outline: "2px dashed var(--accent)", outlineOffset: "2px" } : {}),
+          ...(dragId === s.id ? { opacity: 0.4 } : {}),
+        }}
+        onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTargetId(s.id); } }}
+        onDragLeave={() => { if (dropTargetId === s.id) setDropTargetId(null); }}
+        onDrop={(e) => { e.preventDefault(); handleScheduleDrop(s.id); }}
+      >
+        <div className="flex items-center gap-3 flex-wrap">
+          <span
+            draggable
+            onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDragId(s.id); }}
+            onDragEnd={() => { setDragId(null); setDropTargetId(null); }}
+            className="faint hover:text-[var(--text)] text-sm w-6 h-6 grid place-items-center rounded-md cursor-grab active:cursor-grabbing select-none shrink-0"
+            title="拖到另一筆排程上調整順序"
+            aria-label="拖曳排序"
+          >
+            ⠿
+          </span>
+          {/* 暫停/恢復刻意帶文字，不是只有一顆 emoji：原本是裸的 🟢 夾在拖曳把手跟名稱中間，
+              使用者根本看不出那是可以按的東西(他直接來問「能不能做暫停排程的功能」，
+              而功能其實一直都在)。找不到的功能等於不存在。 */}
+          <button
+            onClick={() => toggle(s)}
+            className="btn btn-ghost text-xs shrink-0"
+            title={enabled ? "暫停後背景不會再自己執行，設定會留著" : "恢復背景自動執行"}
+            style={enabled ? undefined : { color: "var(--accent)" }}
+          >
+            {enabled ? "⏸ 暫停" : "▶ 恢復"}
+          </button>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              {s.orphan ? <span className="text-sm font-medium faint">{s.workflowName}</span>
+                : <Link href={`/workflows/${s.workflowId}`} className="text-sm font-medium hover:underline truncate">{s.workflowName}</Link>}
+              {!enabled && <span className="badge badge-neutral">已暫停</span>}
+              {enabled && s.blockedReason && <span className="badge" style={{ color: "var(--red)" }}>不會執行</span>}
+            </div>
+            <div className="text-xs muted mt-0.5">{humanizeCron(s.cron)}{s.nextRunAt && enabled && !s.blockedReason && <span className="faint"> · 下次 {formatScheduleNextRun(s.nextRunAt)}</span>}</div>
+            {/* 「開著」不等於「真的會跑」。原本這種排程畫面上跟正常的一模一樣(綠燈+下次執行時間)，
+                但排程器每分鐘都會跳過它、只寫一行終端機警告——使用者永遠等不到那次執行也不知道為什麼。 */}
+            {enabled && s.blockedReason && (
+              <p className="text-xs mt-1" style={{ color: "var(--red)" }}>⚠️ 這個排程時間到了也不會執行：{s.blockedReason}</p>
+            )}
+          </div>
+          {!s.orphan && (
+            <button onClick={() => runNow(s.workflowId)} disabled={running[s.workflowId]} className="btn btn-ghost text-xs shrink-0" title="需要填資料時會先帶你到執行設定">{running[s.workflowId] ? "已開始" : workflows.find((w) => w.id === s.workflowId)?.needsRunInput ? "填資料執行" : "▶ 立即執行"}</button>
+          )}
+          <button onClick={() => setEditing(editing === s.id ? null : s.id)} className="btn btn-ghost text-xs shrink-0">編輯</button>
+          <button onClick={() => remove(s.id)} className="btn btn-ghost text-xs shrink-0" style={{ color: "var(--red)" }}>刪除</button>
+        </div>
+        {editing === s.id && <ScheduleEditor cron={s.cron} onSaved={() => { setEditing(null); load(); }} onCancel={() => setEditing(null)} sid={s.id} />}
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-8 py-6 sm:py-8 space-y-8">
-      <PageHeader title="排程 & 執行" subtitle="集中管理所有排程、一鍵執行任何流程，不用一個一個點進去" />
+      <PageHeader title="排程 & 執行" subtitle="集中管理所有流程何時自動執行，也能直接手動跑一次" />
       {actionError && <div className="card px-4 py-3 text-sm" style={{ borderColor: "var(--amber)", color: "var(--text)" }}>{actionError}</div>}
 
-      {/* 併發模式 */}
-      <section className="card p-5">
-        <h2 className="font-medium">同時觸發時怎麼跑？</h2>
-        <p className="text-sm muted mt-0.5 mb-3">多個排程剛好同時到、或按「全部執行」時，要一個一個依序跑、還是同時併行。</p>
-        <div className="flex gap-2 flex-wrap">
-          <button onClick={() => setConcurrency(1)} className="btn btn-ghost"
-            style={sequential ? { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" } : undefined}>依序（一次一個）</button>
-          <button onClick={() => setConcurrency(3)} className="btn btn-ghost"
-            style={!sequential ? { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" } : undefined}>併行（最多同時 {sequential ? 3 : maxConcurrent} 個）</button>
-        </div>
-        <p className="text-xs faint mt-2">依序最省資源也不會互搶瀏覽器；併行比較快但同時開多個瀏覽器較吃記憶體。同一個流程永遠不會自己疊著跑。</p>
-      </section>
-
-      {/* 所有排程 */}
+      {/* 所有流程：有排程的顯示完整排程資訊，沒有的顯示「未設定排程」+ 執行/加排程 */}
       <section className="space-y-3">
         <div className="flex items-center gap-2 flex-wrap">
-          <h2 className="font-medium">所有排程</h2>
+          <h2 className="font-medium">所有流程</h2>
           {(schedules?.length ?? 0) > 0 && (
             <span className="text-xs muted">
               {schedules!.filter((s) => s.enabled && !s.blockedReason).length} 個會自動執行
               {schedules!.some((s) => !s.enabled) && ` · ${schedules!.filter((s) => !s.enabled).length} 個已暫停`}
+              {unscheduledOfficial.length > 0 && ` · ${unscheduledOfficial.length} 條還沒設排程`}
             </span>
           )}
           <div className="ml-auto flex items-center gap-1.5">
+            {officialWorkflows.length > 0 && (
+              <button onClick={runAll} disabled={runningAll} className="btn btn-ghost text-xs" title="只執行已有完整預設值的流程；需要填資料的會跳過">
+                {runningAll ? "正在排入…" : `▶ 執行可直接跑的流程（${sequential ? "依序" : "併行"}）`}
+              </button>
+            )}
             {pausedBatch.length > 0 && (
               <button onClick={() => bulkAction("resume")} disabled={bulkBusy} className="btn btn-ghost text-xs">
                 ▶ 恢復剛才暫停的 {pausedBatch.length} 個
@@ -215,68 +288,46 @@ export default function SchedulesPage() {
           </div>
         </div>
         {bulkNote && <p className="text-xs" style={{ color: "var(--green)" }}>{bulkNote}</p>}
-        <p className="text-xs faint">預設依「下次執行時間」由近到遠排序；拖曳左側「⠿」可以手動調整順序。暫停只是停掉「背景自動執行」，設定都會留著，隨時可以恢復。</p>
+        <p className="text-xs faint">有排程的依「下次執行時間」由近到遠排序，拖曳左側「⠿」可以手動調整順序；暫停只是停掉「背景自動執行」，設定都會留著，隨時可以恢復。</p>
         {schedules === null && <p className="text-sm muted">載入中…</p>}
-        {schedules !== null && schedules.length === 0 && (
-          <EmptyState icon="⏰" title="還沒有任何排程" hint="到任一個流程按「⏰ 排程」設定時間，就會出現在這裡集中管理。" />
+        {schedules !== null && schedules.length === 0 && officialWorkflows.length === 0 && (
+          draftCount > 0 ? (
+            <EmptyState icon="⏰" title="還沒有任何正式流程" hint={`你有 ${draftCount} 個草稿——到草稿頁按「設為正式」，就會出現在這裡集中管理。`} action={<Link href="/drafts" className="btn btn-primary">去看草稿</Link>} />
+          ) : (
+            <EmptyState icon="⏰" title="還沒有任何正式流程" hint="先建立一條流程，設為正式後就會出現在這裡集中管理。" action={<Link href="/" className="btn btn-primary">＋ 建立新流程</Link>} />
+          )
         )}
-        {schedules?.map((s) => (
-          <div
-            key={s.id}
-            className="card p-4 space-y-3"
-            style={{
-              ...(dropTargetId === s.id && dragId !== s.id ? { outline: "2px dashed var(--accent)", outlineOffset: "2px" } : {}),
-              ...(dragId === s.id ? { opacity: 0.4 } : {}),
-            }}
-            onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTargetId(s.id); } }}
-            onDragLeave={() => { if (dropTargetId === s.id) setDropTargetId(null); }}
-            onDrop={(e) => { e.preventDefault(); handleScheduleDrop(s.id); }}
-          >
-            <div className="flex items-center gap-3 flex-wrap">
-              <span
-                draggable
-                onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; setDragId(s.id); }}
-                onDragEnd={() => { setDragId(null); setDropTargetId(null); }}
-                className="faint hover:text-[var(--text)] text-sm w-6 h-6 grid place-items-center rounded-md cursor-grab active:cursor-grabbing select-none shrink-0"
-                title="拖到另一筆排程上調整順序"
-                aria-label="拖曳排序"
-              >
-                ⠿
-              </span>
-              {/* 暫停/恢復刻意帶文字，不是只有一顆 emoji：原本是裸的 🟢 夾在拖曳把手跟名稱中間，
-                  使用者根本看不出那是可以按的東西(他直接來問「能不能做暫停排程的功能」，
-                  而功能其實一直都在)。找不到的功能等於不存在。 */}
-              <button
-                onClick={() => toggle(s)}
-                className="btn btn-ghost text-xs shrink-0"
-                title={s.enabled ? "暫停後背景不會再自己執行，設定會留著" : "恢復背景自動執行"}
-                style={s.enabled ? undefined : { color: "var(--accent)" }}
-              >
-                {s.enabled ? "⏸ 暫停" : "▶ 恢復"}
-              </button>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 flex-wrap">
-                  {s.orphan ? <span className="text-sm font-medium faint">{s.workflowName}</span>
-                    : <Link href={`/workflows/${s.workflowId}`} className="text-sm font-medium hover:underline truncate">{s.workflowName}</Link>}
-                  {!s.enabled && <span className="badge badge-neutral">已暫停</span>}
-                  {s.enabled && s.blockedReason && <span className="badge" style={{ color: "var(--red)" }}>不會執行</span>}
-                </div>
-                <div className="text-xs muted mt-0.5">{humanizeCron(s.cron)}{s.nextRunAt && s.enabled && !s.blockedReason && <span className="faint"> · 下次 {formatScheduleNextRun(s.nextRunAt)}</span>}</div>
-                {/* 「開著」不等於「真的會跑」。原本這種排程畫面上跟正常的一模一樣(綠燈+下次執行時間)，
-                    但排程器每分鐘都會跳過它、只寫一行終端機警告——使用者永遠等不到那次執行也不知道為什麼。 */}
-                {s.enabled && s.blockedReason && (
-                  <p className="text-xs mt-1" style={{ color: "var(--red)" }}>⚠️ 這個排程時間到了也不會執行：{s.blockedReason}</p>
-                )}
-              </div>
-              {!s.orphan && (
-                <button onClick={() => runNow(s.workflowId)} disabled={running[s.workflowId]} className="btn btn-ghost text-xs shrink-0" title="需要填資料時會先帶你到執行設定">{running[s.workflowId] ? "已開始" : workflows.find((w) => w.id === s.workflowId)?.needsRunInput ? "填資料執行" : "▶ 立即執行"}</button>
-              )}
-              <button onClick={() => setEditing(editing === s.id ? null : s.id)} className="btn btn-ghost text-xs shrink-0">編輯</button>
-              <button onClick={() => remove(s.id)} className="btn btn-ghost text-xs shrink-0" style={{ color: "var(--red)" }}>刪除</button>
-            </div>
-            {editing === s.id && <ScheduleEditor cron={s.cron} onSaved={() => { setEditing(null); load(); }} onCancel={() => setEditing(null)} sid={s.id} />}
+        {activeSchedules.length > 0 && (
+          <div className="space-y-3">
+            <h3 className="text-xs font-medium faint">▶ 執行中（{activeSchedules.length}）</h3>
+            {activeSchedules.map(renderScheduleCard)}
           </div>
-        ))}
+        )}
+        {pausedSchedules.length > 0 && (
+          <div className="space-y-3">
+            <h3 className="text-xs font-medium faint">⏸ 已暫停（{pausedSchedules.length}）</h3>
+            {pausedSchedules.map(renderScheduleCard)}
+          </div>
+        )}
+        {unscheduledOfficial.length > 0 && (
+          <div className="space-y-3">
+            {(schedules?.length ?? 0) > 0 && <h3 className="text-xs font-medium faint">還沒設排程（{unscheduledOfficial.length}）</h3>}
+            {unscheduledOfficial.map((w) => (
+              <div key={w.id} className="card p-4 space-y-3">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="w-6 h-6 shrink-0" aria-hidden="true" />
+                  <div className="min-w-0 flex-1">
+                    <Link href={`/workflows/${w.id}`} className="text-sm font-medium hover:underline truncate">{w.name}</Link>
+                    <div className="text-xs faint mt-0.5">未設定排程</div>
+                  </div>
+                  <button onClick={() => runNow(w.id)} disabled={running[w.id]} className="btn btn-ghost text-xs shrink-0" title="需要填資料時會先帶你到執行設定">{running[w.id] ? "已開始" : w.needsRunInput ? "填資料執行" : "▶ 立即執行"}</button>
+                  <button onClick={() => setCreatingFor(creatingFor === w.id ? null : w.id)} className="btn btn-ghost text-xs shrink-0">{creatingFor === w.id ? "取消" : "+ 加排程"}</button>
+                </div>
+                {creatingFor === w.id && <ScheduleEditor workflowId={w.id} onSaved={() => { setCreatingFor(null); load(); }} onCancel={() => setCreatingFor(null)} />}
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       {/* 其他自動觸發(監聽/Webhook)——這頁自稱「集中管理」，不能只看得到排程 */}
@@ -294,46 +345,52 @@ export default function SchedulesPage() {
         </section>
       )}
 
-      {/* 一鍵執行任何流程 */}
-      <section className="space-y-3">
-        <div className="flex items-center gap-2">
-          <h2 className="font-medium">一鍵執行</h2>
-          {officialWorkflows.length > 0 && (
-            <button onClick={runAll} disabled={runningAll} className="btn btn-ghost text-xs ml-auto" title="只執行已有完整預設值的流程；需要填資料的會跳過">{runningAll ? "正在排入…" : `▶ 執行可直接跑的流程（${sequential ? "依序" : "併行"}）`}</button>
-          )}
-        </div>
-        {officialWorkflows.length === 0 && <p className="text-sm muted">目前沒有正式流程。草稿請到流程頁測試。</p>}
-        {officialWorkflows.map((w) => (
-          <div key={w.id} className="card p-3 flex items-center gap-3">
-            <Link href={`/workflows/${w.id}`} className="text-sm font-medium hover:underline truncate flex-1">{w.name}</Link>
-            <span className="text-xs faint shrink-0">{w.nodeCount} 節點</span>
-            <button onClick={() => runNow(w.id)} disabled={running[w.id]} className="btn btn-primary text-xs shrink-0" title={w.needsRunInput ? "先填這次要用的資料再執行" : "用完整預設值立即執行"}>{running[w.id] ? "已開始" : w.needsRunInput ? "填資料執行" : "▶ 立即執行"}</button>
+      {/* 併發模式——進階設定，平常不用調，收進摺疊區並移到頁尾 */}
+      <details className="card p-5">
+        <summary className="cursor-pointer font-medium">同時觸發時怎麼跑？（進階）</summary>
+        <div className="mt-3">
+          <p className="text-sm muted mb-3">多個排程剛好同時到、或按「執行可直接跑的流程」時，要一個一個依序跑、還是同時併行。</p>
+          <div className="flex gap-2 flex-wrap">
+            <button onClick={() => setConcurrency(1)} className="btn btn-ghost"
+              style={sequential ? { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" } : undefined}>依序（一次一個）</button>
+            <button onClick={() => setConcurrency(3)} className="btn btn-ghost"
+              style={!sequential ? { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" } : undefined}>併行（最多同時 {sequential ? 3 : maxConcurrent} 個）</button>
           </div>
-        ))}
-      </section>
+          <p className="text-xs faint mt-2">依序最省資源也不會互搶瀏覽器；併行比較快但同時開多個瀏覽器較吃記憶體。同一個流程永遠不會自己疊著跑。</p>
+        </div>
+      </details>
     </div>
   );
 }
 
-function ScheduleEditor({ cron, sid, onSaved, onCancel }: { cron: string; sid: string; onSaved: () => void; onCancel: () => void }) {
-  const parsed = parseCron(cron);
+function ScheduleEditor({ cron, sid, workflowId, onSaved, onCancel }: { cron?: string; sid?: string; workflowId?: string; onSaved: () => void; onCancel: () => void }) {
+  const parsed = cron ? parseCron(cron) : null;
   const [form, setForm] = useState<ScheduleForm>(parsed ?? { mode: "monthly", time: "09:00", day: "1", weekday: "1" });
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const showDay = form.mode === "monthly" || form.mode === "quarter" || form.mode === "bimonth";
   const valid = timeValid(form.time);
 
   async function save() {
     if (!valid) return;
     setSaving(true);
+    setError(null);
     try {
-      await fetch(`/api/schedules/${sid}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cron: buildCron(form) }) });
+      const res = sid
+        ? await fetch(`/api/schedules/${sid}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cron: buildCron(form) }) })
+        : await fetch(`/api/workflows/${workflowId}/schedules`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cron: buildCron(form), params: {} }) });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError((data as { error?: string }).error ?? "儲存失敗");
+        return;
+      }
       onSaved();
     } finally { setSaving(false); }
   }
 
   return (
     <div className="border-t pt-3 space-y-3">
-      {!parsed && <p className="text-xs" style={{ color: "var(--amber)" }}>這是進階 cron 設定，用下面的簡單選項儲存會覆蓋它。</p>}
+      {sid && !parsed && <p className="text-xs" style={{ color: "var(--amber)" }}>這是進階 cron 設定，用下面的簡單選項儲存會覆蓋它。</p>}
       <div>
         <div className="text-xs faint mb-1.5">多久跑一次？</div>
         <div className="flex flex-wrap gap-1.5">
@@ -364,10 +421,11 @@ function ScheduleEditor({ cron, sid, onSaved, onCancel }: { cron: string; sid: s
         <input type="time" value={form.time} onChange={(e) => setForm((f) => ({ ...f, time: e.target.value }))} className="input" style={!valid ? { borderColor: "var(--red)" } : undefined} />
       </div>
       <div className="card px-3 py-2 text-sm" style={{ background: "var(--surface-2)", borderColor: "var(--accent)" }}>
-        <span className="faint text-xs">改成：</span> <span className="font-medium">{valid ? humanizeCron(buildCron(form)) : "（請先選時間）"}</span>
+        <span className="faint text-xs">{sid ? "改成：" : "排程："}</span> <span className="font-medium">{valid ? humanizeCron(buildCron(form)) : "（請先選時間）"}</span>
       </div>
+      {error && <p className="text-xs" style={{ color: "var(--red)" }}>{error}</p>}
       <div className="flex gap-2">
-        <button onClick={save} disabled={saving || !valid} className="btn btn-primary text-sm">{saving ? "儲存中…" : "儲存"}</button>
+        <button onClick={save} disabled={saving || !valid} className="btn btn-primary text-sm">{saving ? "儲存中…" : sid ? "儲存" : "新增排程"}</button>
         <button onClick={onCancel} className="btn btn-ghost text-sm">取消</button>
       </div>
     </div>

@@ -67,7 +67,7 @@ export function N8nMigrationDialog({ onClose, onCreated }: { onClose: () => void
         </div>
         <div className="flex-1 overflow-y-auto p-5 space-y-4 text-sm">
           <div className="rounded-xl border p-3 text-xs leading-relaxed" style={{ borderColor: "color-mix(in srgb, var(--accent) 35%, var(--border))" }}>
-            這是安全轉換，不是照單全收：帳密、credential、原始 Code、排程與不支援節點不會直接執行。轉換後會建立一份「外部匯入草稿」，你可以先檢查、補設定，再安全試跑。
+            這是安全轉換，不是照單全收：帳密、credential、原始 Code、排程與不支援節點不會直接執行。轉換後會建立一份「外部匯入草稿」，你可以先檢查、補設定，再演練。
           </div>
           <label className="btn btn-ghost inline-flex cursor-pointer">選擇 n8n JSON<input ref={fileRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) void readFile(file); }} /></label>
           <textarea value={raw} onChange={(e) => { setRaw(e.target.value); setAnalysis(null); }} className="input w-full min-h-40 font-mono text-xs" placeholder="也可以直接貼上 n8n workflow JSON" />
@@ -80,7 +80,7 @@ export function N8nMigrationDialog({ onClose, onCreated }: { onClose: () => void
             <div className="space-y-3">
               <div className="font-medium">「{analysis.name}」分析結果</div>
               <div className="grid grid-cols-4 gap-2 text-xs">
-                <div className="rounded-lg p-2" style={{ background: "var(--surface-2)" }}>節點<br /><b>{analysis.nodeCount}</b></div>
+                <div className="rounded-lg p-2" style={{ background: "var(--surface-2)" }}>步驟<br /><b>{analysis.nodeCount}</b></div>
                 <div className="rounded-lg p-2" style={{ background: "var(--surface-2)" }}>可映射<br /><b style={{ color: "var(--green)" }}>{analysis.mappedCount}</b></div>
                 <div className="rounded-lg p-2" style={{ background: "var(--surface-2)" }}>需確認<br /><b style={{ color: "var(--amber)" }}>{analysis.reviewCount}</b></div>
                 <div className="rounded-lg p-2" style={{ background: "var(--surface-2)" }}>不支援<br /><b style={{ color: "var(--red)" }}>{analysis.unsupportedCount}</b></div>

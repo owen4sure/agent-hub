@@ -25,7 +25,7 @@ export function parseSlidesOutline(raw: string): GoogleSlidesDeckSlide[] {
   try {
     parsed = JSON.parse(withoutFence);
   } catch {
-    throw new PermanentError("投影片內容不是可讀的大綱。請讓 AI 重新輸出 JSON：{\"slides\":[{\"title\":\"封面標題\",\"bullets\":[\"重點一\",\"重點二\"]}]}；不要把說明文字混在 JSON 外面。");
+    throw new PermanentError("這一步算出來的投影片內容格式不對，需要讓 AI 重新產生大綱。（技術細節：請輸出 JSON：{\"slides\":[{\"title\":\"封面標題\",\"bullets\":[\"重點一\",\"重點二\"]}]}；不要把說明文字混在 JSON 外面。）");
   }
   const rows = Array.isArray(parsed) ? parsed : (parsed as { slides?: unknown })?.slides;
   if (!Array.isArray(rows) || rows.length === 0 || rows.length > 30) {

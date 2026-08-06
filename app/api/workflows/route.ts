@@ -8,6 +8,7 @@ import { getDb } from "@/lib/db";
 import { setupNeedsFor } from "@/lib/workflow/setupNeeds";
 import { denyIfNotLocal } from "@/lib/requireLocal";
 import { recordAuditFromRequest } from "@/lib/auditLog";
+import { explainWorkflow } from "@/lib/workflow/explain";
 
 export async function GET() {
   const db = getDb();
@@ -31,6 +32,18 @@ export async function GET() {
       status: wf.status,
       builtin: wf.builtin,
       description: wf.description,
+      // 首頁搜尋要能命中「裡面某一步做了什麼」，不只名稱/短說明——這是第二次踩到同一個真實需求：
+      // 第一次只用步驟「名稱」比對(stepLabels)，使用者回饋「我上次有多加一個功能是更新簡報的
+      // 一頁圖，但是我現在不知道是更新在哪個工作流」——他不記得那一步的確切命名，用「更新簡報圖片」
+      // 這種泛稱去找，卻完全不會命中像「換掉開戶數頁的表格圖」這種業務化命名的步驟。改成跟流程頁
+      // 「📖 說明」面板共用同一份 explainWorkflow()：每一步的白話說明句(含節點類型講的「換簡報上的
+      // 圖片」這種泛稱動詞)、以及設定裡的實際值(目標分頁、找哪一頁、訊息內容)全部一起收進搜尋語料，
+      // 使用者不管是記得「做了什麼」還是記得「內容是什麼」都找得到，跟「說明」面板顯示的是同一份
+      // 事實、不會有兩邊對不起來的風險。只回搜尋比對用的文字，不含程式碼/帳密。
+      stepSearch: explainWorkflow(wf).steps.map((s) => ({
+        label: s.label,
+        text: [s.label, s.text, ...s.settings.map(([, value]) => value)].join(" "),
+      })),
       group: wf.group ?? "",
       nodeCount: wf.nodes.length,
       // 「這條還缺哪些一次性設定」直接算在清單裡：不然使用者要一條一條點進去才知道哪條是壞的
@@ -74,7 +87,7 @@ export async function POST(req: Request) {
   if (body.name !== undefined && typeof body.name !== "string") {
     return NextResponse.json({ error: "流程名稱必須是文字" }, { status: 400 });
   }
-  const name = (typeof body.name === "string" ? body.name.trim() : "") || "新的 Workflow";
+  const name = (typeof body.name === "string" ? body.name.trim() : "") || "未命名流程";
   if (name.length > 120) return NextResponse.json({ error: "流程名稱最多 120 個字" }, { status: 400 });
   const wf = createWorkflow(name);
   // 確保 settings 有 seed（getGlobalSettings 觸發 init）

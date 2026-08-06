@@ -89,8 +89,8 @@ export async function sendLine(channelAccessToken: string, to: string, text: str
   if (r.status === 401) throw new PermanentError("LINE Channel Access Token 不正確(API 回 401)——請到設定頁照教學重新發行並貼上");
   if (r.status === 400 && /invalid.*to|not found/i.test(r.text)) {
     throw new PermanentError(
-      "LINE 的傳送對象 ID 不正確——1對1 用 LINE Developers Basic settings 最下方的 Your user ID(U 開頭)；" +
-      "群組用 groupId(C 開頭)：把官方帳號加進群組後在群組傳一句話，執行紀錄/伺服器 log 會印出 groupId",
+      "LINE 的傳送對象 ID 不正確——傳給單一一個人：用 LINE Developers 後台「Basic settings」頁最下方的 Your user ID(U 開頭)；" +
+      "傳給群組：先把這個官方帳號加進那個群組，在群組裡隨便傳一句話，再到這條流程的「執行紀錄」點開最近一次失敗的這一步，裡面會印出正確的群組 ID(C 開頭)，把它貼進來替換掉現在填的值",
     );
   }
   // 跟 sendTelegram 的 403 是同一類情境：使用者封鎖了官方帳號，LINE 拒絕發送。

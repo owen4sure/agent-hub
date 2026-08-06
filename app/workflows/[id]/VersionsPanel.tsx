@@ -80,7 +80,7 @@ export function VersionsPanel({ workflowId, onClose, onRestored }: { workflowId:
         <button onClick={onClose} className="ml-auto faint hover:text-[var(--text)]" aria-label="關閉">✕</button>
       </div>
       <div className="flex-1 overflow-auto p-4 space-y-3">
-        <p className="text-xs muted leading-relaxed">AI 每次改流程圖/改節點設定之前，都會先把「當時的樣子」存一份備份。改壞了、或想拿回之前的版本，都可以在這裡還原。</p>
+        <p className="text-xs muted leading-relaxed">AI 每次改流程圖/改步驟設定之前，都會先把「當時的樣子」存一份備份。改壞了、或想拿回之前的版本，都可以在這裡還原。</p>
         {error && <p className="text-sm" style={{ color: "var(--red)" }}>載入版本紀錄失敗，請重試。</p>}
         {!versions && !error && <p className="text-sm muted">載入中…</p>}
         {versions?.length === 0 && <p className="text-sm faint py-2">目前還沒有版本備份(AI 還沒改過這個流程)。</p>}

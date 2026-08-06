@@ -1,7 +1,118 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseSheetCsv, sheetScriptRuntimeErrorMessage, sheetScriptHtmlErrorMessage, sameCellValue, parseSheetRowValues } from "./googleSheet";
+import { parseSheetCsv, sheetScriptRuntimeErrorMessage, sheetScriptHtmlErrorMessage, sameCellValue, parseSheetRowValues, appendViaScript, updateTableViaScript } from "./googleSheet";
 import { classifyFailure } from "../engine";
+import { RetryableError, PermanentError } from "../types";
+
+// 真實踩過：同一支 Apps Script 網址，同一次完整執行裡，前面幾個寫入步驟成功，後面隨機
+// 某一步收到 404，隔幾秒重跑整條流程又在不同步驟 404——連續三次真實執行、三次都卡在不同
+// 節點，證明是 Google 那端偶發的暫時性問題，不是部署真的被刪除(真被刪除的話，同一次執行裡
+// 前面的寫入步驟不可能成功)。404 曾經是 PermanentError(直接放棄，不重試)，導致每次偶發都要
+// 整條流程失敗、等使用者發現才重新觸發；改成 RetryableError，讓引擎既有的重試機制(retryable
+// 節點 3 次含退避)先自動撐過去，撐不過去 3 次後一樣用同一句清楚的中文訊息失敗，不會不了了之。
+test("appendViaScript：網址回 404 要丟 RetryableError 讓引擎自動重試，不能丟 PermanentError 直接放棄", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response("Not Found", { status: 404 })) as typeof fetch;
+  try {
+    await assert.rejects(
+      appendViaScript("https://script.google.com/macros/s/abc/exec", ["x"], ""),
+      (err: unknown) => {
+        assert.ok(err instanceof RetryableError, "應該是 RetryableError，實際是：" + (err as Error)?.constructor?.name);
+        assert.ok(!(err instanceof PermanentError));
+        assert.match((err as Error).message, /404/);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// 實測同一支 Apps Script 網址、同一分鐘內連打四次：31.3 秒後回 404 / 2.4 秒成功 / 9.4 秒成功 /
+// 1.5 秒成功——這個外部服務會整段幾十秒不穩再自己恢復。使用者實際執行時就撞上一次約 80 秒的
+// 壞窗，引擎層 3 次重試(3s/9s)全部落在同一個壞窗裡，整條流程直接失敗。所以冪等的呼叫要自己
+// 再包一層更有耐心的重試，跟引擎層相乘才撐得過一次抖動。
+test("updateTableViaScript：Apps Script 暫時回 404 時要自己重試撐過去，不能讓整條流程失敗", async () => {
+  const originalFetch = globalThis.fetch;
+  const seen: string[] = [];
+  globalThis.fetch = (async (_input: unknown, init?: { body?: string }) => {
+    const action = JSON.parse(String(init?.body ?? "{}")).action as string;
+    seen.push(action);
+    // 第一次寫入撞上壞窗回 404，重試後恢復正常
+    if (action === "updateTable" && seen.filter((a) => a === "updateTable").length === 1) {
+      return new Response("Not Found", { status: 404 });
+    }
+    if (action === "updateTable") {
+      return new Response(JSON.stringify({ ok: true, updated: 1, cells: ["G2"] }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ ok: true, cells: [{ a1: "G2", value: "29" }] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  try {
+    const result = await updateTableViaScript("https://script.google.com/macros/s/abc/exec", {
+      sheetName: "測試分頁", targetColumn: "G", rows: [{ label: "甲通路", value: 29 }],
+    });
+    assert.equal(result.verified, true);
+    assert.equal(seen.filter((a) => a === "updateTable").length, 2, "應該重試過一次寫入");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// 實際跑正式流程時撞到的另一種抖動簽章：HTTP 200 但回一頁 HTML「找不到以下指令碼函式：doGet」。
+// 同一份部署、完全沒改設定，重跑就成功——engine.ts 的 classifyFailure 早就把它標成 transient。
+// 但它原本在這裡是 PermanentError，所以不會被重試機制接住，整條流程還是當場失敗。
+test("callSheetScript：200+HTML 的「找不到指令碼函式 doGet」是已知暫時性問題，要可重試、不能當永久失敗", async () => {
+  const originalFetch = globalThis.fetch;
+  const seen: string[] = [];
+  globalThis.fetch = (async (_i: unknown, init?: { body?: string }) => {
+    const action = JSON.parse(String(init?.body ?? "{}")).action as string;
+    seen.push(action);
+    if (action === "updateTable" && seen.filter((a) => a === "updateTable").length === 1) {
+      return new Response("<html><body>錯誤 找不到以下指令碼函式：doGet</body></html>", { status: 200 });
+    }
+    if (action === "updateTable") return new Response(JSON.stringify({ ok: true, updated: 1, cells: ["G2"] }), { status: 200 });
+    return new Response(JSON.stringify({ ok: true, cells: [{ a1: "G2", value: "29" }] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  try {
+    const result = await updateTableViaScript("https://script.google.com/macros/s/abc/exec", {
+      sheetName: "測試分頁", targetColumn: "G", rows: [{ label: "甲通路", value: 29 }],
+    });
+    assert.equal(result.verified, true);
+    assert.equal(seen.filter((a) => a === "updateTable").length, 2, "doGet 錯誤應該被重試");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("callSheetScript：真正的設定問題(部署版本太舊)仍然是永久失敗，不能被誤判成暫時性而白重試", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    return new Response("<html><body>rowContents passed to appendRow() must be nonempty</body></html>", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      updateTableViaScript("https://script.google.com/macros/s/abc/exec", { sheetName: "x", targetColumn: "G", rows: [{ label: "a", value: 1 }] }),
+      (err: unknown) => { assert.ok(err instanceof PermanentError); return true; },
+    );
+    assert.equal(calls, 1, "永久性錯誤只能打一次，不該浪費時間重試");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("appendViaScript：絕對不能自己重試——往下加一列不是冪等操作，重試會多寫一列", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => { calls++; return new Response("Not Found", { status: 404 }); }) as typeof fetch;
+  try {
+    await assert.rejects(appendViaScript("https://script.google.com/macros/s/abc/exec", ["x"], ""));
+    assert.equal(calls, 1, "append 只能打一次；重試由節點層的 idempotencyKey 機制把關");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("parseSheetCsv：儲存格自訂格式只顯示「月/日」(年份被格式隱藏)時，要保留顯示文字本身，不能被 xlsx 用 JS Date 的預設年份誤判成別的年份", () => {
   // 真實踩過的案例：試算表儲存格本尊是 2026/7/16，但自訂數字格式只顯示到「7/16」；

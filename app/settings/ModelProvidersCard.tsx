@@ -17,16 +17,22 @@ import { useCallback, useEffect, useState } from "react";
 
 interface Provider {
   id: string; label: string; baseUrl: string; models: string[];
-  vision: boolean; builtin: boolean; hasKey: boolean; timeoutMs?: number;
+  vision: boolean; local: boolean; builtin: boolean; hasKey: boolean; timeoutMs?: number;
 }
-interface Choice { ref: string; model: string; providerLabel: string; verified: boolean; vision: boolean; visionTested: "yes" | "no" | null }
+interface Choice {
+  ref: string; model: string; providerLabel: string; verified: boolean;
+  vision: boolean; visionTested: "yes" | "no" | null; usable: boolean; visionUsable: boolean; local: boolean;
+}
+interface Preference { text: string[]; vision: string[]; strict: boolean }
 
 export function ModelProvidersCard() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [choices, setChoices] = useState<Choice[]>([]);
+  const [order, setOrder] = useState<{ text: string[]; vision: string[] }>({ text: [], vision: [] });
+  const [strict, setStrict] = useState(false);
   const [open, setOpen] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({ label: "", baseUrl: "", apiKey: "", models: "", vision: false, timeoutSec: 90 });
+  const [form, setForm] = useState({ label: "", baseUrl: "", apiKey: "", models: "", vision: false, local: false, timeoutSec: 90 });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -38,13 +44,38 @@ export function ModelProvidersCard() {
   const load = useCallback(async () => {
     try {
       const res = await fetch("/api/model-providers");
-      const data = (await res.json()) as { providers: Provider[]; choices: Choice[] };
+      const data = (await res.json()) as {
+        providers: Provider[]; choices: Choice[]; preference: Preference;
+        effective: { text: string[]; vision: string[] };
+      };
       setProviders(data.providers ?? []);
       setChoices(data.choices ?? []);
+      // 顯示的是「目前實際生效的順序」——還沒排過的人看到的是自動預填的結果，
+      // 而不是一張空白清單。他一按上下就變成他自己的偏好。
+      setOrder({ text: data.effective?.text ?? [], vision: data.effective?.vision ?? [] });
+      setStrict(data.preference?.strict === true);
     } catch {
       setError("讀取模型來源失敗");
     }
   }, []);
+
+  /** 存順序。任何一次拖動都把「目前看到的整份順序」存起來，不做增量比對。 */
+  async function saveOrder(next: { text?: string[]; vision?: string[]; strict?: boolean }) {
+    const merged = { text: next.text ?? order.text, vision: next.vision ?? order.vision, strict: next.strict ?? strict };
+    setOrder({ text: merged.text, vision: merged.vision });
+    setStrict(merged.strict);
+    await fetch("/api/model-providers", {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(merged),
+    });
+  }
+
+  function move(kind: "text" | "vision", index: number, delta: number) {
+    const list = [...order[kind]];
+    const target = index + delta;
+    if (target < 0 || target >= list.length) return;
+    [list[index], list[target]] = [list[target], list[index]];
+    void saveOrder({ [kind]: list });
+  }
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load(); }, [load]);
@@ -81,8 +112,11 @@ export function ModelProvidersCard() {
       });
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) { setError(data.error ?? "儲存失敗"); return; }
-      setMessage(`已加入。之後在流程的模型欄位直接填「${form.models.split(/[,\n]/)[0]?.trim()}」就會用這個來源。`);
-      setForm({ label: "", baseUrl: "", apiKey: "", models: "", vision: false, timeoutSec: 90 });
+      setMessage(
+        `已加入。之後在流程的模型欄位直接填「${form.models.split(/[,\n]/)[0]?.trim()}」就會用這個來源。`
+        + (form.local ? "你標記了這是自己的機器，可以在流程頁把它設成「執行時用的模型」，讓資料不離開這台機器。" : ""),
+      );
+      setForm({ label: "", baseUrl: "", apiKey: "", models: "", vision: false, local: false, timeoutSec: 90 });
       setAdding(false);
       await load();
     } finally {
@@ -135,12 +169,61 @@ export function ModelProvidersCard() {
             加完之後在流程裡直接填模型代號即可，平台會自動送去對的地方。
           </p>
 
+          {/* 主力/救援順序：以前是寫死在程式裡的一份清單(而且是照某一個免費 gateway 的實測結果排的)，
+              對其他人完全不準。現在誰當主力、誰當救援由使用者自己排。 */}
+          <div className="rounded-lg p-3 space-y-3" style={{ background: "var(--surface-2)" }}>
+            <div>
+              <p className="text-sm font-medium">主力與救援順序</p>
+              <p className="text-xs muted">
+                排第一個的是主力。主力做不到時，依序往下換。
+                {order.text.length + order.vision.length > 0 && "（現在顯示的是目前生效的順序，按上下就會變成你自己的設定）"}
+              </p>
+            </div>
+            {(["text", "vision"] as const).map((kind) => (
+              <div key={kind} className="space-y-1">
+                <p className="text-xs muted">{kind === "text" ? "文字判斷（流程裡的 AI 判斷步驟）" : "看圖（讀圖片、辨識驗證碼）"}</p>
+                {order[kind].length === 0 ? (
+                  <p className="text-xs faint">
+                    {kind === "vision"
+                      ? "目前沒有任何模型通過看圖實測。接一個模型之後按下面的「🖼️ 測看圖」，通過了就會出現在這裡。"
+                      : "目前沒有可用的模型。填好上面的 Base URL 與金鑰，或接一個自己的模型。"}
+                  </p>
+                ) : order[kind].map((ref, i) => {
+                  const c = choices.find((x) => x.ref === ref);
+                  return (
+                    <div key={ref} className="flex items-center gap-2 text-xs">
+                      <span className="muted w-10">{i === 0 ? "主力" : `救援${i}`}</span>
+                      <span className="font-mono">{ref}</span>
+                      {c?.local && <span className="badge text-xs">🏠 地端</span>}
+                      {c && !c.local && <span className="faint">☁️ 雲端</span>}
+                      <span className="ml-auto flex gap-1">
+                        <button type="button" onClick={() => move(kind, i, -1)} disabled={i === 0} className="btn btn-ghost text-xs" title="往上移">▲</button>
+                        <button type="button" onClick={() => move(kind, i, 1)} disabled={i === order[kind].length - 1} className="btn btn-ghost text-xs" title="往下移">▼</button>
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+            <label className="flex items-start gap-2 text-xs">
+              <input type="checkbox" checked={strict} onChange={(e) => void saveOrder({ strict: e.target.checked })} className="mt-0.5" />
+              <span>
+                <b>不要自動換模型</b>：主力做不到就停下來報錯，不改用救援。
+                <span className="muted">
+                  {" "}適合資料不能離開這台機器的情況。不勾（預設）的話會自動換備援，流程比較不容易斷。
+                  單一條流程也可以在流程頁單獨設定。
+                </span>
+              </span>
+            </label>
+          </div>
+
           {providers.map((p) => (
             <div key={p.id} className="rounded-lg p-3 space-y-2" style={{ background: "var(--surface-2)" }}>
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-sm font-medium">{p.label}</span>
                 {p.builtin && <span className="badge badge-neutral text-xs">內建</span>}
                 {!p.builtin && p.vision && <span className="badge text-xs">看得懂圖片</span>}
+                {!p.builtin && p.local && <span className="badge text-xs">🏠 我自己的機器</span>}
                 {!p.builtin && (
                   <button onClick={() => void remove(p.id)} className="btn btn-ghost text-xs ml-auto" style={{ color: "var(--red)" }}>移除</button>
                 )}
@@ -228,6 +311,18 @@ export function ModelProvidersCard() {
                   結果看起來像「這個模型不會做」，其實只是沒等它講完。
                 </p>
               </div>
+              {/* 「這是不是地端」平台不能自己猜：使用者的模型可能掛在自架的公開網域後面(用網址判會判成雲端)，
+                  公司內網網址也可能其實是轉出去的。這個標記會出現在執行紀錄上給公司審查看，猜錯比不標更糟。 */}
+              <label className="flex items-start gap-2 text-xs">
+                <input type="checkbox" checked={form.local} onChange={(e) => setForm({ ...form, local: e.target.checked })} className="mt-0.5" />
+                <span>
+                  <b>這是我自己掌控的機器</b>（資料送過去不會經過別人）
+                  <span className="muted">
+                    {" "}勾了以後，用到它的步驟在執行紀錄上會標示「🏠 地端」。
+                    只有你知道網址後面是什麼，所以這一格要你自己判斷。
+                  </span>
+                </span>
+              </label>
               {/* 「看不看得懂圖片」有客觀答案，不該讓使用者用猜的打勾——實測一次就知道。
                   尤其這個專案自己記錄過：有的模型不會說「我看不到」，而是自信地看圖亂講。 */}
               <div className="flex flex-wrap gap-2 items-center">

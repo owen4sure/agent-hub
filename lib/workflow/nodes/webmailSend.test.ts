@@ -6,6 +6,45 @@ import { describeOutgoingMail, resolveAttachmentPaths, splitRecipients, webmailS
 import { nodeTypesWithSideEffect, dryRunSkipTypes } from "../sideEffects";
 import { getNodeDef } from "../registry";
 
+/**
+ * 2026-08 使用者原話：「我也不知道如何測試寄一份真的跑完流程並計算出來的信給我本人」——新增
+ * 「這次的信先都寄給我自己」執行選項(ctx.testSendOverride)。這裡用 dryRun:true 呼叫真正的
+ * execute()(不用開真瀏覽器，覆寫邏輯在碰到 ctx.session 之前就跑完了)，驗證：①收件人真的被
+ * 換成使用者填的信箱、副本/密件副本清空，不會連帶驚動被 cc 的人；②主旨有標記原收件人，讓
+ * 使用者收到測試信時看得出「這封信原本要寄給誰」；③沒有勾這個選項時完全不受影響。
+ */
+test("testSendOverride：收件人被換成使用者自己的信箱，副本/密件副本清空，主旨標記原收件人", async () => {
+  const logs: string[] = [];
+  const result = await webmailSendNode.execute({
+    runId: "test-run", workflowId: "test-wf", nodeId: "n-send",
+    input: {},
+    config: { to: "paul@company.com", cc: "boss@company.com", subject: "6月開戶數", body: "內容" },
+    secrets: {},
+    dryRun: true,
+    testSendOverride: "owen@company.com",
+    cancelSignal: new AbortController().signal,
+    log: (msg: string) => logs.push(msg),
+  } as never);
+  assert.equal(result.output.sentTo, "owen@company.com", "真正要寄的收件人要換成使用者自己的信箱");
+  assert.ok(logs.some((l) => l.includes("paul@company.com") && l.includes("owen@company.com")), "要老實記錄原收件人跟換成了誰，不能悄悄換掉");
+  const preview = logs.join("\n");
+  assert.match(preview, /paul@company\.com/, "至少要有一處講清楚原收件人是誰");
+  assert.doesNotMatch(preview, /boss@company\.com/, "副本已經被清空，不該出現在任何記錄裡——測試不該連帶驚動被 cc 的人");
+});
+
+test("testSendOverride：沒有勾這個選項時，收件人/副本完全不受影響", async () => {
+  const result = await webmailSendNode.execute({
+    runId: "test-run", workflowId: "test-wf", nodeId: "n-send",
+    input: {},
+    config: { to: "paul@company.com", cc: "boss@company.com", subject: "6月開戶數", body: "內容" },
+    secrets: {},
+    dryRun: true,
+    cancelSignal: new AbortController().signal,
+    log: () => {},
+  } as never);
+  assert.equal(result.output.sentTo, "paul@company.com");
+});
+
 test("收件人怎麼分隔都接得住(逗號/分號/頓號/換行)", () => {
   assert.deepEqual(splitRecipients("a@x.com, b@x.com;c@x.com、d@x.com\ne@x.com"),
     ["a@x.com", "b@x.com", "c@x.com", "d@x.com", "e@x.com"]);

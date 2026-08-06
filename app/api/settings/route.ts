@@ -36,7 +36,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "AI 建流程偏好最多 2,000 個字" }, { status: 400 });
   }
   if (body.builderEffort !== undefined && !BUILDER_EFFORT_VALUES.has(body.builderEffort as BuilderEffort)) {
-    return NextResponse.json({ error: "推理力度必須是 low/medium/high 之一" }, { status: 400 });
+    return NextResponse.json({ error: "推理力度必須是「低」「中」「高」之一(API 格式：low/medium/high)" }, { status: 400 });
   }
   // apiKey/baseUrl 留空都代表「不改」，不能用空字串蓋掉——setGlobalSettings 只在值 !== undefined 時才寫入，
   // 且 getGlobalSettings 用 `?? DEFAULT`(空字串非 nullish 不會退回預設)，所以空字串一旦寫進去會讓 AI 呼叫失效且無法恢復。

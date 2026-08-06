@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { describeRecording, scrubRecordedSecrets, toNodeCode } from "./actionRecorder";
 
 /** Playwright codegen 真實產出的形狀(含它固定的 boilerplate)。 */
@@ -101,4 +103,21 @@ test("錄製收尾的雜項一定要濾掉：page.close() 會關掉共用分頁�
   assert.doesNotMatch(code, /\/Users\//, "不能把本機絕對路徑寫進步驟裡");
   assert.match(code, /getByRole\('button', \{ name: '下載' \}\)/, "真正的操作要留下來");
   assert.equal(actionCount, 2);
+});
+
+/**
+ * 2026-08 code review 抓到的真實 bug：startRecording 原本無條件讀寫 `<workflowId>.json`，
+ * 但 browser-login 節點的 shareLoginAcrossWorkflows 預設開啟後，這種節點真正的登入狀態是存在
+ * 共用檔案(shared-<hash>.json)裡，不是這條流程自己的檔名——結果是錄製視窗完全讀不到已經
+ * 手動登入過的狀態，逼使用者在錄製視窗裡重新登入一次。跟真的開瀏覽器測太慢是同一套理由，
+ * 這裡守的是「storage 這個檔名到底是怎麼算出來的」，讀原始碼就能百分之百確認。
+ */
+test("共用登入狀態：有共用代號時，錄製要讀寫共用檔案，不能還在讀每條流程各自一份的舊檔名", () => {
+  const source = fs.readFileSync(path.join(process.cwd(), "lib/workflow/actionRecorder.ts"), "utf8");
+  assert.match(source, /import \{ sharedSessionFileName \} from "\.\/sharedLoginSession";/);
+  assert.match(
+    source,
+    /const storage = path\.join\(SESSION_DIR, sharedSessionKey \? sharedSessionFileName\(sharedSessionKey\) : `\$\{workflowId\}\.json`\);/,
+    "有共用代號時要用共用檔名算 storage 路徑",
+  );
 });

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getWorkflow, isValidWorkflowId } from "@/lib/workflow/store";
-import { closeManualLogin, isManualLoginOpen, openManualLogin } from "@/lib/workflow/manualLogin";
+import { closeManualLogin, getManualLoginVerification, isManualLoginOpen, openManualLogin } from "@/lib/workflow/manualLogin";
+import { resolveSharedSessionKeyForGraph } from "@/lib/workflow/sharedLoginSession";
 import { isPrivateHost, privateUrlsAllowed } from "@/lib/urlGuard";
 import { denyIfNotLocal } from "@/lib/requireLocal";
 import { recordAuditFromRequest } from "@/lib/auditLog";
@@ -11,7 +12,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const denied = denyIfNotLocal(req);
   if (denied) return denied;
   const { id } = await params;
-  if (!isValidWorkflowId(id) || !getWorkflow(id)) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
+  if (!isValidWorkflowId(id)) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
+  const wf = getWorkflow(id);
+  if (!wf) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
   const body = (await req.json().catch(() => ({}))) as { url?: unknown };
   const url = typeof body.url === "string" && body.url.trim() ? body.url.trim() : "https://accounts.google.com/";
   let parsed: URL;
@@ -26,11 +29,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ error: "這個網址指向內部/私有網段，基於安全考量不開啟。若這是刻意的內網需求，可設定環境變數 AGENT_HUB_ALLOW_PRIVATE_URLS=1 解除限制。" }, { status: 400 });
   }
   try {
-    const { usingRealChrome } = await openManualLogin(id, parsed.toString());
+    const sharedKey = resolveSharedSessionKeyForGraph(wf.nodes);
+    const { usingRealChrome } = await openManualLogin(id, parsed.toString(), sharedKey);
     recordAuditFromRequest(req, "workflow.manual-login", id, { host: parsed.hostname });
     return NextResponse.json({
       ok: true,
-      message: `已開啟${usingRealChrome ? " Chrome" : "瀏覽器"}視窗——請在裡面親手完成登入，登入成功後直接關掉那個視窗即可。登入狀態會自動存進這條流程，之後執行不會再經過登入頁。`,
+      message: `已開啟${usingRealChrome ? " Chrome" : "瀏覽器"}視窗——請在裡面親手完成登入，登入成功後直接關掉那個視窗即可。登入狀態會自動存進${sharedKey ? "這個帳號共用的登入狀態，其他有勾選「跟其他流程共用登入狀態」的流程會一起生效" : "這條流程"}，之後執行不會再經過登入頁。`,
     });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : "無法開啟瀏覽器" }, { status: 409 });
@@ -50,5 +54,7 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   if (!isValidWorkflowId(id)) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
-  return NextResponse.json({ open: isManualLoginOpen(id) });
+  // 視窗一關就會在背景自動驗證這次登入是否真的生效——verification 帶出最近一次的結果，
+  // 讓畫面上能明確講出「成功」或「沒成功」，不再是關掉視窗後什麼都沒發生(2026-08 使用者實測回報)。
+  return NextResponse.json({ open: isManualLoginOpen(id), verification: getManualLoginVerification(id) ?? null });
 }

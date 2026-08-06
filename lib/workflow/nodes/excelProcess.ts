@@ -128,7 +128,7 @@ export const excelProcessNode: NodeDefinition = {
     { key: "outputName", label: "輸出檔名(不含.xlsx)", type: "text", default: "output" },
     { key: "allowEmptyResult", label: "篩選結果 0 筆時仍正常完成(不當失敗)", type: "boolean", default: "false", help: "適用於固定週期結算(如每季結算)本來就可能剛好那期沒有資料的情境；預設關閉，0 筆會照常視為失敗提醒你可能選錯日期或來源檔" },
   ],
-  outputs: "outputPath(產出檔路徑), filename(檔名), rowCount(筆數)",
+  outputs: "outputPath(產出檔路徑), filename(檔名), rowCount(筆數), highlightColumnSum(highlight 那一欄，篩選出的資料列數字加總)",
   retryable: false,
   async execute(ctx) {
     const inputPath = cfgStr(ctx, "inputPath");
@@ -170,15 +170,27 @@ export const excelProcessNode: NodeDefinition = {
 
     // 收集標題列 + 符合日期區間的資料列(連同來源格式一起帶)。
     // 日期欄可能是純數字(YYYYMMDD)、Excel 日期物件、或 "2026-07-01" 字串，都正規化成 YYYYMMDD 再比。
+    // 同一趟順便把 highlight 那一欄的數字加總——這個節點常被拿來標出「新增開戶數」這類每日數字，
+    // 下游若要算「這段期間總共增加多少」，只有 rowCount(篩到幾列)可以引用，卻常被誤用來當成總和
+    // (踩過的真實 bug：rowCount 剛好等於篩選區間的天數，被拿去當「總開戶數」，兩個完全不相干的
+    // 業務量剛好都等於「31 天」而看起來「兩邊數字一樣」，實際上都是錯的，真正的加總完全沒被算過)。
+    // 加總只認得出「這一欄的值本來就是數字」的儲存格，不是數字(空白/文字備註)的列直接跳過不計入。
     const srcRowIndexes: number[] = [headerRowIndex];
+    let highlightColumnSum = 0;
     for (let r = headerRowIndex + 1; r <= sheet.rowCount; r++) {
       // 日期欄若是公式儲存格，.value 是 {formula,result} 物件——直接丟給 toYYYYMMDD 會落到 return 0，
       // 整欄被當 0、篩不到任何資料(假的「區間內沒有資料」)。先用 staticCellValue 取出算好的 result 再正規化。
       const dv = toYYYYMMDD(staticCellValue(sheet.getRow(r).getCell(dateCol).value));
-      if (dv && dv >= startNum && dv <= endNum) srcRowIndexes.push(r);
+      if (dv && dv >= startNum && dv <= endNum) {
+        srcRowIndexes.push(r);
+        if (targetCol > 0) {
+          const cellVal = staticCellValue(sheet.getRow(r).getCell(targetCol).value);
+          if (typeof cellVal === "number" && Number.isFinite(cellVal)) highlightColumnSum += cellVal;
+        }
+      }
     }
     const dataCount = srcRowIndexes.length - 1;
-    ctx.log(`篩選日期區間 ${startNum} ~ ${endNum}，共 ${dataCount} 筆符合`);
+    ctx.log(`篩選日期區間 ${startNum} ~ ${endNum}，共 ${dataCount} 筆符合${targetCol > 0 ? `，「${highlightColumnName}」欄加總＝${highlightColumnSum}` : ""}`);
     if (dataCount === 0) {
       if (!cfgBool(ctx, "allowEmptyResult")) {
         throw new PermanentError("篩選區間內沒有資料，請確認日期區間或來源檔");
@@ -197,6 +209,7 @@ export const excelProcessNode: NodeDefinition = {
           outputPath: "",
           desktopPath: null,
           rowCount: dataCount,
+          highlightColumnSum,
           filename: `${outputName}.xlsx`,
           validationOnly: true,
           sourceEvidence: sourceEvidence(inputPath, sheet, sheetName, headerText, headerRowIndex, dataCount),
@@ -290,6 +303,7 @@ export const excelProcessNode: NodeDefinition = {
         outputPath,
         desktopPath,
         rowCount: dataCount,
+        highlightColumnSum,
         filename,
         sourceEvidence: sourceEvidence(inputPath, sheet, sheetName, headerText, headerRowIndex, dataCount),
       },

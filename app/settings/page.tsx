@@ -229,6 +229,12 @@ export default function SettingsPage() {
     <div className="max-w-2xl mx-auto px-4 sm:px-8 py-6 sm:py-8 space-y-8">
       <PageHeader title="設定" subtitle="連線、AI、檔案位置——由上到下就是一般人會用到的順序" />
       {loadError && <div className="card px-4 py-3 text-sm" style={{ borderColor: "var(--red)", color: "var(--red)" }}>部分設定載入失敗，顯示的內容可能不完整，請重新整理頁面。</div>}
+      {/* 首屏一次擺出十幾個空欄位，卻沒有任何地方講「這些其實都不用填」——
+          真實踩過的落差(2026-08 UI/UX 審計 P0-1)：AI 模型已經預設接免費 API，其餘每一項都是
+          「用到哪個服務才設定哪個」。沒講清楚，新使用者會誤以為要先填完整頁才能開始建流程。 */}
+      <div className="card px-4 py-3 text-sm" style={{ borderColor: "var(--accent)", background: "var(--accent-soft)" }}>
+        這一頁<b>全部都是選填</b>。AI 模型已經預設接好免費服務，其餘每一項都是「你的流程用到哪個服務，才回來設定哪一項」——什麼都不填也能開始建流程。已經設定好的欄位會標「已設定」。
+      </div>
 
       <div className="pt-2">
         <h2 className="text-sm font-semibold" style={{ color: "var(--accent)" }}>① 連線與帳號</h2>
@@ -239,7 +245,7 @@ export default function SettingsPage() {
           <h2 className="font-medium">共用帳密</h2>
           <p className="text-sm muted mt-0.5">同一個帳密只要填一次，使用這個欄位的流程會自動套用。內容會加密保存在這台電腦；每條流程執行時只拿得到自己真的需要的欄位。要用不同帳密的流程，會單獨列成另一個欄位。</p>
         </div>
-        {fields.length === 0 && <p className="text-sm muted">目前沒有需要帳密的 workflow。</p>}
+        {fields.length === 0 && <p className="text-sm muted">目前沒有需要帳密的流程。</p>}
         {fields.length > 0 && (
           <div className="card p-5 space-y-3">
             {fields.map((field) => (

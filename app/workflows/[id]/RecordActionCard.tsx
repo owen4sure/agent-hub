@@ -32,7 +32,7 @@ function keyFor(action: RecordedAction, index: number): string {
 }
 
 function labelFor(action: RecordedAction): string {
-  const inner = action.describe.match(/「([^」]+)」/)?.[1] ?? "這一格";
+  const inner = action.describe.match(/「([^」]+)」/)?.[1] ?? "這一步";
   return `要填進「${inner}」的內容`;
 }
 

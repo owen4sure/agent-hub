@@ -64,10 +64,10 @@ test("換簡報圖片：設定不完整時要講清楚是哪裡不對", async ()
   assert.match(await errorOf(makeCtx({ imagePath: "/tmp/不存在的圖.png" })), /找不到要貼上去的圖片/);
 });
 
-test("換簡報圖片：沒有驗證碼時要指路到部署卡片，不要送出一個一定會被拒絕的請求", async () => {
+test("換簡報圖片：沒有驗證碼時要指路到「這條流程的設定」，不要送出一個一定會被拒絕的請求", async () => {
   const message = await errorOf(makeCtx({}, { token: null }));
   assert.match(message, /驗證碼/);
-  assert.match(message, /卡片/);
+  assert.match(message, /這條流程的設定/);
 });
 
 test("換簡報圖片：只讀試跑不可以真的送出——承諾是「沒送出」，不是「事後改回來」", async () => {

@@ -155,12 +155,27 @@ async function describePage(page: Page | Frame): Promise<string> {
   });
 }
 
+/**
+ * 這套信箱的「寫信」表單常常是嵌在 iframe 裡的獨立文件——page.content() 只回頂層文件，
+ * 抓不到 iframe 內部真正的欄位長什麼樣。之前踩過的真實案例：主旨明明記錄「已填」，畫面截圖
+ * 卻是空的，回頭查存檔的 debug html 完全找不到「標題」這個字——因為那份 html 根本沒包含
+ * 寫信表單所在的那層 iframe，沒辦法回頭判斷 inputNearLabel 當初到底抓到了哪個元素。
+ * 每一層 frame 都存一份(檔名帶 frame 的 url 摘要)，才有真正的第一手資料可以回頭核對。
+ */
 async function saveDebug(ctx: NodeContext, step: string) {
   const dir = path.join(/* turbopackIgnore: true */ ctx.debugDir, ctx.nodeId);
   fs.mkdirSync(dir, { recursive: true });
   const page = await ctx.session.getPage();
   await page.screenshot({ path: path.join(/* turbopackIgnore: true */ dir, `${step}.png`), fullPage: true }).catch(() => {});
   await fs.promises.writeFile(path.join(/* turbopackIgnore: true */ dir, `${step}.html`), await page.content()).catch(() => {});
+  const frames = page.frames().filter((f) => f !== page.mainFrame());
+  for (let i = 0; i < frames.length; i++) {
+    const label = frames[i].url().replace(/[^A-Za-z0-9]+/g, "-").slice(-60) || `frame${i}`;
+    await fs.promises.writeFile(
+      path.join(/* turbopackIgnore: true */ dir, `${step}.frame-${i}-${label}.html`),
+      await frames[i].content(),
+    ).catch(() => {});
+  }
 }
 
 /**
@@ -286,10 +301,19 @@ export const webmailSendNode: NodeDefinition = {
     for (const key of ["to", "cc", "bcc", "subject", "body"]) {
       assertNoUnresolvedVars(ctx, key, "這封信的內容");
     }
-    const to = splitRecipients(cfgStr(ctx, "to"));
-    const cc = splitRecipients(cfgStr(ctx, "cc"));
-    const bcc = splitRecipients(cfgStr(ctx, "bcc"));
-    const subject = cfgStr(ctx, "subject").trim();
+    const rawTo = splitRecipients(cfgStr(ctx, "to"));
+    // 使用者這次執行勾了「通知/寄信先都寄給我自己」：收件人/副本/密件副本全部改成他自己的信箱，
+    // 不動存檔的節點設定(下次正常執行照樣寄給正式收件人)。副本/密件副本一併清空——測試不該連帶
+    // 驚動被 cc 的人。主旨加註記，讓真的寄到信箱裡時一眼看得出這是測試、原本要寄給誰。
+    const testOverride = ctx.testSendOverride?.trim();
+    const to = testOverride ? [testOverride] : rawTo;
+    const cc = testOverride ? [] : splitRecipients(cfgStr(ctx, "cc"));
+    const bcc = testOverride ? [] : splitRecipients(cfgStr(ctx, "bcc"));
+    let subject = cfgStr(ctx, "subject").trim();
+    if (testOverride) {
+      subject = `[測試·原收件人：${rawTo.join("、") || "(未填)"}] ${subject}`;
+      ctx.log(`🧪 這次執行勾了「先寄給我自己」，收件人已經從「${rawTo.join("、") || "(未填)"}」改成「${testOverride}」，不會真的寄給正式收件人。`);
+    }
     const body = cfgStr(ctx, "body");
     const asHtml = cfgStr(ctx, "bodyFormat", "text").toLowerCase() === "html";
     const signature = cfgStr(ctx, "signature").trim();
@@ -324,7 +348,7 @@ export const webmailSendNode: NodeDefinition = {
         throw new PermanentError(
           `等了 25 秒還是找不到「${config.composeEntry[0]}」入口。這一步要在**已經登入**的網頁信箱裡操作——`
           + "如果還沒登入，請先在這條流程用「⋯ → 🔐 手動登入一次」登入一次；如果已經登入但畫面不一樣，"
-          + `可以在這一步的「進階：寫信頁網址」直接填寫信頁的網址。\n${await describePage(page)}`,
+          + `可以在這一步的「進階：寫信頁網址」直接填寫信頁的網址。\n▸ 技術細節（給 AI 看的畫面內容）：${await describePage(page)}`,
         );
       }
       await entry.click();

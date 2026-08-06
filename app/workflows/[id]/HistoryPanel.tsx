@@ -268,14 +268,14 @@ export function HistoryPanel({
         body: JSON.stringify({ params: detail?.triggerParams ?? {}, dryRun: true, approvalDecisions: { [port.nodeId]: port.port } }),
       });
       const runData = await runResponse.json().catch(() => ({}));
-      if (!runResponse.ok || typeof runData.runId !== "string") throw new Error(runData.error || "無法開始這個分支的安全試跑");
+      if (!runResponse.ok || typeof runData.runId !== "string") throw new Error(runData.error || "無法開始這個分支的演練");
       let runStatus = "queued";
       for (let i = 0; i < 30 && (runStatus === "queued" || runStatus === "running"); i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 300));
         const current = await fetch(`/api/runs/${runData.runId}`).then((response) => response.json());
         runStatus = String(current.run?.status ?? "");
       }
-      if (runStatus !== "success") throw new Error(`這個分支安全試跑沒有完成（${runStatus || "未知狀態"}）`);
+      if (runStatus !== "success") throw new Error(`這個分支演練沒有完成（${runStatus || "未知狀態"}）`);
       const saveResponse = await fetch(`/api/workflows/${wfId}/scenarios`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -306,14 +306,14 @@ export function HistoryPanel({
         body: JSON.stringify({ nodeId: port.nodeId, port: port.port }),
       });
       const plan = await response.json().catch(() => ({}));
-      if (!response.ok || typeof plan.runId !== "string") throw new Error(plan.error || "無法建立這個分支的安全試跑");
+      if (!response.ok || typeof plan.runId !== "string") throw new Error(plan.error || "無法建立這個分支的演練");
       let runStatus = "queued";
       for (let i = 0; i < 30 && (runStatus === "queued" || runStatus === "running"); i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 300));
         const current = await fetch(`/api/runs/${plan.runId}`).then((result) => result.json());
         runStatus = String(current.run?.status ?? "");
       }
-      if (runStatus !== "success") throw new Error(`這個分支安全試跑沒有完成（${runStatus || "未知狀態"}）`);
+      if (runStatus !== "success") throw new Error(`這個分支演練沒有完成（${runStatus || "未知狀態"}）`);
       const saveResponse = await fetch(`/api/workflows/${wfId}/scenarios`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -343,14 +343,14 @@ export function HistoryPanel({
         body: JSON.stringify({ nodeId: port.nodeId }),
       });
       const plan = await response.json().catch(() => ({}));
-      if (!response.ok || typeof plan.runId !== "string") throw new Error(plan.error || "無法建立這條備援的安全試跑");
+      if (!response.ok || typeof plan.runId !== "string") throw new Error(plan.error || "無法建立這條備援的演練");
       let runStatus = "queued";
       for (let i = 0; i < 30 && (runStatus === "queued" || runStatus === "running"); i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 300));
         const current = await fetch(`/api/runs/${plan.runId}`).then((result) => result.json());
         runStatus = String(current.run?.status ?? "");
       }
-      if (runStatus !== "success") throw new Error(`備援安全試跑沒有完成（${runStatus || "未知狀態"}）`);
+      if (runStatus !== "success") throw new Error(`備援演練沒有完成（${runStatus || "未知狀態"}）`);
       const saveResponse = await fetch(`/api/workflows/${wfId}/scenarios`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -400,7 +400,7 @@ export function HistoryPanel({
           const current = await fetch(`/api/runs/${started.runId}`).then((result) => result.json());
           runStatus = String(current.run?.status ?? "");
         }
-        if (runStatus !== "success") throw new Error(`「${plan.name}」安全試跑沒有完成（${runStatus || "未知狀態"}）`);
+        if (runStatus !== "success") throw new Error(`「${plan.name}」演練沒有完成（${runStatus || "未知狀態"}）`);
         const saveResponse = await fetch(`/api/workflows/${wfId}/scenarios`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -411,7 +411,7 @@ export function HistoryPanel({
         if (saved.scenario) savedScenarios.push(saved.scenario as ScenarioSummary);
       }
       setScenarios((current) => [...savedScenarios, ...current.filter((scenario) => !savedScenarios.some((saved) => saved.id === scenario.id))]);
-      setScenarioMessage(`已完成 ${savedScenarios.length} 個選項情境的安全試跑並保存，之後回歸會一起驗證。`);
+      setScenarioMessage(`已完成 ${savedScenarios.length} 個選項情境的演練並保存，之後回歸會一起驗證。`);
     } catch (error) {
       setScenarioMessage(error instanceof Error ? error.message : "無法建立輸入情境");
     } finally {
@@ -535,7 +535,7 @@ export function HistoryPanel({
               <p className="text-xs font-medium flex items-center gap-2">🧪 情境回歸 <span className="badge badge-neutral">{scenarios.length}</span></p>
               <button onClick={replayAllScenarios} disabled={suiteBusy} className="btn btn-ghost text-[11px] ml-auto">{suiteBusy ? "回歸中…" : "全部安全重播"}</button>
             </div>
-            <p className="text-[11px] faint leading-relaxed">把成功過的輸入和分支記下來，需要時用安全試跑重播；流程改過的舊情境會自動停下。</p>
+            <p className="text-[11px] faint leading-relaxed">把成功過的輸入和分支記下來，需要時用演練重播；流程改過的舊情境會自動停下。</p>
             {scenarios.slice(0, 8).map((scenario) => (
               <div key={scenario.id} className="flex items-center gap-2 text-xs">
                 <span className="truncate flex-1">{scenario.name}</span>

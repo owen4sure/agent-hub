@@ -58,7 +58,7 @@ export const webPageNode: NodeDefinition = {
     for (;;) {
       if (!/^https?:$/.test(current.protocol)) throw new PermanentError(`只支援 http/https 網址：${current.href}`);
       if (guardOn && (await isPrivateHost(current.hostname))) {
-        throw new PermanentError(`這個網址指向內部網路(${current.hostname})，基於安全不抓取。內網需求請設環境變數 AGENT_HUB_ALLOW_PRIVATE_URLS=1`);
+        throw new PermanentError(`這個網址指向內部網路(${current.hostname})，平台基於安全考量不會自動抓取內網位址。如果這是刻意要抓公司內部系統，需要請熟悉這台電腦設定的人開啟允許內網的選項（技術細節：環境變數 AGENT_HUB_ALLOW_PRIVATE_URLS=1）。`);
       }
       let res: Response;
       try {

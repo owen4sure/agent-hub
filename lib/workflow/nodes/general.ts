@@ -1,11 +1,12 @@
 import type { NodeDefinition } from "../types";
 import { PermanentError, RetryableError } from "../types";
-import { assertNoUnresolvedVars, cfgStr, makeClient, resolveTemplate } from "../nodeHelpers";
-import { callClaudeCode, isClaudeCodeModel, isClaudeCodeAvailable } from "../../claudeCodeClient";
+import { assertNoUnresolvedVars, cfgStr, planNodeModel, resolveTemplate, runWithModelChain } from "../nodeHelpers";
+import { callClaudeCode, isClaudeCodeModel } from "../../claudeCodeClient";
 import { callAIWithRetry } from "../../aiRetry";
 import { fetchWithUrlGuard } from "../../urlGuard";
 import { urlSourceEvidence } from "../runtimeEvidence";
 import { parseResponseContract, parseStatusSpec, statusMatches, validateResponseContract } from "../httpContract";
+import { getClient } from "../../modelClient";
 
 export const httpRequestNode: NodeDefinition = {
   type: "http-request",
@@ -217,11 +218,22 @@ export const llmDecideNode: NodeDefinition = {
     { key: "prompt", label: "要問 AI 的內容(可用 {{欄位}})", type: "textarea", default: "" },
     { key: "outputKey", label: "輸出欄位名", type: "text", default: "answer" },
     { key: "choices", label: "限定答案(逗號分隔，選填；判斷型必填)", type: "text", default: "" },
+    // 這一步專屬的模型(2026-08-05)：節點級 AI 以前只能跟著「整條流程的模型」走——使用者的
+    // 地端模型實測「小輸入小輸出的判斷」可以、「建圖/產碼那種大包」不行，但流程模型是同一顆
+    // 開關,想讓地端模型只做判斷就得整條流程(含建圖產碼)一起換過去。這個欄位讓「這一步用哪顆」
+    // 跟「流程用哪顆」分開；留空=維持原本行為(流程模型)。
+    { key: "model", label: "這一步用的模型(選填，留空=用流程的模型；可填自訂來源的模型代號)", type: "text", default: "", allowEmpty: true, advanced: true },
   ],
   retryable: true,
   async execute(ctx) {
     const prompt = cfgStr(ctx, "prompt");
     const key = cfgStr(ctx, "outputKey", "answer");
+    // 用哪顆模型由 modelPolicy 統一決定：這一步指定的 → 這條流程指定的執行模型 →
+    // 使用者在設定頁排的順序 → 自動。指定的來源被刪掉/改名時 planModelChain 會回一條空的鏈
+    // (絕不「順手挑一顆同名的」)，runWithModelChain 就會停下來說明——使用者特地把這一步釘在
+    // 某個端點(例如地端模型，資料不出機器)，靜默換端點等於把業務資料送去別的地方而毫無痕跡。
+    const modelOverride = cfgStr(ctx, "model", "").trim();
+    const plan = await planNodeModel(ctx, "text", modelOverride || undefined);
     // choices = 確定性的輸出約束。沒有它，弱模型對「判斷這筆是否異常」會回一整段分析文字，
     // 下游 if-condition 比 == "true" 永遠 false、靜默走錯分支還回報成功(表面成功實際走樣)。
     const choices = cfgStr(ctx, "choices")
@@ -230,23 +242,28 @@ export const llmDecideNode: NodeDefinition = {
       .filter(Boolean);
 
     const ask = async (fullPrompt: string): Promise<string> => {
-      const claudeCodeFallback = () => callClaudeCode({ prompt: fullPrompt, signal: ctx.cancelSignal });
       // signal 接 ctx.cancelSignal：使用者按「停止執行」時中斷正在進行的模型呼叫本身(不接的話
       // 停止對這個節點沒有作用，要等模型呼叫自然結束/逾時才會停下來)。
-      if (isClaudeCodeModel(ctx.model)) {
-        return (await callAIWithRetry(claudeCodeFallback, { label: "AI判斷(Claude Code)", signal: ctx.cancelSignal, maxAttempts: 2 })).trim();
-      }
-      const client = makeClient(ctx);
-      const fallback = (await isClaudeCodeAvailable()) ? claudeCodeFallback : undefined;
-      return (
-        await callAIWithRetry(
-          () =>
-            client.chat.completions
-              .create({ model: ctx.model, messages: [{ role: "user", content: fullPrompt }], max_tokens: 1000 }, { signal: ctx.cancelSignal })
-              .then((res) => res.choices[0]?.message?.content ?? ""),
-          { label: "AI判斷", fallback, signal: ctx.cancelSignal },
-        )
-      ).trim();
+      const { result } = await runWithModelChain(ctx, plan, {
+        label: "AI 判斷",
+        attempt: (pick) => {
+          if (isClaudeCodeModel(pick.model)) {
+            return callAIWithRetry(() => callClaudeCode({ prompt: fullPrompt, signal: ctx.cancelSignal }), {
+              label: "AI判斷(Claude Code)", signal: ctx.cancelSignal, maxAttempts: 2,
+            });
+          }
+          // client 依「這顆模型屬於哪個來源」建立，不是流程層的 ctx.baseUrl。
+          const client = getClient(pick.ref);
+          return callAIWithRetry(
+            () =>
+              client.chat.completions
+                .create({ model: pick.model, messages: [{ role: "user", content: fullPrompt }], max_tokens: 1000 }, { signal: ctx.cancelSignal })
+                .then((res) => res.choices[0]?.message?.content ?? ""),
+            { label: `AI判斷(${pick.ref})`, signal: ctx.cancelSignal },
+          );
+        },
+      });
+      return result.trim();
     };
 
     /** 從回答裡撈出合法選項：完全相等優先；「答案是 X」這種包了幾個字的也救回來(唯一命中才算)。

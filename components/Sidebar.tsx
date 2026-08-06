@@ -5,13 +5,15 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import HelpGuide from "./HelpGuide";
 
+// 側欄名稱要跟點進去那一頁的 H1 一字不差——以前「Workflows」點進去卻是「我的流程」、
+// 「可靠性」點進去卻是「可靠性總覽」，使用者會愣一下「這是同一頁嗎」(2026-08 UI/UX 審計 IA-5)。
 const NAV = [
-  { href: "/", label: "Workflows", icon: "◈" },
+  { href: "/", label: "我的流程", icon: "◈" },
   { href: "/drafts", label: "草稿", icon: "✎" },
   { href: "/schedules", label: "排程 & 執行", icon: "⏰" },
   { href: "/runs", label: "執行紀錄", icon: "☰" },
   { href: "/files", label: "產出檔案", icon: "▤" },
-  { href: "/reliability", label: "可靠性", icon: "◉" },
+  { href: "/reliability", label: "平台健康度", icon: "◉" },
   { href: "/settings", label: "設定", icon: "⚙" },
 ];
 
@@ -75,9 +77,11 @@ export default function Sidebar() {
 
       <div className="p-3 border-t space-y-2">
         <HelpGuide />
+        {/* 文字要講「按下去會變成什麼」，不是「現在是什麼」——顯示目前狀態時使用者會愣一下
+            「這是說現在是深色、還是按下去會變深色？」，講清楚要切去哪一個才不會猜。 */}
         <button onClick={toggleTheme} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm muted hover:bg-[var(--surface-2)] transition-colors">
-          <span className="w-4 text-center">{theme === "dark" ? "☾" : "☀"}</span>
-          {theme === "dark" ? "深色模式" : "淺色模式"}
+          <span className="w-4 text-center">{theme === "dark" ? "☀" : "☾"}</span>
+          {theme === "dark" ? "切成淺色模式" : "切成深色模式"}
         </button>
         <p className="text-xs faint px-3">本機自架 · localhost</p>
       </div>

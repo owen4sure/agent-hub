@@ -165,7 +165,18 @@ export function callClaudeCode(opts: { prompt: string; imagePaths?: string[]; re
       if (now - lastActivity > IDLE_MS) {
         fail(`Claude Code 沒有回應(超過 ${IDLE_MS / 60_000} 分鐘完全沒有輸出，可能卡住了)${rateLimitNote}`);
       } else if (now - startedAt > maxMs) {
-        fail(`本機 Claude Code 一直在跑但 ${Math.round(maxMs / 60_000)} 分鐘內沒有給出完整答案，已經停止等待。這通常代表這次要它產生的內容太長(例如被要求整段重寫一大塊程式碼)；把需求拆小、或改用定點修改會快很多。${rateLimitNote}`);
+        // 兩種「時間到」的原因完全不同，訊息要分開講(真實踩過，診斷編號 fb2b1d95)：
+        // 呼叫方預算見底時，這次呼叫可能只分到 45 秒——不是內容太長、更不是需求要拆小，
+        // 照舊訊息去「拆需求」只會白忙；老實講「時間被前面步驟用掉了，重送一次就好」。
+        //
+        // 判斷依據必須是「這次**實際**分到多少(maxMs)」，不能拿 budgetMs 跟絕對上限比：
+        // 建圖總預算已經拉到跟 ABSOLUTE_MAX_MS 一樣的 20 分鐘，budgetMs 扣掉已耗時後永遠小於
+        // 絕對上限 → 那種寫法恆為 true，「內容太長、把需求拆小」這個唯一正確的建議變成永遠
+        // 不會出現的死碼，使用者只會一直被叫去「再送一次」然後一次次跑滿被砍(code review 2026-08-06)。
+        const budgetLimited = maxMs < ABSOLUTE_MAX_MS * 0.6;
+        fail(budgetLimited
+          ? `本機 Claude Code 這次只分到 ${Math.max(1, Math.round(maxMs / 1000))} 秒(整體時間預算被前面的等待/修正輪用掉了)，來不及想完。直接再送一次同樣的話即可——重新開始會有完整的時間。${rateLimitNote}`
+          : `本機 Claude Code 一直在跑但 ${Math.round(maxMs / 60_000)} 分鐘內沒有給出完整答案，已經停止等待。這通常代表這次要它產生的內容太長(例如被要求整段重寫一大塊程式碼)；把需求拆小、或改用定點修改會快很多。${rateLimitNote}`);
       }
     }, 5000);
 

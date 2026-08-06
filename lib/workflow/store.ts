@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { getDb } from "../db";
-import { DEFAULT_MODEL } from "../models";
+import { defaultModelRef } from "../modelProviders";
 import { getWorkflowModel, setWorkflowModel } from "../settingsStore";
 // 注意：registry→customCode→store 形成模組循環，但 getNodeDef 只在函式執行期被呼叫(不在模組初始化期)，
 // ESM 對這種「延遲取用」的循環是安全的。不要在模組頂層直接取用 registry 的值。
@@ -262,7 +262,7 @@ function readWorkflowFile(scope: "example" | "user", filename: string): Workflow
     builtin: raw.builtin ?? (scope === "example"),
     description: raw.description ?? "",
     longDescription: raw.longDescription,
-    defaultModel: raw.defaultModel ?? DEFAULT_MODEL,
+    defaultModel: raw.defaultModel ?? defaultModelRef(),
     requiresSecrets: raw.requiresSecrets ?? [],
     triggerParams: raw.triggerParams ?? [],
     onFailureWorkflow: raw.onFailureWorkflow,
@@ -463,7 +463,7 @@ export function createWorkflow(name: string): Workflow {
     status: "draft",
     builtin: false,
     description: "",
-    defaultModel: DEFAULT_MODEL,
+    defaultModel: defaultModelRef(),
     requiresSecrets: [],
     triggerParams: [],
     nodes: [

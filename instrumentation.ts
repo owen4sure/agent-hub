@@ -35,4 +35,7 @@ export async function register() {
   await init("mailWatcher", async () => (await import("./lib/mailWatcher")).startMailWatcher());
   await init("telegramPoller", async () => (await import("./lib/telegramPoller")).startTelegramPoller());
   await init("backup", async () => (await import("./lib/dataBackup")).startDataBackups());
+  // 不列進 app/api/health/route.ts 的 requiredComponents：這是錦上添花的續命，不是核心基礎設施，
+  // 續存失敗不該讓首頁跳紅色警示——失敗時使用者真正會看到的信號是排程執行本身失敗(已有的機制)。
+  await init("webmailKeepAlive", async () => (await import("./lib/webmailKeepAlive")).startWebmailKeepAlive());
 }

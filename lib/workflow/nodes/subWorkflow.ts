@@ -1,7 +1,6 @@
 import type { NodeDefinition } from "../types";
 import { PermanentError } from "../types";
 import { cfgStr, resolveJsonSafeTemplate } from "../nodeHelpers";
-import { getMaxConcurrent } from "../../settingsStore";
 import { getDb } from "../../db";
 // ⚠️ 不能在頂層 import ../engine 或 ../store：registry.ts 靜態 import 所有節點(含這個檔案
 // export 的 subWorkflowNode)，而 engine.ts 執行節點要用 registry 的 getNodeDef、store.ts 也在
@@ -29,7 +28,7 @@ export const subWorkflowNode: NodeDefinition = {
   timeoutMs: 20 * 60_000,
   async execute(ctx) {
     const { getWorkflow, findWorkflowsByName } = await import("../store");
-    const { runWorkflowAndWait, defaultMaxConcurrent } = await import("../engine");
+    const { runWorkflowAndWait } = await import("../engine");
     const target = cfgStr(ctx, "target").trim();
     if (!target) throw new PermanentError("沒有指定要執行哪條流程(填名稱或 id)");
     // 依 id 或名稱找(名稱要唯一,重名就老實要求用 id)。
@@ -49,11 +48,23 @@ export const subWorkflowNode: NodeDefinition = {
       wf = hits[0] ?? null;
     }
     if (!wf) throw new PermanentError(`找不到流程「${target}」——確認名稱拼對,或改填流程 id`);
-    if (wf.id === ctx.workflowId) throw new PermanentError("子流程不能呼叫自己(會無限循環)");
     const level = Number((ctx.input as Record<string, unknown>).__subLevel ?? 0);
     if (level >= 2) throw new PermanentError("子流程最多巢狀兩層——再深的結構請攤平,不然出錯很難排查");
-    if (getMaxConcurrent(defaultMaxConcurrent()) < 2) {
-      throw new PermanentError("執行子流程需要併行執行空間——請到「排程 & 執行」頁把「同時觸發時怎麼跑」改成「併行」再重試(依序模式下母流程會佔住唯一名額,子流程永遠排不進去)");
+    // 2026-08 code review 抓到的真實 bug：舊版只擋「A 直接呼叫自己」，A→B→A 這種間接迴圈擋不住——
+    // B 想呼叫回 A 時，A 的原始那次執行還在等 B 跑完(佔著 runningWorkflows 的名額)，這次新的 A
+    // 呼叫排進佇列後永遠排不進去(見 engine.ts 的 nestedSubWorkflowCall)，會卡住直到 15 分鐘逾時
+    // 才強制失敗，而不是立刻報出清楚的原因。改成整條呼叫鏈都記著(__subChain)，任何一次要呼叫的
+    // 目標只要已經在這條鏈上出現過，不管是直接呼叫自己還是繞了幾圈回來，都在真的送出呼叫前就
+    // 立刻擋下來，不讓它有機會排進佇列卡死。
+    const priorChain: string[] = Array.isArray((ctx.input as Record<string, unknown>).__subChain)
+      ? (ctx.input as Record<string, unknown>).__subChain as string[]
+      : [ctx.workflowId];
+    if (priorChain.includes(wf.id)) {
+      throw new PermanentError(
+        wf.id === ctx.workflowId
+          ? "子流程不能呼叫自己(會無限循環)"
+          : `偵測到子流程呼叫迴圈：「${wf.name}」已經在這條呼叫鏈裡出現過(例如 A 呼叫 B、B 又繞回去呼叫 A 這種間接迴圈)，繼續執行只會無限循環——請檢查這幾條流程的「執行子流程」設定，拿掉造成迴圈的那一段。`,
+      );
     }
 
     let params: Record<string, unknown>;
@@ -74,9 +85,12 @@ export const subWorkflowNode: NodeDefinition = {
       params = { ...(ctx.input as Record<string, unknown>) };
     }
     params.__subLevel = level + 1;
+    params.__subChain = [...priorChain, wf.id];
 
     ctx.log(`開始執行子流程「${wf.name}」…`);
-    const result = await runWorkflowAndWait(wf.id, params, { headed: false, timeoutMs: 15 * 60_000, dryRun: ctx.dryRun });
+    // nestedSubWorkflowCall:true——母流程整個停下來等子流程跑完,兩者是輪流不是同時做事,
+    // 不需要調整全站的併行設定(見 engine.ts 的 QueueItem.nestedSubWorkflowCall 說明)。
+    const result = await runWorkflowAndWait(wf.id, params, { headed: false, timeoutMs: 15 * 60_000, dryRun: ctx.dryRun, nestedSubWorkflowCall: true });
     if (result.status === "waiting") {
       // 子流程停在等簽核——母流程沒辦法跟著暫停幾小時/幾天(引擎的續跑只存到節點層級)。
       // 老實擋下並指路:簽核節點放母流程,或把「簽核之後的事」做成獨立流程
@@ -91,6 +105,7 @@ export const subWorkflowNode: NodeDefinition = {
     ctx.log(`子流程「${wf.name}」完成`);
     const out = collectSubRunOutput(result.runId);
     delete out.__subLevel;
+    delete out.__subChain;
     return { output: { ...ctx.input, ...out, subRunOk: true } };
   },
 };

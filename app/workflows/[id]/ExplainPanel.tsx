@@ -56,7 +56,7 @@ export function ExplainPanel({ workflowId, onClose, onPickNode }: { workflowId: 
             <div className="text-xs faint pt-1">一步一步（照執行順序）：</div>
             <div className="space-y-2.5">
               {data.steps.map((s) => (
-                <button key={s.id} onClick={() => onPickNode(s.id)} className="card card-hover w-full text-left p-3 block" title="點一下跳到這個節點修改">
+                <button key={s.id} onClick={() => onPickNode(s.id)} className="card card-hover w-full text-left p-3 block" title="點一下跳到這個步驟修改">
                   <div className="flex items-center gap-2">
                     <span className="grid place-items-center w-6 h-6 rounded-md text-xs shrink-0" style={{ background: "var(--surface-2)" }}>{s.order}</span>
                     <span>{s.icon}</span>
@@ -76,7 +76,7 @@ export function ExplainPanel({ workflowId, onClose, onPickNode }: { workflowId: 
                 </button>
               ))}
             </div>
-            <p className="text-xs faint pt-1">看完覺得哪一步要改，點那一步就會跳到節點，用白話跟 AI 講怎麼改。</p>
+            <p className="text-xs faint pt-1">看完覺得哪一步要改，點那一步就會跳過去，用白話跟 AI 講怎麼改。</p>
           </>
         )}
       </div>

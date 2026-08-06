@@ -13,6 +13,12 @@ interface WorkflowSummary {
   status: "draft" | "official";
   builtin: boolean;
   description: string;
+  /**
+   * 每一個非觸發步驟的搜尋語料——跟流程頁「說明」面板同一份資料(explainWorkflow)，
+   * 除了步驟名稱，也含白話說明句與設定裡的實際值，讓搜尋框在使用者記不清步驟確切命名、
+   * 只記得「做了什麼」或「內容是什麼」時也找得到。
+   */
+  stepSearch?: { label: string; text: string }[];
   nodeCount: number;
   needsRunInput?: boolean;
   group?: string;
@@ -100,6 +106,15 @@ export default function HomePage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [dismissedFailures, setDismissedFailures] = useState<string[]>([]);
   const [proposals, setProposals] = useState<FixProposal[]>([]);
+  // 首頁以前最多疊 4 張各自獨立的告警卡(上線檢查/簽核/AI修復/排程失敗)，把流程清單推到很下面
+  // 才看得到(2026-08 UI/UX 審計 IA-1)。收成一條橫幅，展開才看細節；真的需要處理時
+  // 預設就展開，不用讓使用者多點一次才看到說了什麼。
+  const [attentionExpanded, setAttentionExpanded] = useState(false);
+  // 只在「health 跟 overview 都第一次拿到資料」這一刻決定要不要預設展開——用 ref 卡住，避免背景輪詢
+  // 每次刷新(即使內容沒變、物件參照仍是新的)都把使用者手動收起來的橫幅硬拉開。
+  // 判斷式必須涵蓋「等你簽核」「排程失敗」，不能只看健康檢查——這兩者以前是永遠常駐的紅字卡片，
+  // 只看 health.ok 會讓它們在健康檢查正常時被悄悄藏進要多點一次才看得到的收合區(真實踩過的 bug)。
+  const attentionDefaultSetRef = useRef(false);
   const [applying, setApplying] = useState<Record<string, boolean>>({});
   const [applyResult, setApplyResult] = useState<Record<string, { ok: boolean; error?: string; skippedExtras?: string[] }>>({});
   // 資料夾清單/排序/檢視模式先在這裡宣告，因為下面的 load 函式跟掛載 effect 要用到這些 setter
@@ -334,9 +349,17 @@ export default function HomePage() {
 
   const q = search.trim().toLowerCase();
   const searching = q.length > 0;
-  const searchMatches = official.filter(
-    (w) => w.name.toLowerCase().includes(q) || (w.description ?? "").toLowerCase().includes(q),
-  );
+  // 名稱/短說明先比對；都沒中才退而找「裡面有沒有一步符合」，並記下是哪一步命中的——
+  // 使用者原話（第二次回饋，第一次只比對步驟名稱不夠）：「我上次有多加一個功能是更新簡報的
+  // 一頁圖，但是我現在不知道是更新在哪個工作流」，他記得的是「做了什麼」，不是那一步的確切
+  // 命名，所以比對語料要包含白話說明句與設定值，不能只比對步驟名稱本身。
+  const matchedStepFor = new Map<string, string>();
+  const searchMatches = official.filter((w) => {
+    if (w.name.toLowerCase().includes(q) || (w.description ?? "").toLowerCase().includes(q)) return true;
+    const step = w.stepSearch?.find((s) => s.text.toLowerCase().includes(q));
+    if (step) { matchedStepFor.set(w.id, step.label); return true; }
+    return false;
+  });
   // 搜尋橫跨所有資料夾，用工作流當下的完整路徑當小標題分組，才知道每一筆是哪個資料夾的
   const searchSections = [...new Set(searchMatches.map((w) => w.group || "(桌面)"))]
     .sort((a, b) => a.localeCompare(b, "zh-Hant"))
@@ -488,7 +511,7 @@ export default function HomePage() {
     );
   }
 
-  function workflowRow(w: WorkflowSummary, i: number) {
+  function workflowRow(w: WorkflowSummary, i: number, matchedStep?: string) {
     const statusColor = lastRunColor(w.lastRun?.status);
     return (
       <div
@@ -525,7 +548,13 @@ export default function HomePage() {
             </span>
           )}
           <span className="text-xs faint truncate hidden sm:inline">
-            {w.description || <span className="italic">點進去跟 AI 對話，說明會自動補上 ✨</span>}
+            {matchedStep ? (
+              <span title={`名稱/說明都沒有這個關鍵字，是裡面的步驟「${matchedStep}」符合`}>
+                🔎 符合步驟：「{matchedStep}」
+              </span>
+            ) : (
+              w.description || <span className="italic">點進去跟 AI 對話，說明會自動補上 ✨</span>
+            )}
           </span>
         </div>
         <span className="hidden md:flex items-center gap-1 text-xs shrink-0 relative z-[1] pointer-events-none" style={{ color: "var(--text-faint)" }}>
@@ -624,6 +653,33 @@ export default function HomePage() {
     );
   }
 
+  // 4 張各自獨立的告警卡收成一條橫幅要顯示的總數(IA-1)——只算「真的需要處理」的項目，
+  // 草稿數量不算在內(那是提醒,不是問題,獨立用另一條較不搶眼的線顯示)。
+  const healthIssueCount = health ? [
+    (health.failedComponents?.length ?? 0) > 0,
+    (health.invalidWorkflows?.length ?? 0) > 0,
+    (health.workflowFileIssues?.length ?? 0) > 0,
+    health.dataPermissionsPrivate === false,
+    !health.modelApiConfigured,
+    (health.missingSecretKeys?.length ?? 0) > 0,
+  ].filter(Boolean).length : 0;
+  const visibleFailures = overview?.recentScheduleFailures.filter((f) => !dismissedFailures.includes(f.id)) ?? [];
+  const pendingApprovalCount = overview?.pendingApprovals?.length ?? 0;
+  const attentionCount = healthIssueCount + pendingApprovalCount + proposals.length + visibleFailures.length;
+  const attentionUrgent = healthIssueCount > 0 || visibleFailures.length > 0;
+  // 第一次判斷「要不要預設展開」原本只看健康檢查(!health.ok)，等流程停下來等簽核、或有排程
+  // 失敗還沒讀過時，健康檢查本身可能完全正常，於是橫幅預設收合，使用者要自己點「展開」才看得到
+  // 這些本來一直都是常駐紅字卡片的東西(2026-08 code review 抓到的真實 bug)。改成看
+  // 「有沒有真的需要處理的事」這個綜合判斷，並在它從 0 變成 >0 的那一刻才展開一次
+  // （ref 卡住只展開一次，使用者手動收合後不會被之後的背景輪詢又強制拉開）。
+  const needsAttentionNow = healthIssueCount > 0 || pendingApprovalCount > 0 || visibleFailures.length > 0 || proposals.length > 0;
+  useEffect(() => {
+    if (attentionDefaultSetRef.current) return;
+    if (health === null || overview === null) return; // 兩份資料都到齊才下判斷，避免只看到其中一半
+    attentionDefaultSetRef.current = true;
+    if (needsAttentionNow) setAttentionExpanded(true);
+  }, [needsAttentionNow, health, overview]);
+
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-8 py-6 sm:py-8">
       <PageHeader
@@ -673,91 +729,120 @@ export default function HomePage() {
         router.push(`/workflows/${result.id}`);
       }} />}
 
-      {health && (!health.ok || (health.missingSecretKeys?.length ?? 0) > 0 || !health.modelApiConfigured) && (
-        <div className="card px-4 py-3 mb-5 text-sm space-y-1.5" style={{ borderColor: health.ok ? "var(--amber)" : "var(--red)" }}>
-          <p className="font-medium" style={{ color: health.ok ? "var(--amber)" : "var(--red)" }}>🩺 上線準備檢查</p>
-          {(health.failedComponents?.length ?? 0) > 0 && <p>有 {health.failedComponents!.length} 個背景功能沒有正常啟動；自動執行可能暫時不會發生。請重新開啟 Agent Hub；仍出現的話，把這段提示截圖傳給 AI 協助處理。</p>}
-          {(health.invalidWorkflows?.length ?? 0) > 0 && <p>有 {health.invalidWorkflows!.length} 條流程結構不完整，已禁止執行以避免做錯事；請打開流程讓 AI 修正。</p>}
-          {(health.workflowFileIssues?.length ?? 0) > 0 && <p>有 {health.workflowFileIssues!.length} 份流程檔案損毀或格式不完整，系統已隔離以免整站故障；請從該流程的版本備份還原。</p>}
-          {health.dataPermissionsPrivate === false && <p>這台電腦的資料保護設定不完整，其他登入這台電腦的人可能看得到流程資料。請先不要輸入帳密，並把這段提示截圖交給協助你安裝的人處理。</p>}
-          {!health.modelApiConfigured && <p>AI 服務尚未連上，所以目前不能建立或修正流程。 <Link href="/settings" className="underline">前往設定</Link>，依頁面說明貼上服務提供者給你的金鑰即可。</p>}
-          {(health.missingSecretKeys?.length ?? 0) > 0 && <p>正式流程仍缺 {health.missingSecretKeys!.length} 個需要的帳密欄位。 <Link href="/settings" className="underline">補齊帳密</Link></p>}
-        </div>
-      )}
-
       {overview && (
         <div className="flex flex-wrap gap-3 mb-6 rise-in">
-          <StatCard label="正式流程" value={overview.officialCount} icon="◈" tone="accent" />
-          <StatCard label="草稿" value={overview.draftCount} icon="✎" />
-          <StatCard label="今日成功" value={overview.todayCounts.success ?? 0} tone="green" icon="✓" />
-          <StatCard label="今日失敗" value={overview.todayCounts.failed ?? 0} tone={overview.todayCounts.failed ? "red" : undefined} icon={overview.todayCounts.failed ? "✕" : "—"} />
+          <StatCard label="正式流程" value={overview.officialCount} icon="◈" tone="accent" href="#workflow-list" />
+          <StatCard label="草稿" value={overview.draftCount} icon="✎" href="/drafts" />
+          <StatCard label="今日成功" value={overview.todayCounts.success ?? 0} tone="green" icon="✓" href="/runs" />
+          <StatCard label="今日失敗" value={overview.todayCounts.failed ?? 0} tone={overview.todayCounts.failed ? "red" : undefined} icon={overview.todayCounts.failed ? "✕" : "—"} href="/runs" />
         </div>
       )}
 
-      {(overview?.pendingApprovals?.length ?? 0) > 0 && (
-        <div className="card px-4 py-3 mb-6 space-y-3" style={{ borderColor: "var(--amber)" }}>
-          <div className="text-sm font-medium" style={{ color: "var(--amber)" }}>🙋 有流程停下來等你簽核</div>
-          {overview!.pendingApprovals!.map((a) => (
-            <div key={a.id} className="space-y-1.5">
-              <div className="flex items-start gap-2 text-sm flex-wrap sm:flex-nowrap">
-                <div className="min-w-0 flex-1">
-                  <Link href={`/workflows/${a.workflow_id}`} className="font-medium hover:underline">{a.workflow_name}</Link>
-                  <span className="faint"> · {formatDate(a.created_at)}</span>
-                  <p className="text-xs muted mt-0.5 whitespace-pre-wrap line-clamp-3">{a.message}</p>
+      {/* 上線檢查/簽核/AI修復提案/排程失敗——以前 4 張各自獨立的卡疊起來，把流程清單推到很下面
+          才看得到(2026-08 UI/UX 審計 IA-1)。收成一條橫幅，展開才看細節；內容跟互動邏輯不變，
+          只是外層包裝變成可收合。 */}
+      {attentionCount > 0 && (
+        <div className="card px-4 py-3 mb-6" style={{ borderColor: attentionUrgent ? "var(--red)" : "var(--amber)" }}>
+          <button
+            onClick={() => setAttentionExpanded((v) => !v)}
+            className="w-full flex items-center justify-between gap-2 text-sm font-medium"
+            style={{ color: attentionUrgent ? "var(--red)" : "var(--amber)" }}
+          >
+            <span>⚠️ 有 {attentionCount} 件事要你處理</span>
+            <span className="text-xs faint">{attentionExpanded ? "收起 ▴" : "展開 ▾"}</span>
+          </button>
+          {attentionExpanded && (
+            <div className="mt-3 space-y-4">
+              {healthIssueCount > 0 && health && (
+                <div className="text-sm space-y-1.5">
+                  <p className="font-medium" style={{ color: health.ok ? "var(--amber)" : "var(--red)" }}>🩺 上線準備檢查</p>
+                  {(health.failedComponents?.length ?? 0) > 0 && <p>有 {health.failedComponents!.length} 個背景功能沒有正常啟動；自動執行可能暫時不會發生。請重新開啟 Agent Hub；仍出現的話，把這段提示截圖傳給 AI 協助處理。</p>}
+                  {(health.invalidWorkflows?.length ?? 0) > 0 && <p>有 {health.invalidWorkflows!.length} 條流程結構不完整，已禁止執行以避免做錯事；請打開流程讓 AI 修正。</p>}
+                  {(health.workflowFileIssues?.length ?? 0) > 0 && <p>有 {health.workflowFileIssues!.length} 份流程檔案損毀或格式不完整，系統已隔離以免整站故障；請從該流程的版本備份還原。</p>}
+                  {health.dataPermissionsPrivate === false && <p>這台電腦的資料保護設定不完整，其他登入這台電腦的人可能看得到流程資料。請先不要輸入帳密，並把這段提示截圖交給協助你安裝的人處理。</p>}
+                  {!health.modelApiConfigured && <p>AI 服務尚未連上，所以目前不能建立或修正流程。 <Link href="/settings" className="underline">前往設定</Link>，依頁面說明貼上服務提供者給你的金鑰即可。</p>}
+                  {(health.missingSecretKeys?.length ?? 0) > 0 && <p>正式流程仍缺 {health.missingSecretKeys!.length} 個需要的帳密欄位。 <Link href="/settings" className="underline">補齊帳密</Link></p>}
                 </div>
-                <button onClick={() => decideApprovalCard(a.id, "approve")} disabled={deciding[a.id]} className="btn btn-primary text-xs shrink-0">
-                  {deciding[a.id] ? "處理中…" : "✅ 核准"}
-                </button>
-                <button onClick={() => decideApprovalCard(a.id, "reject")} disabled={deciding[a.id]} className="btn btn-ghost text-xs shrink-0">❌ 拒絕</button>
-                <a href={`/approve/${a.token}`} target="_blank" rel="noreferrer" className="text-xs faint hover:text-[var(--text)] shrink-0 mt-1" title="開簽核頁(可填備註)">詳情</a>
-              </div>
-              {decideError[a.id] && <p className="text-xs" style={{ color: "var(--red)" }}>{decideError[a.id]}</p>}
-            </div>
-          ))}
-        </div>
-      )}
+              )}
 
-      {proposals.length > 0 && (
-        <div className="card px-4 py-3 mb-6 space-y-3" style={{ borderColor: "var(--accent)" }}>
-          <div className="text-sm font-medium" style={{ color: "var(--accent)" }}>🤖 AI 已經想好怎麼修，一鍵套用+重跑驗證</div>
-          {proposals.map((p) => (
-            <div key={p.id} className="space-y-1.5">
-              <div className="flex items-start gap-2 text-sm flex-wrap sm:flex-nowrap">
-                <div className="min-w-0 flex-1">
-                  <Link href={`/workflows/${p.workflowId}`} className="font-medium hover:underline">{p.workflowName}</Link>
-                  <span className="faint"> · 「{p.nodeLabel}」這步{p.extraCount > 0 ? `(連同其他 ${p.extraCount} 步一併調整)` : ""} · {formatDate(p.createdAt)}</span>
-                  {p.error && <p className="text-xs muted mt-0.5 line-clamp-2">{p.error}</p>}
+              {(overview?.pendingApprovals?.length ?? 0) > 0 && (
+                <div className="space-y-3 border-t pt-3">
+                  <div className="text-sm font-medium" style={{ color: "var(--amber)" }}>🙋 有流程停下來等你簽核</div>
+                  {overview!.pendingApprovals!.map((a) => (
+                    <div key={a.id} className="space-y-1.5">
+                      <div className="flex items-start gap-2 text-sm flex-wrap sm:flex-nowrap">
+                        <div className="min-w-0 flex-1">
+                          <Link href={`/workflows/${a.workflow_id}`} className="font-medium hover:underline">{a.workflow_name}</Link>
+                          <span className="faint"> · {formatDate(a.created_at)}</span>
+                          <p className="text-xs muted mt-0.5 whitespace-pre-wrap line-clamp-3">{a.message}</p>
+                        </div>
+                        <button onClick={() => decideApprovalCard(a.id, "approve")} disabled={deciding[a.id]} className="btn btn-primary text-xs shrink-0">
+                          {deciding[a.id] ? "處理中…" : "✅ 核准"}
+                        </button>
+                        <button onClick={() => decideApprovalCard(a.id, "reject")} disabled={deciding[a.id]} className="btn btn-ghost text-xs shrink-0">❌ 拒絕</button>
+                        <a href={`/approve/${a.token}`} target="_blank" rel="noreferrer" className="text-xs faint hover:text-[var(--text)] shrink-0 mt-1" title="開簽核頁(可填備註)">詳情</a>
+                      </div>
+                      {decideError[a.id] && <p className="text-xs" style={{ color: "var(--red)" }}>{decideError[a.id]}</p>}
+                    </div>
+                  ))}
                 </div>
-                <button onClick={() => applyProposal(p.id)} disabled={applying[p.id]} className="btn btn-primary text-xs shrink-0">
-                  {applying[p.id] ? "套用+重跑中…" : "✅ 套用並重跑"}
-                </button>
-                <button onClick={() => dismissProposal(p.id)} className="btn btn-ghost text-xs shrink-0">忽略</button>
-              </div>
-              {applyResult[p.id] && (
-                <p className="text-xs" style={{ color: applyResult[p.id].ok ? "var(--green)" : "var(--red)" }}>
-                  {applyResult[p.id].ok ? "✅ 套用後重跑成功！" : `⚠️ 套用後重跑還是失敗：${applyResult[p.id].error ?? ""}`}
-                  {applyResult[p.id].skippedExtras?.length ? `（另外 ${applyResult[p.id].skippedExtras!.join("、")} 因為之後又被改過，沒有套用）` : ""}
-                </p>
+              )}
+
+              {proposals.length > 0 && (
+                <div className="space-y-3 border-t pt-3">
+                  <div className="text-sm font-medium" style={{ color: "var(--accent)" }}>🤖 AI 已經想好怎麼修，一鍵套用+重跑驗證</div>
+                  {proposals.map((p) => (
+                    <div key={p.id} className="space-y-1.5">
+                      <div className="flex items-start gap-2 text-sm flex-wrap sm:flex-nowrap">
+                        <div className="min-w-0 flex-1">
+                          <Link href={`/workflows/${p.workflowId}`} className="font-medium hover:underline">{p.workflowName}</Link>
+                          <span className="faint"> · 「{p.nodeLabel}」這步{p.extraCount > 0 ? `(連同其他 ${p.extraCount} 步一併調整)` : ""} · {formatDate(p.createdAt)}</span>
+                          {p.error && <p className="text-xs muted mt-0.5 line-clamp-2">{p.error}</p>}
+                        </div>
+                        <button onClick={() => applyProposal(p.id)} disabled={applying[p.id]} className="btn btn-primary text-xs shrink-0">
+                          {applying[p.id] ? "套用+重跑中…" : "✅ 套用並重跑"}
+                        </button>
+                        <button onClick={() => dismissProposal(p.id)} className="btn btn-ghost text-xs shrink-0">忽略</button>
+                      </div>
+                      {applyResult[p.id] && (
+                        <p className="text-xs" style={{ color: applyResult[p.id].ok ? "var(--green)" : "var(--red)" }}>
+                          {applyResult[p.id].ok ? "✅ 套用後重跑成功！" : `⚠️ 套用後重跑還是失敗：${applyResult[p.id].error ?? ""}`}
+                          {applyResult[p.id].skippedExtras?.length ? `（另外 ${applyResult[p.id].skippedExtras!.join("、")} 因為之後又被改過，沒有套用）` : ""}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {visibleFailures.length > 0 && (
+                <div className="space-y-2 border-t pt-3">
+                  <div className="text-sm font-medium" style={{ color: "var(--red)" }}>⚠️ 有排程執行失敗，沒有人看過</div>
+                  {visibleFailures.map((f) => (
+                    <div key={f.id} className="flex items-start gap-2 text-sm">
+                      <div className="min-w-0 flex-1">
+                        <Link href={`/workflows/${f.workflow_id}`} className="font-medium hover:underline">{f.name}</Link>
+                        <span className="faint"> · {formatDate(f.started_at)}</span>
+                        <p className="text-xs muted mt-0.5 line-clamp-2">{f.reason}</p>
+                      </div>
+                      <button onClick={() => dismissFailure(f.id)} className="text-xs faint hover:text-[var(--text)] shrink-0">已讀，隱藏</button>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
-          ))}
+          )}
         </div>
       )}
 
-      {overview && overview.recentScheduleFailures.filter((f) => !dismissedFailures.includes(f.id)).length > 0 && (
-        <div className="card px-4 py-3 mb-6 space-y-2" style={{ borderColor: "var(--red)" }}>
-          <div className="text-sm font-medium" style={{ color: "var(--red)" }}>⚠️ 有排程執行失敗，沒有人看過</div>
-          {overview.recentScheduleFailures.filter((f) => !dismissedFailures.includes(f.id)).map((f) => (
-            <div key={f.id} className="flex items-start gap-2 text-sm">
-              <div className="min-w-0 flex-1">
-                <Link href={`/workflows/${f.workflow_id}`} className="font-medium hover:underline">{f.name}</Link>
-                <span className="faint"> · {formatDate(f.started_at)}</span>
-                <p className="text-xs muted mt-0.5 line-clamp-2">{f.reason}</p>
-              </div>
-              <button onClick={() => dismissFailure(f.id)} className="text-xs faint hover:text-[var(--text)] shrink-0">已讀，隱藏</button>
-            </div>
-          ))}
-        </div>
+      {/* 草稿是「還沒做完」，不是「出問題」——刻意跟上面的告警橫幅分開，語氣較平靜，
+          單純提醒使用者回去繼續(2026-08 UI/UX 審計 P0-2)。 */}
+      {overview && overview.draftCount > 0 && (
+        <Link href="/drafts" className="card card-hover px-4 py-2.5 mb-6 flex items-center gap-2 text-sm">
+          <span>📝</span>
+          <span>你有 {overview.draftCount} 個還沒完成的流程</span>
+          <span className="faint ml-auto">→</span>
+        </Link>
       )}
 
       {overview && overview.running.length > 0 && (
@@ -776,19 +861,19 @@ export default function HomePage() {
       {workflows !== null && official.length === 0 && (
         <EmptyState
           icon="◈"
-          title="還沒有正式 workflow"
-          hint="按「新建 workflow」用白話跟 AI 建一個流程。"
-          action={<button onClick={createNew} className="btn btn-primary">＋ 新建 workflow</button>}
+          title="還沒有正式流程"
+          hint="按「＋ 建立新流程」用白話跟 AI 建一個流程。"
+          action={<button onClick={createNew} className="btn btn-primary">＋ 建立新流程</button>}
         />
       )}
 
       {/* 工具列：搜尋(跨資料夾) + 檢視切換 + 新增資料夾 */}
       {official.length > 0 && (
-        <div className="flex items-center gap-2 mb-3 flex-wrap">
+        <div id="workflow-list" className="flex items-center gap-2 mb-3 flex-wrap">
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="🔍 搜尋流程名稱/說明…"
+            placeholder="🔍 搜尋流程名稱/說明/步驟…"
             className="input text-sm max-w-[260px]"
             aria-label="搜尋流程"
           />
@@ -940,7 +1025,7 @@ export default function HomePage() {
             <div className="h-px flex-1" style={{ background: "var(--border)" }} />
           </div>
           <div className="card divide-y overflow-hidden" style={{ borderColor: "var(--border)" }}>
-            {items.map((w, i) => workflowRow(w, i))}
+            {items.map((w, i) => workflowRow(w, i, matchedStepFor.get(w.id)))}
           </div>
         </div>
       ))}

@@ -6,10 +6,16 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Page } from "playwright";
 import { callAIWithRetry } from "../aiRetry";
-import { isClaudeCodeModel } from "../claudeCodeClient";
-import { VISION_MODELS, supportsCaptchaVision } from "../models";
+import { getClient } from "../modelClient";
 import { PermanentError, type NodeContext } from "./types";
-import { pickVisionModel } from "../modelProviders";
+import { getWorkflowModelPolicy } from "../settingsStore";
+import {
+  describeModelPick,
+  planModelChain,
+  type ModelNeed,
+  type ModelPick,
+  type ModelPlan,
+} from "../modelPolicy";
 
 /**
  * 通知/寄信類節點缺帳密時的統一指引措辭——以前 sendEmail.ts 跟 notify.ts 的 telegram/slack/line
@@ -18,7 +24,7 @@ import { pickVisionModel } from "../modelProviders";
  * 卡片的名稱(例如「Email」「Telegram」「Slack」「LINE」)。
  */
 export function needsSetupHint(cardName: string): string {
-  return `請到「設定」頁最下面的「通知串接」區，找到「${cardName}」卡片照教學一步一步填好(有「測試發送」可以先驗證)`;
+  return `請到「設定」頁「連線與帳號」區的「通知串接」，找到「${cardName}」卡片照教學一步一步填好(有「測試發送」可以先驗證)`;
 }
 
 /**
@@ -196,14 +202,78 @@ async function tryLocalCaptchaOcr(buffer: Buffer, ctx: NodeContext): Promise<str
   }
 }
 
-/** 驗證碼最多只用一個主力視覺模型加一個備援，不能把整份模型清單逐一試完。 */
-export function captchaVisionPlan(selectedModel: string): { primary: string; backup?: string; rerouted: boolean } {
-  const primary = supportsCaptchaVision(selectedModel) ? selectedModel : (pickVisionModel(selectedModel, { excludeClaudeCode: true }) ?? VISION_MODELS[0]);
-  return {
-    primary,
-    backup: VISION_MODELS.find((model) => model !== primary),
-    rerouted: primary !== selectedModel,
-  };
+/**
+ * 這一步該用哪顆模型——節點層唯一入口。
+ *
+ * 順序是「這一步指定的 → 這條流程指定的執行模型 → 使用者排的偏好順序 → 自動」，
+ * 全部在 `lib/modelPolicy.ts` 決定。節點檔案不再自己挑模型、也不再有任何寫死的備援名字。
+ */
+export async function planNodeModel(ctx: NodeContext, need: ModelNeed, nodeOverride?: string): Promise<ModelPlan> {
+  const policy = getWorkflowModelPolicy(ctx.workflowId);
+  return planModelChain({
+    need,
+    nodeOverride,
+    workflowRunModel: policy.runModel,
+    workflowStrict: policy.strict,
+    fallbackModel: ctx.model,
+  });
+}
+
+/**
+ * 照著模型鏈依序試，並且**每一次都把「用了誰、為什麼換」寫進執行紀錄**。
+ *
+ * 這個「寫出來」不是錦上添花，是使用者明確要求的功能：他要拿執行紀錄去給公司審查看
+ * 「業務資料到底有沒有離開這台機器」。靜默換模型 = 審查交不出東西，也等於前面所有
+ * 「指定用地端模型」的設定形同虛設。
+ *
+ * `rejected` 用來表達「模型有回應，但那個回應代表它辦不到」(例如回『我看不到圖片』)——
+ * 這跟拋錯是兩件事，但一樣要換下一顆。
+ */
+export async function runWithModelChain<T>(
+  ctx: NodeContext,
+  plan: ModelPlan,
+  opts: {
+    /** 這件事的白話名字，例如「看圖」「辨識驗證碼」 */
+    label: string;
+    attempt: (pick: ModelPick) => Promise<T>;
+    rejected?: (result: T) => boolean;
+    describeResult?: (result: T) => string;
+  },
+): Promise<{ result: T; used: ModelPick }> {
+  if (plan.chain.length === 0) throw new PermanentError(plan.reason ?? `挑不到可以${opts.label}的模型`);
+
+  let lastError: unknown = null;
+  let sawRejection = false;
+  for (let i = 0; i < plan.chain.length; i++) {
+    const pick = plan.chain[i];
+    ctx.log(i === 0 ? `${opts.label}使用 ${describeModelPick(pick)}` : `改用 ${describeModelPick(pick)} 重新${opts.label}`);
+    try {
+      const result = await opts.attempt(pick);
+      if (opts.rejected?.(result)) {
+        sawRejection = true;
+        const detail = opts.describeResult ? `（回應：「${opts.describeResult(result).slice(0, 60)}」）` : "";
+        ctx.log(`${describeModelPick(pick)} 沒辦法${opts.label}${detail}`);
+        continue;
+      }
+      return { result, used: pick };
+    } catch (error) {
+      lastError = error;
+      ctx.log(`${describeModelPick(pick)} ${opts.label}時失敗：${(error instanceof Error ? error.message : String(error)).slice(0, 140)}`);
+    }
+  }
+
+  const tried = plan.chain.map((p) => p.ref).join("、");
+  if (plan.strict) {
+    throw new PermanentError(
+      `這條流程設定成「執行時只能用指定的模型，不自動換」，而「${tried}」這次沒能${opts.label}。` +
+      `為了不把資料送去別的模型，這一步直接停下來。` +
+      (lastError instanceof Error ? `原始訊息：${lastError.message.slice(0, 180)}` : ""),
+    );
+  }
+  if (sawRejection && !lastError) {
+    throw new PermanentError(`已經試過的模型（${tried}）都沒辦法${opts.label}。請到「設定 → 模型來源」接一顆做得到的模型，或調整主力/救援順序。`);
+  }
+  throw lastError instanceof Error ? lastError : new Error(`所有模型都無法${opts.label}（${tried}）`);
 }
 
 /** 用 vision 模型讀圖片驗證碼 */
@@ -250,15 +320,17 @@ export async function solveCaptchaFromLocator(
     /看不到|無法看|沒有.*視覺|純文字|text-only|text-based|cannot see|can't see|no.*image/i.test(text) ||
     /can'?t help|cannot help|can'?t assist|cannot assist|i can'?t solve|won'?t (solve|help)|無法協助|不能協助|拒絕/i.test(text);
 
-  const askVision = async (model: string): Promise<string> => {
+  const askVision = async (pick: ModelPick): Promise<string> => {
     // CAPTCHA 是極短回應，超過 12 秒仍沒答案就應換備援／失敗收斂；沿用一般 AI 的 25 秒×4 重試
     // 會跟外層節點重試相乘，單一登入步驟最壞可白等數分鐘。
-    const client = makeClient(ctx, CAPTCHA_MODEL_TIMEOUT_MS);
+    // client 一定要依「這顆模型屬於哪個來源」建立(getClient)，不能用流程層的 ctx.baseUrl——
+    // 挑到的可能是使用者自己接的地端模型，用流程層的網址等於把圖送去完全不相干的端點。
+    const client = getClient(pick.ref, CAPTCHA_MODEL_TIMEOUT_MS);
     const b64 = buffer.toString("base64");
     return client.chat.completions
       .create(
         {
-          model,
+          model: pick.model,
           messages: [{ role: "user", content: [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } }] }],
           max_tokens: 20,
         },
@@ -267,62 +339,35 @@ export async function solveCaptchaFromLocator(
       .then((res) => res.choices[0]?.message?.content?.trim() ?? "");
   };
 
-  // 驗證碼辨識刻意不用 Claude Code 當備援：實測過 Claude(即使技術上看得懂圖)會基於安全政策
-  // 主動拒絕解驗證碼(回應例如「I can't help solve CAPTCHA images」)，且這個拒絕是 is_error:false
-  // 的「成功」回應——不是機率性失敗，重試幾次都一樣被拒絕，只會白白浪費時間跑一個注定失敗的路徑。
-  // 這裡只在免費/共用 API 的視覺模型之間切換，不牽扯 Claude Code。
-  const plan = captchaVisionPlan(ctx.model);
-  if (plan.rerouted) {
-    ctx.log(isClaudeCodeModel(ctx.model)
-      ? `流程選用「${ctx.model}」，但 Claude Code 會拒絕解驗證碼；本步直接改用「${plan.primary}」`
-      : `流程選用「${ctx.model}」，它不能可靠讀圖；本步直接改用「${plan.primary}」`);
-  } else {
-    ctx.log(`驗證碼辨識使用「${plan.primary}」`);
-  }
+  // 用哪顆模型由 modelPolicy 決定(這一步指定的 → 流程指定的執行模型 → 使用者排的順序 → 自動)。
+  // 這裡刻意**只取前兩顆**：驗證碼每顆最多等 12 秒，把使用者排的整串試完會讓單一登入步驟
+  // 白等好幾分鐘(這是原本「主力+唯一備援」設計的理由，換成使用者自訂順序之後仍然成立)。
+  // Claude Code 不會出現在鏈裡——它看得懂圖，但實測會基於安全政策主動拒絕解驗證碼，而那個
+  // 拒絕是 is_error:false 的「成功」回應，重試幾次都一樣(AGENTS.md 鐵則)。
+  const fullPlan = await planNodeModel(ctx, "captcha", cfgStr(ctx, "captchaModel", "").trim() || undefined);
+  const plan: ModelPlan = { ...fullPlan, chain: fullPlan.chain.slice(0, 2) };
 
-  let usedBackup = false;
   let raw: string;
   try {
-    raw = await callAIWithRetry(
-      () => askVision(plan.primary),
-      {
-        label: `辨識驗證碼(${plan.primary})`,
-        signal: ctx.cancelSignal,
-        maxAttempts: 1,
-        fallbackLabel: plan.backup,
-        fallback: plan.backup
-          ? async () => {
-              usedBackup = true;
-              return askVision(plan.backup!);
-            }
-          : undefined,
-        onFallback: () => {
-          if (plan.backup) ctx.log(`「${plan.primary}」在 12 秒內沒有讀出來，改用唯一備援「${plan.backup}」`);
-        },
-      },
-    );
+    raw = (
+      await runWithModelChain(ctx, plan, {
+        label: "辨識驗證碼",
+        attempt: (pick) => callAIWithRetry(() => askVision(pick), { label: `辨識驗證碼(${pick.ref})`, signal: ctx.cancelSignal, maxAttempts: 1 }),
+        rejected: (text) => looksLikeNoVision(text),
+        describeResult: (text) => text,
+      })
+    ).result;
   } catch (error) {
+    if (error instanceof PermanentError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     // 這是外部視覺服務當下整體不可用，同一個節點再跑一次仍會重複等主力+備援。
     // 用 PermanentError 阻止引擎外層的第二、三次重試，避免 24 秒又被放大成一分多鐘。
     throw new PermanentError(`驗證碼視覺模型目前沒有回應，已在短時間內停止等待，沒有繼續空轉數分鐘。${message.slice(0, 240)}`);
   }
 
-  // 模型有回應但明確表示看不懂時，才使用上面同一個備援；不再試第三個、第四個模型。
-  if (looksLikeNoVision(raw) && plan.backup && !usedBackup) {
-    ctx.log(`「${plan.primary}」的回應不是驗證碼，改用唯一備援「${plan.backup}」重讀一次`);
-    raw = await callAIWithRetry(
-      () => askVision(plan.backup!),
-      { label: `辨識驗證碼(${plan.backup})`, signal: ctx.cancelSignal, maxAttempts: 1 },
-    );
-  }
   const answer = raw.replace(/[^a-zA-Z0-9]/g, "");
   if (!answer || answer.length > 8) {
-    throw new Error(
-      looksLikeNoVision(raw)
-        ? `目前選用的模型「${ctx.model}」不支援讀圖，且備援模型也未能讀出驗證碼(原始回應：「${raw}」)。請到流程頁上方把模型換成有 ✓ 標記的模型`
-        : `模型未能讀出有效的驗證碼(原始回應：「${raw}」)`,
-    );
+    throw new Error(`模型未能讀出有效的驗證碼(原始回應：「${raw}」)`);
   }
   return answer;
 }

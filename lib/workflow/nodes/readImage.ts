@@ -4,11 +4,11 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { NodeDefinition } from "../types";
 import { PermanentError, RetryableError } from "../types";
-import { cfgStr, makeClient } from "../nodeHelpers";
-import { VISION_MODELS, supportsVision } from "../../models";
+import { cfgStr, planNodeModel, runWithModelChain } from "../nodeHelpers";
+import { getClient } from "../../modelClient";
 import { isClaudeCodeModel } from "../../claudeCodeShared";
 import { callAIWithRetry } from "../../aiRetry";
-import { callClaudeCode, isClaudeCodeAvailable } from "../../claudeCodeClient";
+import { callClaudeCode } from "../../claudeCodeClient";
 import { fetchWithUrlGuard } from "../../urlGuard";
 
 /**
@@ -36,6 +36,9 @@ export const readImageNode: NodeDefinition = {
     { key: "source", label: "圖片路徑或網址(可用 {{filePath}} 等上游欄位)", type: "text", default: "{{filePath}}" },
     { key: "prompt", label: "要 AI 對這張圖做什麼", type: "textarea", default: "描述這張圖片的內容,並把圖裡所有看得到的文字完整抄出來。" },
     { key: "outputKey", label: "輸出欄位名", type: "text", default: "imageText" },
+    // 圖片會整張送給模型，所以「這一步用哪顆」是個資料落點問題，不只是品質問題。
+    // 留空 = 依序沿用 這條流程的執行模型 → 設定頁排的看圖順序(見 lib/modelPolicy.ts)。
+    { key: "model", label: "這一步用的模型(選填，留空=用流程/設定頁排定的順序)", type: "text", default: "", allowEmpty: true, advanced: true },
   ],
   retryable: true,
   timeoutMs: 150_000,
@@ -79,8 +82,10 @@ export const readImageNode: NodeDefinition = {
       localPathForClaude = source;
     }
 
-    const askVision = async (model: string): Promise<string> => {
-      const client = makeClient(ctx);
+    // client 依「這顆模型屬於哪個來源」建立(getClient)，不是流程層的 ctx.baseUrl——挑到的可能是
+    // 使用者自己接的地端模型，用流程層的網址等於把整張圖送去完全不相干的端點。
+    const askVision = async (ref: string, model: string): Promise<string> => {
+      const client = getClient(ref);
       const b64 = buffer.toString("base64");
       return client.chat.completions
         .create(
@@ -107,29 +112,19 @@ export const readImageNode: NodeDefinition = {
       }
     };
 
-    // 模型順序:選用模型(若能看圖)→ 一個備援視覺模型 → Claude Code(有裝的話)。
-    // 跟驗證碼不同,一般看圖 Claude 不會拒絕,是合格的最後一棒。
-    let answer = "";
-    if (isClaudeCodeModel(ctx.model)) {
-      answer = await callAIWithRetry(askClaude, { label: "AI 看圖片(Claude Code)", signal: ctx.cancelSignal, maxAttempts: 2 });
-    } else {
-      const first = supportsVision(ctx.model) ? ctx.model : VISION_MODELS[0];
-      answer = await callAIWithRetry(() => askVision(first), { label: "AI 看圖片", signal: ctx.cancelSignal });
-      if (looksLikeNoVision(answer)) {
-        const backup = VISION_MODELS.find((m) => m !== first);
-        if (backup) {
-          ctx.log(`模型「${first}」看不懂這張圖(回應:「${answer.slice(0, 40)}」),改用「${backup}」重讀`);
-          answer = await callAIWithRetry(() => askVision(backup), { label: `AI 看圖片(${backup})`, signal: ctx.cancelSignal });
-        }
-        if (looksLikeNoVision(answer) && (await isClaudeCodeAvailable())) {
-          ctx.log("免費視覺模型都讀不了,改用本機 Claude Code 讀圖");
-          answer = await callAIWithRetry(askClaude, { label: "AI 看圖片(Claude Code)", signal: ctx.cancelSignal, maxAttempts: 2 });
-        }
-      }
-    }
-    if (looksLikeNoVision(answer)) {
-      throw new PermanentError(`目前可用的模型都讀不了這張圖(最後回應:「${answer.slice(0, 80)}」)——請到流程頁上方換一個標 🖼️ 的模型`);
-    }
+    // 用哪顆、以及讀不出來時要不要換下一顆，全部由 modelPolicy 依使用者的設定決定;
+    // 這裡不再有任何寫死的模型名稱或備援順序。跟驗證碼不同,一般看圖 Claude 不會拒絕,
+    // 所以它是合格的候選之一(排在哪由使用者的偏好順序決定)。
+    const plan = await planNodeModel(ctx, "vision", cfgStr(ctx, "model", "").trim() || undefined);
+    const { result: answer } = await runWithModelChain(ctx, plan, {
+      label: "看圖",
+      attempt: (pick) =>
+        isClaudeCodeModel(pick.model)
+          ? callAIWithRetry(askClaude, { label: "AI 看圖片(Claude Code)", signal: ctx.cancelSignal, maxAttempts: 2 })
+          : callAIWithRetry(() => askVision(pick.ref, pick.model), { label: `AI 看圖片(${pick.ref})`, signal: ctx.cancelSignal }),
+      rejected: (text) => looksLikeNoVision(text),
+      describeResult: (text) => text,
+    });
     ctx.log(`AI 讀圖完成(${answer.length} 字):${answer.slice(0, 60)}…`);
     return { output: { ...ctx.input, [outputKey]: answer, imageSource: source } };
   },

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { explainWorkflow, extractSheetHints, plainLanguage } from "./explain";
+import { explainWorkflow, extractSheetHints, extractCodeTargets, plainLanguage } from "./explain";
 import { formatSafeRunOutput, plainChatMessage, shortFieldLabel } from "./plainLanguage";
 import { nodeSummary } from "./nodeSummary";
 import { ifConditionNode } from "./nodes/general";
@@ -169,9 +169,150 @@ test("流程說明：自訂計算只說目的，不把給 AI 的欄位規格、�
     edges: [],
   };
   const step = explainWorkflow(workflow).steps[0];
-  assert.match(step.text, /整理這次需要的日期與期間/);
+  assert.match(step.text, /判斷這次要更新哪一週/);
   assert.match(step.text, /不會自行猜測/);
   assert.doesNotMatch(`${step.text}\n${step.settings.flat().join("\n")}`, /rows|headers|periodStart|throw|return|\{\}/i);
+});
+
+// 真實踩過的 bug：使用者反映「看說明都還是不能確認是哪個」——查出來是 explainWorkflow 對每個
+// custom-code 節點都改呼叫 nodeSummary() 猜 4 種關鍵字分類，intent 只要提到「日期」兩個字就全部
+// 塌成同一句「整理這次需要的日期與期間」，一條流程十幾個完全不同的自訂步驟說明看起來一模一樣。
+// 修法是優先用節點自己的 label(建圖時 AI 已經取過的具體業務描述)當目的，不再從 intent 猜分類。
+test("流程說明：多個不同的自訂步驟即使 intent 都提到日期，說明文字也要各自不同(不能塌成同一句)", () => {
+  const workflow: Workflow = {
+    id: "wf-explain-distinct", name: "週報", status: "draft", builtin: false, defaultModel: "minimax-m3",
+    nodes: [
+      {
+        id: "a", type: "custom-code", label: "登入Google並找出最新的週會簡報檔", position: { x: 0, y: 0 },
+        config: { intent: "用瀏覽器自動化前往 Drive，找出最新日期的簡報檔", code: "return {};" },
+      },
+      {
+        id: "b", type: "custom-code", label: "執行週期搬移歸檔並寫入新頭", position: { x: 0, y: 0 },
+        config: { intent: "依上游輸出對試算表寫入歸檔與新的一週日期標頭", code: "return {};" },
+      },
+    ],
+    edges: [],
+  };
+  const steps = explainWorkflow(workflow).steps;
+  assert.match(steps[0].text, /登入Google並找出最新的週會簡報檔/);
+  assert.match(steps[1].text, /執行週期搬移歸檔並寫入新頭/);
+  assert.notEqual(steps[0].text, steps[1].text);
+});
+
+test("流程說明：自訂步驟還沒被取過名字(仍是節點型別的通用預設標籤)時，退回關鍵字分類而不是顯示通用標籤本身", () => {
+  const workflow: Workflow = {
+    id: "wf-explain-unlabeled", name: "週報", status: "draft", builtin: false, defaultModel: "minimax-m3",
+    nodes: [{
+      id: "a", type: "custom-code", label: "自訂步驟(AI 寫)", position: { x: 0, y: 0 },
+      config: { intent: "整理本次的日期與期間給下游使用", code: "return {};" },
+    }],
+    edges: [],
+  };
+  const step = explainWorkflow(workflow).steps[0];
+  assert.match(step.text, /整理這次需要的日期與期間/);
+});
+
+// 真實踩過的 bug：使用者反映「像是替換投影片那種，我就不知道是換了哪些啊，我想要看到」——
+// google-slides-replace-image、google-slides-refresh、google-slides-create、excel-range-image、
+// telegram-notify、line-notify、webmail-send 這 7 種節點型別，explain.ts 完全沒有對應的 case，
+// 全部落到最後的 default，只顯示同一個節點型別共用的靜態說明(NodeDefinition.description)，
+// 看不出「這一步實際換的是哪一頁、傳了什麼訊息內容、寄給誰」。
+test("流程說明：換簡報圖片要講清楚換的是哪一頁、換成哪張圖，不能只顯示整個節點型別共用的通用說明", () => {
+  const workflow: Workflow = {
+    id: "wf-explain-slides-image", name: "週報", status: "draft", builtin: false, defaultModel: "minimax-m3",
+    nodes: [{
+      id: "a", type: "google-slides-replace-image", label: "換掉開戶數頁的表格圖", position: { x: 0, y: 0 },
+      config: {
+        presentationUrl: "https://docs.google.com/presentation/d/abc/edit",
+        pageTitleContains: "開戶數",
+        imagePath: "{{rangeImagePath}}",
+      },
+    }],
+    edges: [],
+  };
+  const step = explainWorkflow(workflow).steps[0];
+  assert.match(step.text, /開戶數/);
+  assert.doesNotMatch(step.text, /^把 Google 簡報中某一頁上的圖片/);
+  assert.ok(step.settings.some(([label, value]) => label === "用標題找哪一頁" && value === "開戶數"));
+});
+
+test("流程說明：Telegram/LINE 通知要顯示實際訊息內容，不能只講「到設定頁串接」這種通用話", () => {
+  const workflow: Workflow = {
+    id: "wf-explain-notify", name: "通知", status: "draft", builtin: false, defaultModel: "minimax-m3",
+    nodes: [
+      { id: "a", type: "telegram-notify", label: "發完成通知", position: { x: 0, y: 0 }, config: { message: "日報已經寄出" } },
+      { id: "b", type: "line-notify", label: "發群組通知", position: { x: 0, y: 0 }, config: { message: "日報已經寄出", target: "{{groupId}}" } },
+    ],
+    edges: [],
+  };
+  const steps = explainWorkflow(workflow).steps;
+  assert.match(steps[0].text, /日報已經寄出/);
+  assert.match(steps[1].text, /日報已經寄出/);
+});
+
+test("流程說明：用網頁信箱寄信要講清楚寄給誰、主旨是什麼", () => {
+  const workflow: Workflow = {
+    id: "wf-explain-webmail", name: "寄信", status: "draft", builtin: false, defaultModel: "minimax-m3",
+    nodes: [{
+      id: "a", type: "webmail-send", label: "寄週報給主管", position: { x: 0, y: 0 },
+      config: { to: "boss@example.com", subject: "本週業績週報" },
+    }],
+    edges: [],
+  };
+  const step = explainWorkflow(workflow).steps[0];
+  assert.match(step.text, /boss@example\.com/);
+  assert.match(step.text, /本週業績週報/);
+});
+
+// 真實踩過的 bug：使用者反映「他就要說清楚是換哪一頁投影片啊，不然數量一多起來根本不知道
+// 幹了什麼了」——custom-code 的 label 只講得出「替換投影片圖表」這種類別，講不出換的是哪一頁；
+// 那個具體的頁面判斷條件(標題文字)只存在於已經產生的程式碼裡，intent 也只寫「找目標頁」這種泛稱。
+test("extractCodeTargets：從程式碼的 .includes()/===/大寫常數宣告抓出實際比對用的中文關鍵字", () => {
+  const code = `
+    const TARGET_SHEET_TITLE = '週報資料_分頁一';
+    if (pageText.includes('行銷業績總覽') && pageText.includes('整體營運全貌')) { targetPage = slide; }
+    if (el.title === '週開戶趨勢') { largest = el; }
+    ctx.log('簡報共 ' + n + ' 頁');
+    throw new Error('找不到分頁「' + TARGET_SHEET_TITLE + '」，現有分頁：' + titles);
+  `;
+  const targets = extractCodeTargets(code);
+  assert.ok(targets.includes("週報資料_分頁一"), targets.join("、"));
+  assert.ok(targets.includes("行銷業績總覽"), targets.join("、"));
+  assert.ok(targets.includes("整體營運全貌"), targets.join("、"));
+  assert.ok(targets.includes("週開戶趨勢"), targets.join("、"));
+  // log/錯誤訊息用字串接變數組出來的只抓得到無意義的半句話，不該出現
+  assert.ok(!targets.includes("簡報共"), targets.join("、"));
+  assert.ok(!targets.some((t) => t.includes("找不到分頁")), targets.join("、"));
+});
+
+test("extractCodeTargets：純技術/英文命名不算業務關鍵字，沒有中文字元的字面值一律排除", () => {
+  const code = `
+    if (mode === 'production') { doThing(); }
+    const API_BASE = 'https://slides.googleapis.com/v1';
+  `;
+  assert.deepEqual(extractCodeTargets(code), []);
+});
+
+test("流程說明：自訂步驟的程式碼裡如果找得到實際比對用的關鍵字(哪一頁、哪個文字方塊)，要顯示出來，不能只靠 label 一句話交代整個步驟", () => {
+  const workflow: Workflow = {
+    id: "wf-explain-code-targets", name: "週報流程", status: "draft", builtin: false, defaultModel: "minimax-m3",
+    nodes: [{
+      id: "a", type: "custom-code", label: "替換投影片圖表", position: { x: 0, y: 0 },
+      config: {
+        intent: "呼叫 Sheets API 取 chartId、Slides API 找目標頁與最大 image 元素，回傳定位資訊給下游替換圖表用。",
+        code: `
+          if (pageText.includes('行銷業績總覽') && pageText.includes('整體營運全貌')) { targetPage = slide; }
+          if (el.title === '週開戶趨勢') { largest = el; }
+        `,
+      },
+    }],
+    edges: [],
+  };
+  const step = explainWorkflow(workflow).steps[0];
+  assert.match(step.text, /行銷業績總覽/);
+  assert.match(step.text, /整體營運全貌/);
+  assert.match(step.text, /週開戶趨勢/);
+  assert.ok(step.settings.some(([label]) => label === "程式碼裡比對用的關鍵字"));
 });
 
 test("安全預覽保留中文指標與常見業務縮寫", () => {
