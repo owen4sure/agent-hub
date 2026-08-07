@@ -1,15 +1,15 @@
 {
   "id": "example-ai-triage",
-  "name": "範例：AI 幫你分類客戶訊息",
+  "name": "範例：客戶訊息 AI 秒分類,客訴自動走加急通道",
   "status": "official",
-  "description": "示範「表單輸入→AI 判斷→依結果組回覆」：執行時先填一句客戶訊息，AI 把它分成四類之一(答案被限定住，不會回一整段話)，再組出一句處理建議。把觸發改成收信/表單，就是一條真的客服分流流程。",
+  "description": "打一句客戶訊息進來,AI 判斷是客訴/售後/詢價/其他——是客訴就走「加急通道」立刻擬道歉回覆並標記優先處理,其他走標準回覆。這就是流程圖會「分岔」的樣子:同一個入口,不同狀況自動走不同的路。",
   "requiresSecrets": [],
   "triggerParams": [
     {
       "key": "customerMessage",
       "label": "客戶訊息(隨便打一句試試)",
       "type": "text",
-      "default": "我上週買的咖啡機好像不會加熱了，還在保固內嗎？"
+      "default": "等了兩週商品還沒到,再不出貨我要退款並向消保官申訴!"
     }
   ],
   "nodes": [
@@ -18,43 +18,104 @@
       "type": "trigger",
       "label": "開始(填一句訊息)",
       "config": {},
-      "position": { "x": 250, "y": 40 }
+      "position": {
+        "x": 0,
+        "y": 60
+      }
     },
     {
       "id": "classify",
       "type": "llm-decide",
-      "label": "AI 分類",
+      "label": "AI 判斷這是哪種訊息",
       "config": {
-        "prompt": "這是一則客戶來訊：「{{customerMessage}}」。請判斷它屬於哪一類。",
+        "prompt": "這是一則客戶來訊:「{{customerMessage}}」。請判斷它屬於哪一類。",
         "outputKey": "分類結果",
-        "choices": "售後維修,購買諮詢,帳務問題,其他"
+        "choices": "客訴,售後維修,購買諮詢,其他"
       },
-      "position": { "x": 250, "y": 160 }
+      "position": {
+        "x": 240,
+        "y": 60
+      }
     },
     {
-      "id": "compose",
-      "type": "template-text",
-      "label": "組處理建議",
+      "id": "route",
+      "type": "switch",
+      "label": "客訴走加急、其他走標準",
       "config": {
-        "template": "訊息「{{customerMessage}}」已分類為【{{分類結果}}】。實務上這裡可以接「條件分支」，依分類把訊息轉給不同窗口或自動回信。",
-        "outputKey": "處理建議"
+        "value": "{{分類結果}}",
+        "cases": "客訴"
       },
-      "position": { "x": 250, "y": 280 }
+      "position": {
+        "x": 480,
+        "y": 60
+      }
+    },
+    {
+      "id": "urgent",
+      "type": "template-text",
+      "label": "擬加急道歉回覆",
+      "config": {
+        "template": "🚨【加急】客訴案件,建議 1 小時內回覆:\n\n「親愛的顧客您好,非常抱歉讓您久等了。我們已將您的案件列為最優先處理,將於今日內回覆出貨進度與補償方案。」\n\n(原訊息:{{customerMessage}})",
+        "outputKey": "回覆草稿"
+      },
+      "position": {
+        "x": 720,
+        "y": 0
+      }
+    },
+    {
+      "id": "normal",
+      "type": "template-text",
+      "label": "擬標準回覆",
+      "config": {
+        "template": "已分類為【{{分類結果}}】,回覆草稿:\n\n「您好,感謝您的來訊!我們已收到您的需求,客服人員將於一個工作天內回覆您。」\n\n(原訊息:{{customerMessage}})",
+        "outputKey": "回覆草稿"
+      },
+      "position": {
+        "x": 720,
+        "y": 130
+      }
     },
     {
       "id": "notify",
       "type": "desktop-notify",
-      "label": "跳通知看結果",
+      "label": "跳通知看回覆草稿",
       "config": {
-        "title": "AI 分類結果",
-        "message": "{{處理建議}}"
+        "title": "AI 分類:{{分類結果}}",
+        "message": "{{回覆草稿}}"
       },
-      "position": { "x": 250, "y": 400 }
+      "position": {
+        "x": 960,
+        "y": 60
+      }
     }
   ],
   "edges": [
-    { "from": "trigger", "to": "classify" },
-    { "from": "classify", "to": "compose" },
-    { "from": "compose", "to": "notify" }
+    {
+      "from": "trigger",
+      "to": "classify"
+    },
+    {
+      "from": "classify",
+      "to": "route"
+    },
+    {
+      "from": "route",
+      "to": "urgent",
+      "fromPort": "客訴"
+    },
+    {
+      "from": "route",
+      "to": "normal",
+      "fromPort": "其他"
+    },
+    {
+      "from": "urgent",
+      "to": "notify"
+    },
+    {
+      "from": "normal",
+      "to": "notify"
+    }
   ]
 }

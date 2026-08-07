@@ -1,68 +1,128 @@
 {
   "id": "example-weather",
-  "name": "範例：抓天氣資料請 AI 給建議",
+  "name": "範例：天氣＋匯率自動寫成每日晨報",
   "status": "official",
-  "description": "示範「打外部 API→整理資料→AI 產生文字」：跟免費的 Open-Meteo 天氣 API 拿台北未來一天的預報(不用申請金鑰)，整理成好讀的數字，請 AI 用一句話給出穿搭與帶傘建議，最後跳桌面通知。需要網路連線。",
+  "description": "一鍵生出一份晨報:台北今明兩天天氣、美元/日圓即時匯率,AI 一句話總結今天怎麼穿、要不要帶傘。成品存在「產出檔案」,再設個每天 07:30 的排程,以後每天早上自動送到——全程免申請任何金鑰。",
   "requiresSecrets": [],
-  "triggerParams": [],
   "nodes": [
     {
       "id": "trigger",
       "type": "trigger",
       "label": "開始",
       "config": {},
-      "position": { "x": 250, "y": 40 }
+      "position": {
+        "x": 0,
+        "y": 60
+      }
     },
     {
-      "id": "fetch",
+      "id": "fetchWeather",
       "type": "http-request",
-      "label": "抓台北天氣預報",
+      "label": "抓台北天氣(免金鑰)",
       "config": {
         "method": "GET",
-        "url": "https://api.open-meteo.com/v1/forecast?latitude=25.03&longitude=121.56&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Asia%2FTaipei&forecast_days=1",
-        "headers": "{}",
-        "body": "",
-        "successStatus": "200-299",
-        "responseSchema": "{\"daily\":\"object\"}"
+        "url": "https://api.open-meteo.com/v1/forecast?latitude=25.03&longitude=121.56&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&forecast_days=2&timezone=Asia%2FTaipei"
       },
-      "position": { "x": 250, "y": 160 }
+      "position": {
+        "x": 240,
+        "y": 0
+      }
     },
     {
-      "id": "extract",
+      "id": "fetchFx",
+      "type": "http-request",
+      "label": "抓即時匯率(免金鑰)",
+      "config": {
+        "method": "GET",
+        "url": "https://open.er-api.com/v6/latest/USD"
+      },
+      "position": {
+        "x": 240,
+        "y": 130
+      }
+    },
+    {
+      "id": "digest",
       "type": "custom-code",
-      "label": "整理成好讀的數字",
+      "label": "整理成晨報數字",
       "config": {
-        "intent": "從天氣 API 的回應裡取出今天的最高溫、最低溫、降雨機率。",
-        "code": "const daily = ctx.input.json?.daily;\nif (!daily) throw new Error(\"上游沒有拿到天氣資料(json.daily 欄位是空的)\");\nreturn {\n  ...ctx.input,\n  最高溫: daily.temperature_2m_max?.[0],\n  最低溫: daily.temperature_2m_min?.[0],\n  降雨機率: daily.precipitation_probability_max?.[0],\n};"
+        "intent": "從兩個 API 回應整理晨報數字。兩個上游輸出欄位同名(status/body/json),必須用分開層 ctx.outputs[\"fetchWeather\"].json 與 ctx.outputs[\"fetchFx\"].json 各自取值。輸出:日期/今天與明天的最高最低溫與降雨機率/美元台幣/日圓台幣。",
+        "code": "// 兩個「打 API」步驟的輸出欄位名一模一樣(status/body/json)——所以這裡用「分開層」\n// ctx.outputs 各自精準取值,不會拿錯(這正是平台處理同名欄位的標準寫法)。\nconst w = ctx.outputs?.[\"fetchWeather\"]?.json;\nconst fxRes = ctx.outputs?.[\"fetchFx\"]?.json;\nif (!w || !w.daily) throw new Error(\"天氣資料不完整(daily 欄位不存在),請稍後再試\");\nif (!fxRes || !fxRes.rates || !fxRes.rates.TWD) throw new Error(\"匯率資料不完整(rates.TWD 不存在),請稍後再試\");\n\nconst d = w.daily;\nconst fx = fxRes.rates;\nconst round2 = (n) => Math.round(n * 100) / 100;\nconst out = {\n  日期: d.time[0],\n  今天最高: d.temperature_2m_max[0], 今天最低: d.temperature_2m_min[0], 今天降雨: d.precipitation_probability_max[0],\n  明天最高: d.temperature_2m_max[1], 明天最低: d.temperature_2m_min[1], 明天降雨: d.precipitation_probability_max[1],\n  美元台幣: round2(fx.TWD),\n  日圓台幣: round2(fx.TWD / fx.JPY),\n};\nctx.log(`今天 ${out.今天最低}–${out.今天最高}°C 降雨 ${out.今天降雨}%;美元 ${out.美元台幣}、日圓 ${out.日圓台幣}`);\nreturn { ...ctx.input, ...out };"
       },
-      "position": { "x": 250, "y": 280 }
+      "position": {
+        "x": 480,
+        "y": 60
+      }
     },
     {
-      "id": "advise",
+      "id": "brief",
       "type": "llm-decide",
-      "label": "AI 給穿搭建議",
+      "label": "AI 寫一句總結",
       "config": {
-        "prompt": "台北今天最高 {{最高溫}}°C、最低 {{最低溫}}°C、降雨機率 {{降雨機率}}%。請用一句 30 字以內的話，給出今天的穿搭與要不要帶傘的建議。",
-        "outputKey": "建議",
-        "choices": ""
+        "prompt": "台北今天 {{今天最低}}–{{今天最高}}°C、降雨 {{今天降雨}}%;明天 {{明天最低}}–{{明天最高}}°C、降雨 {{明天降雨}}%。美元兌台幣 {{美元台幣}}。請用 40 字以內的一句話,講今天怎麼穿、要不要帶傘,語氣像朋友提醒。",
+        "outputKey": "AI總結"
       },
-      "position": { "x": 250, "y": 400 }
+      "position": {
+        "x": 720,
+        "y": 60
+      }
+    },
+    {
+      "id": "save",
+      "type": "write-file",
+      "label": "存成晨報檔",
+      "config": {
+        "fileName": "晨報_{{日期}}.md",
+        "content": "# ☀️ 今日晨報 {{日期}}\n\n## 天氣(台北)\n- 今天:{{今天最低}}–{{今天最高}}°C,降雨機率 {{今天降雨}}%\n- 明天:{{明天最低}}–{{明天最高}}°C,降雨機率 {{明天降雨}}%\n\n## 匯率\n- 美元 → 台幣:{{美元台幣}}\n- 日圓 → 台幣:{{日圓台幣}}\n\n## 一句話\n{{AI總結}}\n",
+        "extraDir": ""
+      },
+      "position": {
+        "x": 960,
+        "y": 60
+      }
     },
     {
       "id": "notify",
       "type": "desktop-notify",
-      "label": "跳通知看建議",
+      "label": "跳通知看晨報",
       "config": {
-        "title": "今天的天氣建議",
-        "message": "{{最低溫}}–{{最高溫}}°C，降雨 {{降雨機率}}%。{{建議}}"
+        "title": "今日晨報 ☀️",
+        "message": "{{今天最低}}–{{今天最高}}°C,降雨 {{今天降雨}}%;美元 {{美元台幣}}。{{AI總結}}"
       },
-      "position": { "x": 250, "y": 520 }
+      "position": {
+        "x": 1200,
+        "y": 60
+      }
     }
   ],
   "edges": [
-    { "from": "trigger", "to": "fetch" },
-    { "from": "fetch", "to": "extract" },
-    { "from": "extract", "to": "advise" },
-    { "from": "advise", "to": "notify" }
+    {
+      "from": "trigger",
+      "to": "fetchWeather"
+    },
+    {
+      "from": "trigger",
+      "to": "fetchFx"
+    },
+    {
+      "from": "fetchWeather",
+      "to": "digest"
+    },
+    {
+      "from": "fetchFx",
+      "to": "digest"
+    },
+    {
+      "from": "digest",
+      "to": "brief"
+    },
+    {
+      "from": "brief",
+      "to": "save"
+    },
+    {
+      "from": "save",
+      "to": "notify"
+    }
   ]
 }

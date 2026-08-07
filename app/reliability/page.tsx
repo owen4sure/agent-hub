@@ -5,15 +5,11 @@ import Link from "next/link";
 import { PageHeader } from "@/components/ui";
 
 /**
- * 平台健康度(側欄/URL 仍是 reliability，只有畫面上的名字改了——2026-08 UI/UX 審計 IA-4，
- * 「可靠性」對非工程背景的使用者太抽象)。
+ * 平台健康度(側欄/URL 仍是 reliability，只有畫面上的名字改了——2026-08 UI/UX 審計 IA-4)。
  *
- * 這一頁的存在理由：使用者最在意的三個問題(從零建得起來嗎、出問題 AI 修不修得了、
- * 排程能不能 100/100)，這個平台原本**一題都答不出來**，只能憑印象。
- *
- * 寫法上刻意用**完整句子**而不是一堆圖表和百分比：
- * ①樣本太少的時候要說「樣本太少」，不要把 1/2 顯示成 50% 讓人以為那是個比率；
- * ②每個數字下面都寫清楚它的定義——一個講得清楚定義的粗略數字，比一個講不清楚的精確數字有用。
+ * 2026-08 使用者回饋「資訊太多太雜,容易看不懂」後改版：頁面只回答三個問題,每題**一張卡、
+ * 一個大數字、一句白話結論**;所有定義、樣本數、對照組、看門狗紀錄全部收進「想看細節」摺疊區。
+ * 誠實規則不變:樣本太少就說「還在累積」,不把 1/2 顯示成 50% 讓人以為那是可靠的比率。
  */
 
 interface Data {
@@ -30,21 +26,19 @@ interface Data {
   watchdogEvents: { at: string; action: string; detail: string | null }[];
 }
 
-function Stat({ big, unit, label }: { big: string; unit?: string; label: string }) {
-  // 「樣本太少，還算不出比率」這種誠實說明會比數字長很多，用大字級排會折成兩行、
-  // 把整排數字擠歪(實際截圖看到才發現)。長字串就降級成正常字級。
-  const long = big.length > 8;
+/** 一題一張卡：大數字＋一句結論。tone 決定數字顏色(good=綠/warn=琥珀/idle=灰)。 */
+function VerdictCard({ icon, title, big, verdict, tone }: { icon: string; title: string; big: string; verdict: string; tone: "good" | "warn" | "idle" }) {
+  const color = tone === "good" ? "var(--green)" : tone === "warn" ? "var(--amber, #b45309)" : "var(--text-muted)";
   return (
-    <div>
-      <div className={long ? "text-sm font-medium leading-snug" : "text-2xl font-semibold tracking-tight"}>
-        {big}<span className="text-sm font-normal muted ml-0.5">{unit}</span>
-      </div>
-      <div className="text-xs muted mt-0.5">{label}</div>
+    <div className="card p-4 space-y-1.5">
+      <div className="text-xs muted">{icon} {title}</div>
+      <div className={big.length > 6 ? "text-lg font-semibold leading-snug" : "text-3xl font-semibold tracking-tight"} style={{ color }}>{big}</div>
+      <div className="text-xs muted leading-relaxed">{verdict}</div>
     </div>
   );
 }
 
-/** 樣本太少時不給比率——這是這一頁最重要的一條誠實規則。 */
+/** 樣本太少時不給比率——這一頁最重要的誠實規則。 */
 function rate(ok: number, total: number, minSample = 10): string {
   if (total === 0) return "還沒有資料";
   if (total < minSample) return `${ok} / ${total}（樣本太少，還算不出比率）`;
@@ -83,17 +77,43 @@ export default function ReliabilityPage() {
   const manualOk = manual.find((r) => r.status === "success")?.n ?? 0;
   const manualTotal = manual.reduce((sum, r) => sum + r.n, 0);
 
+  // ── 三張卡的結論(每張只講一件事) ──
+  const schedCard = schedule.total === 0
+    ? { big: "還沒跑過", verdict: "還沒有任何排程自動執行過。", tone: "idle" as const }
+    : schedule.total < 10
+      ? { big: `${schedule.success} / ${schedule.total} 成功`, verdict: "次數還太少,先當參考;大部分排程是每月/每季,數字會隨時間累積。", tone: "warn" as const }
+      : {
+          big: `${Math.round((schedule.success / schedule.total) * 100)}%`,
+          verdict: `排程自動執行 ${schedule.total} 次,成功 ${schedule.success} 次。`,
+          tone: schedule.success / schedule.total >= 0.9 ? ("good" as const) : ("warn" as const),
+        };
+
+  const repairKnown = repair.followedBySuccess + repair.followedByFailure;
+  const repairCard = repair.attempts === 0
+    ? { big: "還沒用過", verdict: "之後每次「讓 AI 修」都會留下紀錄。", tone: "idle" as const }
+    : {
+        big: `${repair.followedBySuccess} / ${repairKnown} 修好`,
+        verdict: "「修好」= 修完之後,那條流程的下一次執行真的成功。",
+        tone: repairKnown > 0 && repair.followedBySuccess >= repair.followedByFailure ? ("good" as const) : ("warn" as const),
+      };
+
+  const readyPct = build.nodeTotal > 0 ? Math.round(((build.nodeTotal - build.customCode) / build.nodeTotal) * 100) : 0;
+  const buildCard = build.nodeTotal === 0
+    ? { big: "—", verdict: "還沒有任何流程。", tone: "idle" as const }
+    : {
+        big: `${readyPct}%`,
+        verdict: "你的流程裡,用「測試過的現成步驟」完成的比例;其餘是 AI 現寫的程式碼。",
+        tone: readyPct >= 70 ? ("good" as const) : ("warn" as const),
+      };
+
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-8 py-6 sm:py-8 space-y-6">
-      <PageHeader title="平台健康度" subtitle="這個平台到底靠不靠譜——用實際發生過的執行紀錄回答，不是憑印象" />
+      <PageHeader title="平台健康度" subtitle="三個數字回答「這平台靠不靠譜」——全部來自真實執行紀錄" />
 
       {/* 最該立刻處理的事放最上面 */}
       {schedule.blocked.length > 0 && (
         <section className="card p-4 space-y-2" style={{ borderColor: "var(--red)" }}>
           <h2 className="font-medium" style={{ color: "var(--red)" }}>⚠️ 有 {schedule.blocked.length} 個排程開著，但時間到了不會執行</h2>
-          <p className="text-xs muted">
-            這是最危險的一種狀況：畫面上看起來是排好的，實際上每次都被跳過。原本只會寫在終端機日誌裡，沒有人會發現。
-          </p>
           <div className="space-y-1.5">
             {schedule.blocked.map((b) => (
               <div key={b.scheduleId} className="text-sm flex flex-wrap items-center gap-2">
@@ -107,104 +127,55 @@ export default function ReliabilityPage() {
         </section>
       )}
 
-      {/* 問題一 */}
-      <section className="card p-4 space-y-3">
-        <div>
-          <h2 className="font-medium">① 從零建流程，現成的步驟夠用嗎？</h2>
-          <p className="text-xs muted mt-0.5">
-            庫裡沒有對應步驟時，AI 會自己寫一段程式碼。這個比例越低，代表越多事情是用測試過的步驟完成的。
-          </p>
-        </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <Stat big={String(build.workflows)} unit="條" label="流程總數" />
-          <Stat big={String(build.nodeTotal)} unit="個" label="步驟總數" />
-          <Stat
-            big={build.nodeTotal > 0 ? `${Math.round((build.customCode / build.nodeTotal) * 100)}%` : "—"}
-            label="需要 AI 自己寫程式碼的步驟"
-          />
-          <Stat big={`${build.workflowsWithoutCustomCode} / ${build.workflows}`} label="完全只用現成步驟的流程" />
-        </div>
-        <p className="text-xs faint">
-          AI 自己寫的程式碼在重新產生時品質會浮動。把已經調通的那一步用「⭐ 存成我的步驟」存起來，
-          它就不會再被重新產生。
-        </p>
-      </section>
+      {/* 三個數字,三句話 */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <VerdictCard icon="⏰" title="排程自動執行,成功率多高?" big={schedCard.big} verdict={schedCard.verdict} tone={schedCard.tone} />
+        <VerdictCard icon="🔧" title="出問題時,AI 修得好嗎?" big={repairCard.big} verdict={repairCard.verdict} tone={repairCard.tone} />
+        <VerdictCard icon="🧱" title="流程用現成步驟蓋的比例" big={buildCard.big} verdict={buildCard.verdict} tone={buildCard.tone} />
+      </div>
 
-      {/* 問題二 */}
-      <section className="card p-4 space-y-3">
-        <div>
-          <h2 className="font-medium">② 出問題的時候，AI 自己修得好嗎？</h2>
-          <p className="text-xs muted mt-0.5">
-            「修好了」的定義：這次修復之後，同一條流程的<b>下一次執行是成功的</b>。
-            這是刻意選的粗略定義——講得清楚比看起來精確重要。
-          </p>
-        </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <Stat big={String(repair.attempts)} unit="次" label="AI 嘗試修復" />
-          <Stat big={String(repair.followedBySuccess)} unit="次" label="修完下一次就成功" />
-          <Stat big={String(repair.followedByFailure)} unit="次" label="修完還是失敗" />
-          <Stat big={String(repair.verifiedCleanFixes)} unit="筆" label="已學會的修法" />
-        </div>
-        {repair.attempts === 0 && (
-          <p className="text-xs muted">
-            還沒有紀錄。這個量測是新加的，之後每次「讓 AI 修」或「測到會跑」都會留下痕跡。
-            （在此之前修復迴圈跑完就結束，什麼都沒留下，所以這一題以前答不出來。）
-          </p>
-        )}
-        {repair.noRunYet > 0 && (
-          <p className="text-xs faint">另有 {repair.noRunYet} 次修復之後那條流程還沒再跑過，所以還不知道結果。</p>
-        )}
-        <p className="text-xs faint">
-          「已學會的修法」只記錄<b>乾淨全綠而且通過語意驗收</b>的修復，所以它是成功次數的下限，不是成功率的分母。
-        </p>
-      </section>
-
-      {/* 問題三 */}
-      <section className="card p-4 space-y-3">
-        <div>
-          <h2 className="font-medium">③ 排程能不能準時、成功地跑完？</h2>
-          <p className="text-xs muted mt-0.5">只算「排程自己觸發」的執行，不含你手動按的。</p>
-        </div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-          <Stat big={String(schedule.total)} unit="次" label="排程總共觸發過幾次" />
-          <Stat big={String(schedule.enabledCount)} unit="個" label="目前開著的排程" />
-          <Stat big={rate(schedule.success, schedule.total)} label="成功率" />
-        </div>
-        {schedule.total < 10 && (
-          <p className="text-xs" style={{ color: "var(--amber, #b45309)" }}>
-            樣本太少，這個數字現在還不能當成可靠性指標。<b>大部分排程是每月/每季，所以要等時間累積。</b>
-            想快一點有數字，可以加一條每週執行、低風險的流程（例如固定抓一份資料存檔）。
-          </p>
-        )}
-        <p className="text-xs faint">
-          電腦關機或睡著時排程不會準時觸發，但醒來後會自動補跑一次（不會靜默漏掉）。
-          真的完全不能遲到的流程，需要一台不關機的機器。
-        </p>
-      </section>
-
-      {/* 手動執行(對照組) */}
-      <section className="card p-4 space-y-2">
-        <h2 className="font-medium text-sm">手動執行（對照）</h2>
-        <p className="text-sm">
-          你自己按執行的紀錄共 {manualTotal} 次，成功 {manualOk} 次（{rate(manualOk, manualTotal)}）。
-        </p>
-        <p className="text-xs faint">
-          手動執行的失敗率通常比排程高，因為那正是你在開發、除錯、試新東西的時候——這個數字不代表產品的可靠性，
-          放在這裡是為了讓上面那個排程數字有對照。
-        </p>
-      </section>
-
-      {data.watchdogEvents.length > 0 && (
-        <section className="card p-4 space-y-2">
-          <h2 className="font-medium text-sm">看門狗最近喊過的事</h2>
-          {data.watchdogEvents.map((e, i) => (
-            <p key={i} className="text-xs muted">
-              {e.at.slice(0, 16).replace("T", " ")} · {e.action === "schedule.blocked" ? "排程時間到了卻被檢查擋住" : "排程看起來卡住了"}
-              {e.detail && <span className="faint"> · {e.detail}</span>}
+      {/* 所有定義/樣本說明/對照組/看門狗,全部收進來——想深究的人才需要 */}
+      <details className="card p-4">
+        <summary className="cursor-pointer text-sm font-medium select-none">想看細節（數字怎麼算的、對照資料）</summary>
+        <div className="mt-4 space-y-5 text-sm">
+          <div className="space-y-1.5">
+            <h3 className="font-medium text-sm">⏰ 排程</h3>
+            <p className="text-xs muted">只算「排程自己觸發」的執行,不含手動按的。目前開著 {schedule.enabledCount} 個排程,總共自動觸發過 {schedule.total} 次,成功率 {rate(schedule.success, schedule.total)}。</p>
+            <p className="text-xs faint">電腦關機或睡著時排程不會準時觸發,但醒來後會自動補跑一次(不會靜默漏掉)。真的完全不能遲到的流程,需要一台不關機的機器。</p>
+          </div>
+          <div className="space-y-1.5">
+            <h3 className="font-medium text-sm">🔧 AI 修復</h3>
+            <p className="text-xs muted">
+              AI 總共嘗試修復 {repair.attempts} 次;修完下一次執行成功 {repair.followedBySuccess} 次、仍失敗 {repair.followedByFailure} 次
+              {repair.noRunYet > 0 && <>;另有 {repair.noRunYet} 次修完那條流程還沒再跑過,結果未知</>}。
             </p>
-          ))}
-        </section>
-      )}
+            <p className="text-xs faint">「已學會的修法」共 {repair.verifiedCleanFixes} 筆——只記錄乾淨全綠且通過語意驗收的修復,之後遇到類似錯誤 AI 會優先參考。</p>
+          </div>
+          <div className="space-y-1.5">
+            <h3 className="font-medium text-sm">🧱 現成步驟</h3>
+            <p className="text-xs muted">
+              {build.workflows} 條流程、共 {build.nodeTotal} 個步驟,其中 {build.customCode} 步是 AI 現寫的程式碼;完全只用現成步驟的流程有 {build.workflowsWithoutCustomCode} 條。
+            </p>
+            <p className="text-xs faint">AI 現寫的程式碼在重新產生時品質會浮動。已經調通的那一步用「⭐ 存成我的步驟」存起來,就不會再被重新產生。</p>
+          </div>
+          <div className="space-y-1.5">
+            <h3 className="font-medium text-sm">🖱 手動執行（對照組）</h3>
+            <p className="text-xs muted">你自己按執行的紀錄共 {manualTotal} 次,成功 {manualOk} 次（{rate(manualOk, manualTotal)}）。</p>
+            <p className="text-xs faint">手動執行的失敗率通常比較高,因為那正是你在開發、除錯、試新東西的時候——它不代表平台可靠性,放這裡是給排程數字當對照。</p>
+          </div>
+          {data.watchdogEvents.length > 0 && (
+            <div className="space-y-1.5">
+              <h3 className="font-medium text-sm">🐕 看門狗最近喊過的事</h3>
+              {data.watchdogEvents.map((e, i) => (
+                <p key={i} className="text-xs muted">
+                  {e.at.slice(0, 16).replace("T", " ")} · {e.action === "schedule.blocked" ? "排程時間到了卻被檢查擋住" : "排程看起來卡住了"}
+                  {e.detail && <span className="faint"> · {e.detail}</span>}
+                </p>
+              ))}
+            </div>
+          )}
+        </div>
+      </details>
     </div>
   );
 }
