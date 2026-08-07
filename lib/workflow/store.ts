@@ -278,6 +278,18 @@ function readWorkflowFile(scope: "example" | "user", filename: string): Workflow
   });
 }
 
+/**
+ * 「這個 id 是不是平台內建範例」的單一真相：examples/ 目錄裡有沒有這個檔。
+ * 不能只看 builtin 旗標——範例一被執行(產碼存回/拖位置)就會在 data/workflows 生出
+ * 使用者側的影子副本,builtin 變 false,範例就「跳進」使用者的正式流程清單裡
+ * (真實踩過:三個範例跑過兩個,首頁範例區只剩一張)。身分跟「可不可以改」是兩件事:
+ * 影子副本照樣可編輯,但在首頁的歸類永遠是範例。
+ */
+export function isExampleId(id: string): boolean {
+  if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id)) return false;
+  return fs.existsSync(path.join(/*turbopackIgnore: true*/ EXAMPLES_DIR, `${id}.json`));
+}
+
 function workflowPath(id: string): { file: string; builtin: boolean } {
   assertValidId(id);
   const userFile = path.join(/*turbopackIgnore: true*/ USER_DIR, `${id}.json`);

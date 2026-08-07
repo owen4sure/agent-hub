@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
-import { listWorkflows } from "@/lib/workflow/store";
+import { listWorkflows, isExampleId } from "@/lib/workflow/store";
 import { listPendingApprovals } from "@/lib/approvals";
 
 export async function GET() {
@@ -32,7 +32,7 @@ export async function GET() {
   const nameById = Object.fromEntries(workflows.map((w) => [w.id, w.name]));
 
   return NextResponse.json({
-    officialCount: workflows.filter((w) => w.status === "official").length,
+    officialCount: workflows.filter((w) => w.status === "official" && !isExampleId(w.id)).length, // 內建範例(含被執行後生出的影子副本)不算「你的正式流程」,跟首頁的範例摺疊區歸類一致
     draftCount: workflows.filter((w) => w.status === "draft").length,
     todayCounts: Object.fromEntries(todayCounts.map((r) => [r.status, r.count])),
     running: running.map((r) => ({ ...r, name: nameById[r.workflow_id] ?? r.workflow_id })),

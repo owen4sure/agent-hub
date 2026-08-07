@@ -12,6 +12,7 @@ interface WorkflowSummary {
   name: string;
   status: "draft" | "official";
   builtin: boolean;
+  isExample?: boolean;
   description: string;
   /**
    * 每一個非觸發步驟的搜尋語料——跟流程頁「說明」面板同一份資料(explainWorkflow)，
@@ -289,7 +290,12 @@ export default function HomePage() {
     }
   }
 
-  const official = workflows?.filter((w) => w.status === "official") ?? [];
+  // 內建範例(repo 的 examples/)不跟使用者自己的正式流程混在一起——已經有一堆真實流程的人,
+  // 首頁被範例卡佔位只是干擾(使用者原話:「不應該和正式流程放在一起,應該放在其他地方」)。
+  // 範例收進頁尾自己的摺疊區;只有「還沒有任何自己的正式流程」的全新使用者才預設展開,
+  // 讓新人第一眼就看到能跑的東西,老手則完全不被打擾。
+  const official = workflows?.filter((w) => w.status === "official" && !w.isExample) ?? [];
+  const builtinExamples = workflows?.filter((w) => w.status === "official" && w.isExample) ?? [];
 
   // ── 資料夾導覽(Owen:「要像 mac 桌面的資料夾一樣，可拖拉、可以在資料夾裡面再建立資料夾、
   // 可以選擇要一列一列還是按圖案排列」)。currentPath 是目前打開到哪一層："" =桌面根目錄，
@@ -1009,6 +1015,19 @@ export default function HomePage() {
         <div className="flex flex-wrap gap-1 mb-2">
           {itemsHere.map((w) => workflowTile(w))}
         </div>
+      )}
+
+      {/* 內建範例區：跟正式流程分開,摺疊在頁尾;新人(沒有自己的正式流程)才預設展開 */}
+      {!searching && builtinExamples.length > 0 && (
+        <details className="mt-6" open={official.length === 0}>
+          <summary className="cursor-pointer text-sm muted select-none py-1">
+            📚 內建範例 <span className="faint tabular-nums">{builtinExamples.length}</span>
+            <span className="faint text-xs ml-2">平台附的示範流程,零設定可跑;可「⧉ 複製」成自己的流程再改</span>
+          </summary>
+          <div className="card divide-y overflow-hidden mt-2" style={{ borderColor: "var(--border)" }}>
+            {builtinExamples.map((w, i) => workflowRow(w, i))}
+          </div>
+        </details>
       )}
 
       {/* 搜尋結果：橫跨所有資料夾，用完整路徑當小標題分組 */}

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { listWorkflows, createWorkflow } from "@/lib/workflow/store";
+import { listWorkflows, createWorkflow, isExampleId } from "@/lib/workflow/store";
 import { getWorkflowModel, getGlobalSettings, getWorkflowSortOrder } from "@/lib/settingsStore";
 import { listRuns } from "@/lib/workflow/engine";
 import { getWebhookToken } from "@/lib/webhookStore";
@@ -31,6 +31,8 @@ export async function GET() {
       name: wf.name,
       status: wf.status,
       builtin: wf.builtin,
+      isExample: isExampleId(wf.id), // 內建範例的歸類身分——影子副本(執行後產碼存回)也算範例,別讓它跳進使用者清單
+
       description: wf.description,
       // 首頁搜尋要能命中「裡面某一步做了什麼」，不只名稱/短說明——這是第二次踩到同一個真實需求：
       // 第一次只用步驟「名稱」比對(stepLabels)，使用者回饋「我上次有多加一個功能是更新簡報的
