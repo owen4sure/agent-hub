@@ -3,6 +3,7 @@ import { PermanentError, RetryableError } from "../types";
 import { cfgStr } from "../nodeHelpers";
 import { isPrivateHost, privateUrlsAllowed } from "../../urlGuard";
 import { renderPageText } from "../../renderPage";
+import { firecrawlConfigured, firecrawlScrape } from "../../firecrawl";
 import { urlSourceEvidence } from "../runtimeEvidence";
 
 const MAX_BYTES = 3 * 1024 * 1024;
@@ -27,6 +28,47 @@ function htmlToText(html: string): string {
  * 跟 http-request 的分工：http-request 打的是 API(回 JSON)；這個節點抓的是「人看的網頁」，
  * 會自動把 HTML 轉成可讀文字。每一跳轉址都過 SSRF 防護(擋內網/loopback/雲端 metadata)。
  */
+/**
+ * 降級鏈(2026-08,使用者真實踩過:公司官網擋非瀏覽器抓取,輕量 fetch 直接 fetch failed):
+ * 輕量抓取碰壁(連不上/被擋/JS 渲染抓不到字)時,①先用內建 headless 瀏覽器真的開一次
+ * (SSRF 防護同一套,資料不出本機);②還是不行而且使用者有設定 Firecrawl(選配)才把網址
+ * 交給它抓;③都失敗就把「試過哪些路」誠實列出來,沒設 Firecrawl 的人會被告知有這個選項。
+ */
+async function fetchViaFallbacks(
+  ctx: Parameters<NodeDefinition["execute"]>[0],
+  href: string,
+  maxChars: number,
+  why: string,
+): Promise<{ pageText: string; pageTitle: string; pageHtml: string; finalUrl: string; sourceEvidence: unknown }> {
+  ctx.log(`輕量抓取碰壁(${why.slice(0, 120)}),改用內建瀏覽器再試…`);
+  let browserErr = "";
+  try {
+    const rendered = await renderPageText(href, { maxChars, signal: ctx.cancelSignal });
+    if (rendered.text) {
+      ctx.log(`內建瀏覽器抓到「${rendered.title || href}」：${rendered.text.length} 字`);
+      const finalUrl = rendered.finalUrl || href;
+      return { pageText: rendered.text, pageTitle: rendered.title, pageHtml: rendered.html || "", finalUrl, sourceEvidence: urlSourceEvidence(finalUrl, { observed: { status: 200, textChars: rendered.text.length } }) };
+    }
+    browserErr = "瀏覽器開得了頁面但抽不到任何文字";
+  } catch (err) {
+    browserErr = err instanceof Error ? err.message.slice(0, 160) : String(err);
+  }
+  if (firecrawlConfigured()) {
+    ctx.log("內建瀏覽器也失敗,改用你設定的 Firecrawl 服務抓取…");
+    const page = await firecrawlScrape(href, { signal: ctx.cancelSignal });
+    if (page.text) {
+      ctx.log(`Firecrawl 抓到「${page.title || href}」：${page.text.length} 字`);
+      return { pageText: page.text.slice(0, maxChars), pageTitle: page.title, pageHtml: page.html.slice(0, 60_000), finalUrl: page.finalUrl, sourceEvidence: urlSourceEvidence(page.finalUrl, { observed: { status: 200, textChars: page.text.length } }) };
+    }
+  }
+  throw new RetryableError(
+    `這個網頁抓不下來(${why.slice(0, 120)})。已試過:輕量抓取→內建瀏覽器(${browserErr})` +
+    (firecrawlConfigured()
+      ? "→Firecrawl,全部失敗。可能要登入才看得到,或網站把自動抓取全擋了"
+      : "。若這個網站長期擋自動抓取,可以在「設定 → 進階」串接 Firecrawl(選配的專業抓取服務)再重試;要登入才看得到的頁面請改用瀏覽器登入類節點"),
+  );
+}
+
 export const webPageNode: NodeDefinition = {
   type: "web-page",
   category: "integration",
@@ -68,7 +110,8 @@ export const webPageNode: NodeDefinition = {
           headers: { "User-Agent": "Mozilla/5.0 (Macintosh) AgentHub/1.0", Accept: "text/html,application/xhtml+xml,*/*" },
         });
       } catch (err) {
-        throw new RetryableError(`連不上 ${current.hostname}：${err instanceof Error ? err.message : String(err)}`);
+        const output = await fetchViaFallbacks(ctx, current.href, maxChars, `連不上 ${current.hostname}:${err instanceof Error ? err.message : String(err)}`);
+        return { output };
       }
       if (res.status >= 300 && res.status < 400) {
         const loc = res.headers.get("location");
@@ -80,6 +123,11 @@ export const webPageNode: NodeDefinition = {
       if (!res.ok) {
         const msg = `抓取失敗：HTTP ${res.status}`;
         if (res.status >= 500 || res.status === 429) throw new RetryableError(msg);
+        if (res.status === 403 || res.status === 406) {
+          // 典型的「擋非瀏覽器」回應——換真瀏覽器常常就過了,別急著報錯
+          const output = await fetchViaFallbacks(ctx, current.href, maxChars, msg);
+          return { output };
+        }
         throw new PermanentError(`${msg}——請確認網址是否正確、是否需要登入`);
       }
       const reader = res.body?.getReader();
@@ -98,20 +146,11 @@ export const webPageNode: NodeDefinition = {
       const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1]?.trim() ?? "";
       const text = htmlToText(html).slice(0, maxChars);
       if (!text) {
-        // 純 JS 渲染的頁面用輕量 fetch 抓不到文字——自動退到內建 headless 瀏覽器真的渲染一次再抽(SSRF 防護沿用同一套)。
-        // 使用者完全不用知道「這頁要換節點」,系統自己搞定;真的連瀏覽器渲染都抽不到才誠實報錯。
-        ctx.log(`「${title || current.hostname}」看起來是 JS 渲染頁,改用內建瀏覽器補抓…`);
-        try {
-          const rendered = await renderPageText(current.href, { maxChars, signal: ctx.cancelSignal });
-          if (rendered.text) {
-            ctx.log(`瀏覽器補抓到「${rendered.title || title || current.hostname}」：${rendered.text.length} 字`);
-            const finalUrl = rendered.finalUrl || current.href;
-            return { output: { pageText: rendered.text, pageTitle: rendered.title || title, pageHtml: rendered.html || html.slice(0, 60_000), finalUrl, sourceEvidence: urlSourceEvidence(finalUrl, { observed: { status: 200, textChars: rendered.text.length } }) } };
-          }
-        } catch (err) {
-          throw new RetryableError(`用瀏覽器補抓這個網頁失敗：${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
-        }
-        throw new PermanentError("這個網頁連用瀏覽器渲染都抓不到任何文字(可能整頁是圖片/影片,或內容要登入才看得到)——若是要登入的頁面,請改用瀏覽器登入類節點");
+        // 純 JS 渲染的頁面用輕量 fetch 抓得到殼卻抽不到文字——走同一條降級鏈(瀏覽器→Firecrawl 選配)
+        const output = await fetchViaFallbacks(ctx, current.href, maxChars, `「${title || current.hostname}」是 JS 渲染頁,輕量抓取抽不到文字`);
+        if (!output.pageTitle && title) output.pageTitle = title;
+        if (!output.pageHtml) output.pageHtml = html.slice(0, 60_000);
+        return { output };
       }
       ctx.log(`抓到「${title || current.hostname}」：${text.length} 字`);
       return { output: { pageText: text, pageTitle: title, pageHtml: html.slice(0, 60_000), finalUrl: current.href, sourceEvidence: urlSourceEvidence(current.href, { observed: { status: res.status, textChars: text.length } }) } };

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { getGlobalSettings, setGlobalSettings, getMaxConcurrent, setMaxConcurrent, getBuilderPrefs, setBuilderPrefs, getBuilderEffort, setBuilderEffort, getSetting, setSetting, type BuilderEffort } from "@/lib/settingsStore";
+import { getGlobalSettings, setGlobalSettings, getMaxConcurrent, setMaxConcurrent, getBuilderPrefs, setBuilderPrefs, getBuilderEffort, setBuilderEffort, getSetting, setSetting, getFirecrawlConfig, setFirecrawlConfig, type BuilderEffort } from "@/lib/settingsStore";
 import { defaultMaxConcurrent } from "@/lib/workflow/engine";
 import { latestDataBackup } from "@/lib/dataBackup";
 import { denyIfNotLocal } from "@/lib/requireLocal";
@@ -19,6 +19,9 @@ export async function GET() {
     builderPrefs: getBuilderPrefs(),
     builderEffort: getBuilderEffort(),
     backupMirrorDir: getSetting("backupMirrorDir") ?? "",
+    // Firecrawl 選配:金鑰只回「有沒有設」,不回明碼(跟 apiKey 同一條防線)
+    hasFirecrawlKey: Boolean(getFirecrawlConfig().apiKey),
+    firecrawlBaseUrl: getFirecrawlConfig().baseUrl,
     latestBackup: latestDataBackup(),
   });
 }
@@ -69,6 +72,15 @@ export async function POST(req: Request) {
       mirrorDirToSave = dir;
     }
   }
+  const bodyFc = body as { firecrawlApiKey?: unknown; firecrawlBaseUrl?: unknown };
+  if (bodyFc.firecrawlApiKey !== undefined && (typeof bodyFc.firecrawlApiKey !== "string" || bodyFc.firecrawlApiKey.length > 500)) {
+    return NextResponse.json({ error: "Firecrawl 金鑰格式不正確" }, { status: 400 });
+  }
+  if (bodyFc.firecrawlBaseUrl !== undefined) {
+    if (typeof bodyFc.firecrawlBaseUrl !== "string" || bodyFc.firecrawlBaseUrl.length > 500) return NextResponse.json({ error: "Firecrawl 服務網址格式不正確" }, { status: 400 });
+    const v = bodyFc.firecrawlBaseUrl.trim();
+    if (v && !/^https?:\/\//.test(v)) return NextResponse.json({ error: "Firecrawl 服務網址要以 http(s):// 開頭(自架才需要填,用官方服務請留空)" }, { status: 400 });
+  }
   // ── 所有驗證都過了,才開始寫入 ──
   // apiKey/baseUrl 留空都代表「不改」，不能用空字串蓋掉——setGlobalSettings 只在值 !== undefined 時才寫入，
   // 且 getGlobalSettings 用 `?? DEFAULT`(空字串非 nullish 不會退回預設)，所以空字串一旦寫進去會讓 AI 呼叫失效且無法恢復。
@@ -78,6 +90,12 @@ export async function POST(req: Request) {
   if (typeof body.builderPrefs === "string") setBuilderPrefs(body.builderPrefs);
   if (typeof body.builderEffort === "string") setBuilderEffort(body.builderEffort as BuilderEffort);
   if (mirrorDirToSave !== null) setSetting("backupMirrorDir", mirrorDirToSave);
+  if (bodyFc.firecrawlApiKey !== undefined || bodyFc.firecrawlBaseUrl !== undefined) {
+    setFirecrawlConfig({
+      apiKey: typeof bodyFc.firecrawlApiKey === "string" ? bodyFc.firecrawlApiKey.trim() : undefined,
+      baseUrl: typeof bodyFc.firecrawlBaseUrl === "string" ? bodyFc.firecrawlBaseUrl.trim() : undefined,
+    });
+  }
   recordAuditFromRequest(req, "settings.update", null, { fields: Object.keys(body ?? {}) });
   return NextResponse.json({ ok: true });
 }

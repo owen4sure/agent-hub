@@ -33,6 +33,25 @@ export function setGlobalSettings(input: { baseUrl?: string; apiKey?: string }) 
  * 同時可執行幾個 workflow：1 = 一次跑一個(依序排隊)，>1 = 併行。
  * 沒設定過就用 CPU 推算的預設(由呼叫端傳入)。控制排程同時觸發、以及「全部執行」的行為。
  */
+/**
+ * Firecrawl 選配(2026-08,使用者拍板「讓其他人有需要可以用」):「抓網頁」節點的第三層備援。
+ * 沒設定=完全停用(預設);金鑰以保管庫加密存放。baseUrl 留空=官方雲端,自架的人填自己的網址。
+ */
+export function getFirecrawlConfig(): { apiKey: string; baseUrl: string } {
+  const db = getDb();
+  const row = (key: string) => (db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as { value: string } | undefined)?.value ?? "";
+  const rawKey = row("firecrawlApiKey");
+  return { apiKey: rawKey ? decryptSecret(rawKey) : "", baseUrl: row("firecrawlBaseUrl") || "https://api.firecrawl.dev" };
+}
+
+export function setFirecrawlConfig(input: { apiKey?: string; baseUrl?: string }) {
+  const db = getDb();
+  const stmt = db.prepare(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+  // 空字串=明確清掉(跟全域 apiKey 的「留空不改」不同:這是選配服務,關掉是常見合法操作)
+  if (input.apiKey !== undefined) stmt.run("firecrawlApiKey", input.apiKey ? encryptSecret(input.apiKey) : "");
+  if (input.baseUrl !== undefined) stmt.run("firecrawlBaseUrl", input.baseUrl.trim());
+}
+
 export function getMaxConcurrent(fallback: number): number {
   const db = getDb();
   const row = db.prepare(`SELECT value FROM settings WHERE key = 'maxConcurrent'`).get() as { value: string } | undefined;

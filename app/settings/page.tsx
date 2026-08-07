@@ -11,6 +11,7 @@ import { OutputFolderCard } from "./OutputFolderCard";
 import { ModelProvidersCard } from "./ModelProvidersCard";
 import { RetentionCard } from "./RetentionCard";
 import { BackupCard } from "./BackupCard";
+import { FirecrawlCard } from "./FirecrawlCard";
 
 interface SecretField { key: string; label: string; type: string; }
 /** 跨所有 workflow 去重後的一個共用帳密欄位 + 有哪些 workflow 用到它 */
@@ -646,6 +647,7 @@ export default function SettingsPage() {
         <p className="text-xs muted mt-1 mb-3">備份放哪裡、紀錄要留多久、以及誰在什麼時候做了什麼。平常不用管。</p>
         <div className="space-y-4">
           <BackupCard />
+          <FirecrawlCard />
           <RetentionCard />
           <AuditLogCard />
         </div>
