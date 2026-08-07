@@ -291,22 +291,27 @@ test("lintGraph：非 trigger 節點從 trigger 走不到 → 錯誤(孤兒節�
 
 // {{節點id.欄位}} 是模型發明的假語法(資料模型是扁平的)——執行期靜默解析失敗,建圖時就要攔。
 // {{period.start}} 只能放 triggerParams derived default；節點 config 直接用不會解析。{{item.x}} 才是合法例外。
-test("lintGraph：攔截節點id.欄位與節點內的 period.*；item 前綴保留", () => {
+test("lintGraph：{{節點id.欄位}} 引用上游祖先合法(分開層)、引用非上游要擋；節點內 period.* 要擋；item 前綴保留", () => {
   const nodes: WorkflowNode[] = [
     { id: "t", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
     { id: "parse", type: "llm-decide", label: "解析", config: { prompt: "x", outputKey: "result" }, position: { x: 0, y: 0 } },
+    // parse 是 chk 的上游祖先——分開層(2026-08)讓這種精準引用成為合法寫法,執行期由 ctx.outputs 解析
     { id: "chk", type: "if-condition", label: "判斷", config: { left: "{{parse.result}}", op: "==", right: "請假" }, position: { x: 0, y: 0 } },
-    { id: "w", type: "write-file", label: "寫", config: { fileName: "a.txt", content: "{{period.start}} {{item.name}}" }, position: { x: 0, y: 0 } },
+    // w 引用了「不是自己上游」的節點(chk2 在平行支線)——執行到 w 時那個值不存在,必須擋
+    { id: "w", type: "write-file", label: "寫", config: { fileName: "a.txt", content: "{{period.start}} {{item.name}} {{ghostly.value}}" }, position: { x: 0, y: 0 } },
+    { id: "ghostly", type: "llm-decide", label: "平行支線", config: { prompt: "y", outputKey: "value" }, position: { x: 0, y: 0 } },
   ];
   const edges: WorkflowEdge[] = [
     { from: "t", to: "parse" },
     { from: "parse", to: "chk" },
     { from: "chk", to: "w" },
+    { from: "t", to: "ghostly" }, // ghostly 不在 w 的祖先鏈上(平行分支)
   ];
   const errs = lintGraph(nodes, edges);
-  assert.ok(errs.some((e) => e.includes("{{parse.result}}") && e.includes("{{result}}")), JSON.stringify(errs));
+  assert.ok(!errs.some((e) => e.includes("{{parse.result}}")), "引用上游祖先的分開層寫法不能誤擋:" + JSON.stringify(errs));
+  assert.ok(errs.some((e) => e.includes("{{ghostly.value}}") && e.includes("不是它的上游")), JSON.stringify(errs));
   assert.ok(errs.some((e) => e.includes("period.*") && e.includes("filterStart")), JSON.stringify(errs));
-  assert.ok(!errs.some((e) => e.includes("item")), "repeat-steps 的 item 前綴不能被誤殺");
+  assert.ok(!errs.some((e) => e.includes("{{item.name}}")), "repeat-steps 的 item 前綴不能被誤殺");
 });
 
 /* ---------- 多路分流(switch)/等人簽核/失敗分支的連線規則 ---------- */

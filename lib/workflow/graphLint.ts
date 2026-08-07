@@ -221,25 +221,43 @@ export function lintGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): string[
     }
   }
 
-  // ── 變數引用不能用「節點id.欄位」格式 ──
-  // 資料模型是扁平的:上游輸出的欄位直接用 {{欄位名}} 引用。踩過:模型發明 {{parse.result}}
-  // (parse 是節點 id)——執行期解析不到、條件永遠 false,流程全綠但走錯分支。
+  // ── {{節點id.欄位}} 引用:代號必須是「上游祖先」──
+  // 分開層(2026-08)讓 {{上游節點代號.欄位}} 成為合法寫法(同名欄位撞名時精準取值)。但代號指向
+  // 「不是自己上游」的節點仍要擋:那個值在執行到這裡時根本不存在(平行分支順序不保證/下游還沒跑),
+  // 執行期解析不到、條件永遠 false,流程全綠但走錯分支(踩過:模型發明 {{parse.result}})。
   // {{item.欄位}} 是 repeat-steps 內部合法範圍；{{period.*}} 只能放在 triggerParams 的 derived
   // default 裡，節點 config 執行期不認得它，必須改引用衍生欄位(如 {{filterStart}})。
-  for (const n of nodes) {
-    const cfgStr = JSON.stringify(n.config ?? {});
-    if (/\{\{\s*period\.[^}]+\}\}/.test(cfgStr)) {
-      errors.push(
-        `節點 "${n.id}" 直接引用了 {{period.*}}，執行時不會解析。` +
-          `請在 triggerParams 宣告 derived:true 的衍生欄位(default 才放 {{period.start}} 等)，節點改引用該欄位名(如 {{filterStart}})。`,
-      );
-    }
-    for (const m of cfgStr.matchAll(/\{\{\s*([A-Za-z0-9_-]+)\.([A-Za-z0-9_一-鿿-]+)\s*\}\}/g)) {
-      if (ids.has(m[1])) {
+  {
+    const parentsOf = new Map<string, string[]>();
+    for (const e of edges) parentsOf.set(e.to, [...(parentsOf.get(e.to) ?? []), e.from]);
+    const ancMemo = new Map<string, Set<string>>();
+    const ancOf = (id: string): Set<string> => {
+      const hit = ancMemo.get(id);
+      if (hit) return hit;
+      const seen = new Set<string>();
+      const queue = [id];
+      while (queue.length) {
+        const cur = queue.pop()!;
+        for (const pid of parentsOf.get(cur) ?? []) if (!seen.has(pid)) { seen.add(pid); queue.push(pid); }
+      }
+      ancMemo.set(id, seen);
+      return seen;
+    };
+    for (const n of nodes) {
+      const cfgStr = JSON.stringify(n.config ?? {});
+      if (/\{\{\s*period\.[^}]+\}\}/.test(cfgStr)) {
         errors.push(
-          `節點 "${n.id}" 引用了 {{${m[1]}.${m[2]}}}——不能用「節點id.欄位」格式。` +
-            `上游節點輸出的欄位是扁平的,直接寫 {{${m[2]}}} 即可(前提:上游真的有輸出這個欄位)。`,
+          `節點 "${n.id}" 直接引用了 {{period.*}}，執行時不會解析。` +
+            `請在 triggerParams 宣告 derived:true 的衍生欄位(default 才放 {{period.start}} 等)，節點改引用該欄位名(如 {{filterStart}})。`,
         );
+      }
+      for (const m of cfgStr.matchAll(/\{\{\s*([A-Za-z0-9_-]+)\.([A-Za-z0-9_一-鿿-]+)\s*\}\}/g)) {
+        if (ids.has(m[1]) && !ancOf(n.id).has(m[1])) {
+          errors.push(
+            `節點 "${n.id}" 引用了 {{${m[1]}.${m[2]}}}——但「${m[1]}」不是它的上游節點,執行到這裡時那個值還不存在。` +
+              `{{節點代號.欄位}} 只能引用自己上游(祖先)節點的輸出;若要的是攤平欄位,直接寫 {{${m[2]}}}(前提:上游真的有輸出這個欄位)。`,
+          );
+        }
       }
     }
   }
