@@ -1056,9 +1056,15 @@ export function isDeterministicValidationFailure(nodeType: string, error: unknow
 
 async function runNodeWithRetry(node: WorkflowNode, ctx: NodeContext, retryable: boolean, configuredMaxAttempts?: number) {
   let lastErr: unknown;
-  const maxAttempts = retryable
-    ? Math.max(1, Math.min(MAX_ATTEMPTS, configuredMaxAttempts ?? MAX_ATTEMPTS))
-    : 1;
+  // 每節點重試覆蓋(2026-08,n8n 差距補齊):節點 config 的保留鍵 retryTimes 讓使用者/AI 對
+  // 「這一步」調重試次數(1=不重試)。夾在 [1, MAX_ATTEMPTS(3)] 之間——重試不是免費的,盲目
+  // 加大只會燒時間(平台哲學:修不好交給修復迴圈,不靠原樣重跑變好)。沒設就照節點定義。
+  const perNodeRetry = Number((node.config as Record<string, unknown>).retryTimes);
+  const maxAttempts = Number.isFinite(perNodeRetry) && perNodeRetry >= 1
+    ? Math.min(MAX_ATTEMPTS, Math.floor(perNodeRetry))
+    : retryable
+      ? Math.max(1, Math.min(MAX_ATTEMPTS, configuredMaxAttempts ?? MAX_ATTEMPTS))
+      : 1;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (attempt > 1) {
       ctx.log(`第 ${attempt} 次重試`);
@@ -1590,6 +1596,21 @@ async function executeWorkflow(item: QueueItem) {
       //    把錯誤資訊當這個節點的輸出({{error}}/{{errorStep}})、只走失敗分支繼續跑。
       //    使用者按停止不走備案(他要的是停，不是 Plan B)。 ──
       const hasErrorBranch = wf.edges.some((e) => e.from === node.id && e.fromPort === "error");
+      // ── 每節點「失敗也繼續」(2026-08,n8n 差距補齊):config 保留鍵 continueOnFail=true 時,
+      //    這一步失敗不擋整條流程——錯誤放進 {{error}}/{{errorStep}} 照常往下走(適合「抓不到
+      //    就算了,別讓整條報表卡住」的非關鍵步驟)。跟失敗分支(Plan B)的差別:不用另外接線,
+      //    下游走的是「正常」出線。節點照樣標紅、總結會點名,不會假裝成功。 ──
+      const cfgContinue = (node.config as Record<string, unknown>).continueOnFail;
+      if (!isCancel && !hasErrorBranch && (cfgContinue === true || cfgContinue === "true")) {
+        db.prepare(`UPDATE node_runs SET status='failed', error=?, finished_at=datetime('now') WHERE run_id=? AND node_id=?`)
+          .run(errMsg, runId, node.id);
+        log(runId, node.id, `[${node.label}] 失敗：${errMsg}`);
+        log(runId, node.id, `[${node.label}] ⏭ 這一步設了「失敗也繼續」——錯誤已放進 {{error}}，流程照常往下走`);
+        nodeOutputs.set(node.id, { ...input, error: errMsg, errorStep: node.label });
+        ownOutputs.set(node.id, { error: errMsg, errorStep: node.label });
+        handledFailures.push({ label: node.label, error: errMsg });
+        continue;
+      }
       if (!isCancel && hasErrorBranch) {
         // active_ports 記 ["error"]:分支覆蓋率統計要知道「失敗分支真的被走過」(不只成功分支)
         db.prepare(`UPDATE node_runs SET status='failed', error=?, active_ports='["error"]', finished_at=datetime('now') WHERE run_id=? AND node_id=?`)
