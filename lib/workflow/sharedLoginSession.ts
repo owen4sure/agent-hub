@@ -62,3 +62,13 @@ export function resolveSharedSessionKeyForGraph(nodes: Pick<WorkflowNode, "type"
 export function sharedSessionFileName(sharedKey: string): string {
   return `shared-${sharedKey}.json`;
 }
+
+/**
+ * 這次執行實際讀寫的 session 檔名——手動登入(manualLogin)、引擎執行(engine.makeSession)、
+ * 動作錄製(actionRecorder)三處必須用同一條規則。任何一處自己拼檔名，就會出現「使用者手動
+ * 登入存進 A 檔、引擎執行讀 B 檔，登入幾次都沒用」的死結(2026-08 真實踩過：manualLogin 把
+ * 共用代號直接接上 .json，少了 shared- 前綴，跟引擎讀的檔永遠對不上)。
+ */
+export function sessionFileNameFor(workflowId: string, sharedSessionKey?: string | null): string {
+  return sharedSessionKey ? sharedSessionFileName(sharedSessionKey) : `${workflowId}.json`;
+}

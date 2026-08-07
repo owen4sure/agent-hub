@@ -15,22 +15,28 @@ import path from "node:path";
  */
 const source = fs.readFileSync(path.join(process.cwd(), "lib/workflow/manualLogin.ts"), "utf8");
 
-test("開新 context 時載入的是 storageKey 對應的狀態，不能是 workflowId(踩過：算出共用代號卻沒拿去用)", () => {
-  assert.match(source, /const savedState = loadState\(storageKey\);/);
+test("開新 context 時載入的是 sessionFileName 對應的狀態，不能是 workflowId(踩過：算出共用代號卻沒拿去用)", () => {
+  assert.match(source, /const savedState = loadState\(sessionFileName\);/);
   assert.doesNotMatch(source, /loadState\(workflowId\)/, "不能再用 workflowId 直接讀狀態檔");
 });
 
-test("每次存檔(saveNow)寫的是 storageKey 對應的檔案，不能是 workflowId", () => {
+test("每次存檔(saveNow)寫的是 sessionFileName 對應的檔案，不能是 workflowId", () => {
   const fnBody = /const saveNow = async \(\) => \{[\s\S]*?\n  \};/.exec(source)?.[0] ?? "";
-  assert.match(fnBody, /saveStateFile\(storageKey, state\);/);
+  assert.match(fnBody, /saveStateFile\(sessionFileName, state\);/);
   assert.doesNotMatch(fnBody, /saveStateFile\(workflowId,/, "不能再用 workflowId 直接存狀態檔");
+});
+
+test("檔名一律由 sessionFileNameFor 推導(單一真相)——不能自己把代號接上 .json(踩過：少了 shared- 前綴,存的檔跟引擎讀的檔對不上)", () => {
+  assert.match(source, /import \{ sessionFileNameFor \} from "\.\/sharedLoginSession";/);
+  assert.match(source, /openManualLoginInner\(workflowId, url, sessionFileNameFor\(workflowId, sharedSessionKey\)\)/);
+  assert.doesNotMatch(source, /\$\{storageKey\}\.json|\$\{sessionFileName\}\.json/, "statePath 不能再自己拼 .json");
 });
 
 test("視窗真正結束(disconnected)只收尾一次，不管是使用者按關閉還是直接叉視窗都要觸發驗證", () => {
   assert.match(source, /browser\.on\("disconnected", finalize\);/);
   const fnBody = /const finalize = \(\) => \{[\s\S]*?\n  \};/.exec(source)?.[0] ?? "";
   assert.match(fnBody, /if \(finalized\) return;/, "要防止兩條收尾路徑重複觸發驗證");
-  assert.match(fnBody, /void runVerification\(workflowId, storageKey, url\);/);
+  assert.match(fnBody, /void runVerification\(workflowId, sessionFileName, url\);/);
 });
 
 test("開新一輪手動登入時要清掉舊的驗證結果，不能讓畫面顯示上一輪的答案", () => {

@@ -23,7 +23,7 @@ import { workflowExecutionFingerprint } from "./fingerprint";
 import { assertCurrentEvidence } from "./evidencePassport";
 import { AcceptanceSpecOutdatedError, acceptanceSpecOutdated } from "./acceptanceSpec";
 import { collectRunSeeds, downstreamNodeIds, type RunSeedRow } from "./partialRun";
-import { resolveSharedSessionKeyForGraph, sharedSessionFileName } from "./sharedLoginSession";
+import { resolveSharedSessionKeyForGraph, sessionFileNameFor } from "./sharedLoginSession";
 import { loadSessionState, saveSessionState } from "./browserSessionFile";
 import { ExternalPreflightError, preflightExternalIntegrations } from "./preflight";
 import { isPlaceholderCode } from "./codegen";
@@ -193,7 +193,7 @@ function makeSession(headed: boolean, workflowId: string, sharedSessionKey?: str
   let browser: Browser | null = null;
   let page: Page | null = null;
   const stateDir = path.join(process.cwd(), "data", "browser-sessions");
-  const statePath = path.join(stateDir, sharedSessionKey ? sharedSessionFileName(sharedSessionKey) : `${workflowId}.json`);
+  const statePath = path.join(stateDir, sessionFileNameFor(workflowId, sharedSessionKey));
   return {
     async getBrowser() {
       // AutomationControlled 特徵(navigator.webdriver=true)是 Google 這類網站判定機器人的主要訊號之一,

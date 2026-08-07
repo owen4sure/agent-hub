@@ -26,7 +26,7 @@ import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { getSharedSecrets } from "../settingsStore";
-import { sharedSessionFileName } from "./sharedLoginSession";
+import { sessionFileNameFor } from "./sharedLoginSession";
 
 const SESSION_DIR = path.join(process.cwd(), "data", "browser-sessions");
 const RECORD_DIR = path.join(process.cwd(), "data", "recordings");
@@ -80,7 +80,7 @@ export function startRecording(workflowId: string, url: string, sharedSessionKey
   if (isRecording(workflowId)) throw new Error("這條流程已經有一個錄製視窗開著——先在那個視窗完成操作（或按停止）再開新的。");
   fs.mkdirSync(RECORD_DIR, { recursive: true });
   const outFile = path.join(RECORD_DIR, `${workflowId}-${randomUUID().slice(0, 8)}.js`);
-  const storage = path.join(SESSION_DIR, sharedSessionKey ? sharedSessionFileName(sharedSessionKey) : `${workflowId}.json`);
+  const storage = path.join(SESSION_DIR, sessionFileNameFor(workflowId, sharedSessionKey));
 
   const args = ["playwright", "codegen", "--target", "javascript", "-o", outFile];
   // 有存過登入狀態就帶進去：使用者不用重新登入，錄製檔裡也不會多出帳密痕跡。

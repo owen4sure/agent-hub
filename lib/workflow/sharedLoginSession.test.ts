@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sharedSessionKeyFor, resolveSharedSessionKeyForGraph, sharedSessionFileName } from "./sharedLoginSession";
+import { sharedSessionKeyFor, resolveSharedSessionKeyForGraph, sharedSessionFileName, sessionFileNameFor } from "./sharedLoginSession";
 
 function loginNode(config: Record<string, unknown>) {
   return { type: "browser-login" as const, config };
@@ -72,4 +72,16 @@ test("resolveSharedSessionKeyForGraph：全部節點都明確關掉共用開關�
 test("sharedSessionFileName：跟一般每條流程各自一份的檔名格式要能明顯分辨開來", () => {
   const name = sharedSessionFileName("abc123");
   assert.equal(name, "shared-abc123.json");
+});
+
+test("sessionFileNameFor：有共用代號時檔名必須帶 shared- 前綴，跟引擎讀的是同一個檔", () => {
+  // 釘住的教訓(2026-08 真實踩過)：手動登入曾把共用代號直接接上 .json、少了 shared- 前綴，
+  // 使用者登入存進 A 檔、引擎執行讀 B 檔，「手動登入一次」做幾次都救不回來。
+  assert.equal(sessionFileNameFor("wf-1", "abc123"), sharedSessionFileName("abc123"));
+  assert.equal(sessionFileNameFor("wf-1", "abc123"), "shared-abc123.json");
+});
+
+test("sessionFileNameFor：沒有共用代號就用流程自己的檔(既有單流程行為不變)", () => {
+  assert.equal(sessionFileNameFor("wf-1", null), "wf-1.json");
+  assert.equal(sessionFileNameFor("wf-1", undefined), "wf-1.json");
 });

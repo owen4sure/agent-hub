@@ -114,10 +114,10 @@ test("錄製收尾的雜項一定要濾掉：page.close() 會關掉共用分頁�
  */
 test("共用登入狀態：有共用代號時，錄製要讀寫共用檔案，不能還在讀每條流程各自一份的舊檔名", () => {
   const source = fs.readFileSync(path.join(process.cwd(), "lib/workflow/actionRecorder.ts"), "utf8");
-  assert.match(source, /import \{ sharedSessionFileName \} from "\.\/sharedLoginSession";/);
+  assert.match(source, /import \{ sessionFileNameFor \} from "\.\/sharedLoginSession";/);
   assert.match(
     source,
-    /const storage = path\.join\(SESSION_DIR, sharedSessionKey \? sharedSessionFileName\(sharedSessionKey\) : `\$\{workflowId\}\.json`\);/,
-    "有共用代號時要用共用檔名算 storage 路徑",
+    /const storage = path\.join\(SESSION_DIR, sessionFileNameFor\(workflowId, sharedSessionKey\)\);/,
+    "storage 檔名一律由 sessionFileNameFor 推導(單一真相),不能自己拼",
   );
 });

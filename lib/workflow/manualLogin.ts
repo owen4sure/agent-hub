@@ -2,6 +2,7 @@ import path from "node:path";
 import { chromium, type Browser } from "playwright";
 import { isAuthenticated } from "./nodes/browserLogin";
 import { loadSessionState, saveSessionState } from "./browserSessionFile";
+import { sessionFileNameFor } from "./sharedLoginSession";
 
 /**
  * 「🔐 手動登入一次」：開一個有頭瀏覽器讓「使用者本人」登入(Google/Microsoft 這類大平台會用
@@ -22,18 +23,18 @@ const openSessions = new Map<string, { browser: Browser; close: () => Promise<vo
  * 就同步鎖住，第二個請求進來時 reserving 已經有這筆，直接被擋下，不用等到 await 之後才發現撞了。 */
 const reserving = new Set<string>();
 
-// storageKey 平常就是 workflowId，但這條流程若開了「跟其他流程共用登入狀態」(sharedLoginSession.ts)，
-// 呼叫端會改傳共用代號進來——讀寫的是同一份給多條流程共用的檔案，不是這條流程專屬的那份。
-function statePath(storageKey: string): string {
-  return path.join(/* turbopackIgnore: true */ stateDir, `${storageKey}.json`);
+// sessionFileName 一律由 sessionFileNameFor() 推導(單一真相)——這裡若自己拼檔名，共用登入的
+// 情況就會存錯檔：使用者手動登入存進 A 檔、引擎執行讀 B 檔，登入幾次都沒用(2026-08 真實踩過)。
+function statePath(sessionFileName: string): string {
+  return path.join(/* turbopackIgnore: true */ stateDir, sessionFileName);
 }
 
-function loadState(storageKey: string): { cookies: unknown[]; origins: unknown[] } | undefined {
-  return loadSessionState(statePath(storageKey)) as { cookies: unknown[]; origins: unknown[] } | undefined;
+function loadState(sessionFileName: string): { cookies: unknown[]; origins: unknown[] } | undefined {
+  return loadSessionState(statePath(sessionFileName)) as { cookies: unknown[]; origins: unknown[] } | undefined;
 }
 
-function saveStateFile(storageKey: string, state: unknown) {
-  saveSessionState(statePath(storageKey), state);
+function saveStateFile(sessionFileName: string, state: unknown) {
+  saveSessionState(statePath(sessionFileName), state);
 }
 
 export interface ManualLoginVerification {
@@ -59,8 +60,8 @@ export function getManualLoginVerification(workflowId: string): ManualLoginVerif
  * 登入成功，使用者也可能什麼都沒操作就直接叉掉視窗、或帳密/驗證碼輸錯了。用無頭瀏覽器造訪同一個
  * 網址，跟 browser-login 節點判斷「登入成功」用同一套 isAuthenticated 標準，兩處標準才不會兜不起來。
  */
-async function runVerification(workflowId: string, storageKey: string, url: string): Promise<void> {
-  const state = loadState(storageKey);
+async function runVerification(workflowId: string, sessionFileName: string, url: string): Promise<void> {
+  const state = loadState(sessionFileName);
   if (!state) {
     lastVerification.set(workflowId, {
       verified: false,
@@ -118,13 +119,13 @@ export async function openManualLogin(workflowId: string, url: string, sharedSes
   // 幾乎同時的第二個請求，不然兩個都會通過上面的檢查、各自開一個真的 Chrome(孤兒視窗+追蹤錯亂)。
   reserving.add(workflowId);
   try {
-    return await openManualLoginInner(workflowId, url, sharedSessionKey ?? workflowId);
+    return await openManualLoginInner(workflowId, url, sessionFileNameFor(workflowId, sharedSessionKey));
   } finally {
     reserving.delete(workflowId);
   }
 }
 
-async function openManualLoginInner(workflowId: string, url: string, storageKey: string): Promise<{ usingRealChrome: boolean }> {
+async function openManualLoginInner(workflowId: string, url: string, sessionFileName: string): Promise<{ usingRealChrome: boolean }> {
   lastVerification.delete(workflowId); // 開新的一輪，舊的驗證結果不能再顯示成這一輪的答案
   const args = ["--disable-blink-features=AutomationControlled"];
   let browser: Browser;
@@ -137,7 +138,7 @@ async function openManualLoginInner(workflowId: string, url: string, storageKey:
     browser = await chromium.launch({ headless: false, args });
   }
 
-  const savedState = loadState(storageKey);
+  const savedState = loadState(sessionFileName);
   const context = await browser.newContext({ ...(savedState ? { storageState: savedState as never } : {}) });
   const page = await context.newPage();
 
@@ -159,7 +160,7 @@ async function openManualLoginInner(workflowId: string, url: string, storageKey:
     saving = true;
     try {
       const state = await context.storageState();
-      saveStateFile(storageKey, state);
+      saveStateFile(sessionFileName, state);
     } catch { /* context 正在關閉——最後一次成功的存檔就是最終狀態 */ }
     finally { saving = false; }
   };
@@ -177,7 +178,7 @@ async function openManualLoginInner(workflowId: string, url: string, storageKey:
     if (finalized) return;
     finalized = true;
     openSessions.delete(workflowId);
-    void runVerification(workflowId, storageKey, url);
+    void runVerification(workflowId, sessionFileName, url);
   };
   const cleanup = async () => {
     await saveNow(); // 這個路徑 context 還活著，最後補存一次；直接叉視窗那條路只能靠先前 framenavigated 存下的最後一份
