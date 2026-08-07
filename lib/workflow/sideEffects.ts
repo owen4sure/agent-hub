@@ -111,6 +111,11 @@ export const NODE_SIDE_EFFECTS: Readonly<Record<string, NodeSideEffectSpec>> = {
   "repeat-steps": { effects: [], dryRun: "none" }, // 容器本身沒有副作用，內嵌步驟各自算(見 repeatNesting)
   "rss-read": { effects: [], dryRun: "none" },
   "set-variable": { effects: [], dryRun: "none" },
+  // 資料處理節點組:純記憶體內轉換,不碰外部世界
+  "filter-rows": { effects: [], dryRun: "none" },
+  "sort-rows": { effects: [], dryRun: "none" },
+  "aggregate-rows": { effects: [], dryRun: "none" },
+  "dedup-rows": { effects: [], dryRun: "none" },
   switch: { effects: [], dryRun: "none" },
   "template-text": { effects: [], dryRun: "none" },
   trigger: { effects: [], dryRun: "none" },

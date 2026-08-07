@@ -11,6 +11,7 @@ export const ICONS: Record<string, string> = {
   "write-file": "💾", "read-file": "📂", "web-page": "🕸️", "desktop-notify": "🔔", "send-email": "✉️", "webmail-send": "📧",
   "slack-notify": "📣", "google-sheet-read": "📗", "google-sheet-append": "📘", "google-sheet-update": "📝", "read-image": "🖼️", wait: "⏳", "run-workflow": "🧩", "rss-read": "📰",
   switch: "🧭", "wait-approval": "✋", "email-read": "📨",
+  "filter-rows": "🔍", "sort-rows": "↕️", "aggregate-rows": "🧮", "dedup-rows": "🧹",
   "google-slides-refresh": "📊",
   "google-slides-create": "🖥️",
 };
@@ -51,6 +52,10 @@ export const TYPE_META: Record<string, { cat: string; label: string }> = {
   wait: { cat: "logic", label: "等待" },
   "run-workflow": { cat: "logic", label: "執行子流程" },
   "rss-read": { cat: "integration", label: "讀 RSS" },
+  "filter-rows": { cat: "data", label: "篩選資料" },
+  "sort-rows": { cat: "data", label: "排序資料" },
+  "aggregate-rows": { cat: "data", label: "彙總資料" },
+  "dedup-rows": { cat: "data", label: "去除重複" },
   switch: { cat: "logic", label: "多路分流" },
   "wait-approval": { cat: "logic", label: "等人簽核" },
   "email-read": { cat: "integration", label: "讀取信箱" },
