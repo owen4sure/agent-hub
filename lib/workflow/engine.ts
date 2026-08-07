@@ -1514,6 +1514,18 @@ async function executeWorkflow(item: QueueItem) {
       // 就消失、下游拿到的是原封不動的 {{欄位}} 字面文字」的真實根因。改在這個唯一存放輸出的地方統一處理，
       // 不用去每個節點檔案裡各自補 spread、以後新增節點型別也不會漏。
       nodeOutputs.set(node.id, { ...input, ...result.output });
+      // 寫入回讀驗證:有宣告的節點,寫完自動回讀核對(dry-run 沒真的寫,不驗)。核對本身的失敗
+      // 絕不影響流程結果——它是加分網,不是新的單點故障源。
+      if (def.verifyWrite && !dryRun) {
+        try {
+          const v = await def.verifyWrite(ctx, (result.output ?? {}) as Record<string, unknown>);
+          log(runId, node.id, v.ok
+            ? `✓ 已核對:${v.evidence}`
+            : `⚠️ 寫入後回讀核對沒過:${v.evidence}——寫入動作本身已執行,請人工確認結果`);
+        } catch (verr) {
+          log(runId, node.id, `⚠️ 回讀核對執行失敗(${verr instanceof Error ? verr.message.slice(0, 120) : String(verr)})——不影響這一步的結果`);
+        }
+      }
       const ownFields = diffOwnFields(input, (result.output ?? {}) as Record<string, unknown>);
       ownOutputs.set(node.id, ownFields);
       for (const k of Object.keys(ownFields)) {

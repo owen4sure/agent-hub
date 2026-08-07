@@ -56,6 +56,15 @@ export const writeFileNode: NodeDefinition = {
     }
     return { output: { savedPath, savedFileName: fileName } };
   },
+  // 寫入回讀驗證:重新打開剛存的檔,核對真的在、有內容。證據講人話(檔名+大小)。
+  async verifyWrite(_ctx, output) {
+    const fsMod = await import("node:fs");
+    const p = String(output.savedPath ?? "");
+    if (!p || !fsMod.existsSync(p)) return { ok: false, evidence: `回讀不到剛存的檔(${p || "沒有路徑"})` };
+    const size = fsMod.statSync(p).size;
+    if (size === 0) return { ok: false, evidence: `檔案存在但是空的(${String(output.savedFileName ?? "")})` };
+    return { ok: true, evidence: `回讀「${String(output.savedFileName ?? "")}」成功,${size.toLocaleString()} bytes` };
+  },
 };
 
 /**

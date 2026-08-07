@@ -214,6 +214,13 @@ export interface NodeDefinition {
    * 的容器型節點必須放寬——N 輪瀏覽器操作+第一次執行可能要產程式碼,3 分鐘必然不夠,逾時重試又整包重來。 */
   timeoutMs?: number;
   execute(ctx: NodeContext): Promise<NodeResult>;
+  /**
+   * 寫入回讀驗證(2026-08,使用者拍板的平台級制度):寫入類節點執行成功後,引擎自動回頭「讀一次
+   * 剛剛寫的東西」核對真的落地了——每一筆寫入都要有回讀證據,不做 fire-and-forget。
+   * ok=核對通過(紀錄標「✓ 已核對」);沒過=標警告但**不讓節點失敗**(寫入已經發生,回讀失敗
+   * 可能只是暫時的,硬失敗會觸發重試把同一筆再寫一次)。只在正式執行呼叫,dry-run 不會。
+   */
+  verifyWrite?(ctx: NodeContext, output: Record<string, unknown>): Promise<{ ok: boolean; evidence: string }>;
 }
 
 /** 重跑也沒用的錯誤 → 不重試 */

@@ -309,4 +309,20 @@ export const excelProcessNode: NodeDefinition = {
       },
     };
   },
+  // 寫入回讀驗證:用 exceljs 真的重新打開產出檔,核對開得起來、有分頁——「產出一個壞的 xlsx
+  // 但流程全綠」是報表自動化最難堪的失敗方式(收檔案的人隔天才發現打不開)。
+  async verifyWrite(_ctx, output) {
+    const fsMod = await import("node:fs");
+    const p = String(output.outputPath ?? "");
+    if (!p || !fsMod.existsSync(p)) return { ok: false, evidence: `回讀不到產出檔(${p || "沒有路徑"})` };
+    try {
+      const ExcelJS = (await import("exceljs")).default;
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.readFile(p);
+      if (wb.worksheets.length === 0) return { ok: false, evidence: "產出檔開得起來但沒有任何分頁" };
+      return { ok: true, evidence: `回讀「${String(output.filename ?? "")}」成功,${wb.worksheets.length} 個分頁、${fsMod.statSync(p).size.toLocaleString()} bytes` };
+    } catch (err) {
+      return { ok: false, evidence: `產出檔存在但 Excel 打不開(${err instanceof Error ? err.message.slice(0, 80) : String(err)})` };
+    }
+  },
 };
