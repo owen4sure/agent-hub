@@ -22,6 +22,10 @@
 
 - Changed｜兩個最大的模組拆成內聚小檔,單檔不再超過 800 行紅線｜wfChatStore.ts(1,827 行)→ lib/wfChat/ 五個模組＋433 行入口;builder.ts(2,217 行)→ builderTypes/builderHeuristics/builderPrompts/builderGraphNormalize/builderModelCall＋799 行主流程。兩者都是「只搬不改」:搬移內容與原文逐位元相同(唯一差異是跨檔符號加 export),入口檔 re-export 全部公開符號,既有 import 路徑一行都不用改。刻意沒拆的:app/workflows/[id]/page.tsx(3,099 行,UI 拆分需要截圖回歸驗證的獨立工作)與 lib/workflow/engine.ts(1,782 行,執行引擎核心,機械搬動的風險報酬比不划算)——這兩個是已知未達標,不假裝拆完了｜`lib/wfChat/*`、`lib/workflow/builder*.ts`｜驗證：tsc 零錯誤、1,187 個測試全綠、change-guard(含 lint)通過、拆移內容逐行 diff 比對
 
+### Removed
+
+- Removed｜內建範例流程全數移除｜三條零金鑰範例(彩色報表/網址摘要/英文 Email)實測在乾淨環境可跑,但「讀網頁」對部分擋爬蟲的網站會連不上,示範承諾與真實體驗有落差;經使用者實際試用後決定平台不內建範例,新手引導回歸歡迎導覽與 README。範例分區顯示、isExampleId 等機制保留(examples/ 目錄清空後自動不顯示,未來要再放範例不用改碼)｜`examples/`｜驗證：首頁無範例區、範例的執行紀錄與產出檔全數清除
+
 ### Added
 
 - Added｜節點資料流加入「分開層」：同名欄位可精準指定要哪一步的值｜攤平合併(同名後蓋前)是為了讓 {{欄位}} 引用保持白話,但流程一複雜(例如兩個下載步驟都輸出 attachmentPath)後面的值會靜默蓋掉前面的,下游讀錯資料且全綠無警告(真實踩過)。現在:①每個節點「自己產出」的欄位另外分開保存,範本可寫 {{節點代號.欄位}}、custom-code 可用 ctx.outputs["節點代號"].欄位精準取值,部分執行沿用舊結果時同樣可解析;②執行時引用到「被多個步驟寫過」的攤平欄位,紀錄會警告「目前用的是誰的值」並教精準寫法;③AI 建圖/產碼/修復的規則同步教了這套寫法;④建圖檢查認得新語法不誤報。攤平層行為一個都沒變,既有流程零影響｜`lib/workflow/engine.ts`、`lib/workflow/nodeHelpers.ts`、`lib/workflow/partialRun.ts`、`lib/workflow/customCodeProcessSandbox.ts`、`lib/workflow/graphLint.ts`、`lib/workflow/codegen.ts`、`lib/workflow/builderPrompts.ts`、`lib/workflow/graphRepair.ts`｜驗證：範本解析(攤平優先/精準取值/查無保留字面)、種子含自身輸出、lint 不誤報、沙箱內 ctx.outputs 可用共 6 個新測試;1,198 個測試全綠
