@@ -116,6 +116,7 @@ export const NODE_SIDE_EFFECTS: Readonly<Record<string, NodeSideEffectSpec>> = {
   "sort-rows": { effects: [], dryRun: "none" },
   "aggregate-rows": { effects: [], dryRun: "none" },
   "dedup-rows": { effects: [], dryRun: "none" },
+  "merge-rows": { effects: [], dryRun: "none" },
   switch: { effects: [], dryRun: "none" },
   "template-text": { effects: [], dryRun: "none" },
   trigger: { effects: [], dryRun: "none" },

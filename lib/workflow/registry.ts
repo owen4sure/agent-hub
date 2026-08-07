@@ -21,6 +21,7 @@ import { waitNode } from "./nodes/wait";
 import { subWorkflowNode } from "./nodes/subWorkflow";
 import { rssReadNode } from "./nodes/rssRead";
 import { filterRowsNode, sortRowsNode, aggregateRowsNode, dedupRowsNode } from "./nodes/dataOps";
+import { mergeRowsNode } from "./nodes/mergeRows";
 import { switchNode } from "./nodes/switchCase";
 import { waitApprovalNode } from "./nodes/waitApproval";
 import { customCodeNode } from "./nodes/customCode";
@@ -52,6 +53,7 @@ const ALL: NodeDefinition[] = [
   sortRowsNode,
   aggregateRowsNode,
   dedupRowsNode,
+  mergeRowsNode,
   emailReadNode,
   googleSheetReadNode,
   googleSheetAppendNode,

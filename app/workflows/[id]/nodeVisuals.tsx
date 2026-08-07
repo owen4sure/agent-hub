@@ -12,6 +12,7 @@ export const ICONS: Record<string, string> = {
   "slack-notify": "📣", "google-sheet-read": "📗", "google-sheet-append": "📘", "google-sheet-update": "📝", "read-image": "🖼️", wait: "⏳", "run-workflow": "🧩", "rss-read": "📰",
   switch: "🧭", "wait-approval": "✋", "email-read": "📨",
   "filter-rows": "🔍", "sort-rows": "↕️", "aggregate-rows": "🧮", "dedup-rows": "🧹",
+  "merge-rows": "🔗",
   "google-slides-refresh": "📊",
   "google-slides-create": "🖥️",
 };
@@ -56,6 +57,7 @@ export const TYPE_META: Record<string, { cat: string; label: string }> = {
   "sort-rows": { cat: "data", label: "排序資料" },
   "aggregate-rows": { cat: "data", label: "彙總資料" },
   "dedup-rows": { cat: "data", label: "去除重複" },
+  "merge-rows": { cat: "logic", label: "合併資料" },
   switch: { cat: "logic", label: "多路分流" },
   "wait-approval": { cat: "logic", label: "等人簽核" },
   "email-read": { cat: "integration", label: "讀取信箱" },
