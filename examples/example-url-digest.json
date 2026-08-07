@@ -1,0 +1,98 @@
+{
+  "id": "example-url-digest",
+  "name": "範例：丟個網址進來,30 秒吐出三行重點",
+  "status": "official",
+  "description": "任何看不完的長文——新聞、部落格、維基百科——把網址貼進來按執行,AI 讀完整頁後給你三行重點＋一句「值不值得細讀」的判斷,同時存成筆記檔。這是「AI 真的會上網讀內容」最直接的展示,拿你自己想讀的文章網址試試。",
+  "requiresSecrets": [],
+  "triggerParams": [
+    {
+      "key": "網址",
+      "label": "想讀的文章網址(預設是維基百科,可換任何網頁)",
+      "type": "text",
+      "default": "https://zh.wikipedia.org/wiki/%E4%BA%BA%E5%B7%A5%E6%99%BA%E6%85%A7"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "trigger",
+      "type": "trigger",
+      "label": "開始(貼一個網址)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": "read",
+      "type": "web-page",
+      "label": "打開網頁讀內容",
+      "config": {
+        "url": "{{網址}}",
+        "maxChars": "12000"
+      },
+      "position": {
+        "x": 240,
+        "y": 0
+      }
+    },
+    {
+      "id": "summarize",
+      "type": "llm-decide",
+      "label": "AI 整理三行重點",
+      "config": {
+        "prompt": "以下是網頁「{{pageTitle}}」的內容:\n\n{{pageText}}\n\n請輸出:①三行重點(每行不超過 30 字、開頭用「•」)②最後一行用「👉」開頭,一句話說這篇值不值得花時間細讀、適合誰讀。全部用繁體中文。",
+        "outputKey": "重點整理"
+      },
+      "position": {
+        "x": 480,
+        "y": 0
+      }
+    },
+    {
+      "id": "save",
+      "type": "write-file",
+      "label": "存成筆記檔",
+      "config": {
+        "fileName": "閱讀筆記_{{pageTitle}}.md",
+        "content": "# 📖 {{pageTitle}}\n\n{{重點整理}}\n\n---\n原文:{{finalUrl}}\n",
+        "extraDir": ""
+      },
+      "position": {
+        "x": 720,
+        "y": 0
+      }
+    },
+    {
+      "id": "notify",
+      "type": "desktop-notify",
+      "label": "跳通知看重點",
+      "config": {
+        "title": "讀完了:{{pageTitle}}",
+        "message": "{{重點整理}}"
+      },
+      "position": {
+        "x": 960,
+        "y": 0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "read"
+    },
+    {
+      "from": "read",
+      "to": "summarize"
+    },
+    {
+      "from": "summarize",
+      "to": "save"
+    },
+    {
+      "from": "save",
+      "to": "notify"
+    }
+  ]
+}
