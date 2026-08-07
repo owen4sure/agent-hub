@@ -443,3 +443,23 @@ test("lintGraph：合法最大深度的巢狀迴圈仍然通過，既有一、�
   const legal = { ...node("r", "repeat-steps"), config: { items: "[1]", outputKey: "results", steps } };
   assert.deepEqual(lintGraph([node("t", "trigger"), legal], [{ from: "t", to: "r" }]), []);
 });
+
+test("lintVarRefWarnings：分開層 {{上游節點代號.欄位}} 合法不警告；代號不是上游祖先仍要警告", () => {
+  const nodes = [
+    node("trigger", "trigger"),
+    node("dl1", "custom-code", { intent: "下載A", code: "return { ...ctx.input, attachmentPath: 'a' };" }),
+    node("dl2", "custom-code", { intent: "下載B", code: "return { ...ctx.input, attachmentPath: 'b' };" }),
+    node("read", "custom-code", { intent: "讀檔", code: "return { ...ctx.input };" }),
+  ];
+  const edges: WorkflowEdge[] = [
+    { from: "trigger", to: "dl1" }, { from: "dl1", to: "dl2" }, { from: "dl2", to: "read" },
+  ];
+  // 引用上游祖先的分開層寫法:合法
+  const ok = [...nodes];
+  ok[3] = node("read", "custom-code", { intent: "讀檔", code: "return { ...ctx.input };", note: "{{dl1.attachmentPath}}" });
+  assert.deepEqual(lintVarRefWarnings(ok, edges, []), []);
+  // 代號不是任何上游節點:要警告
+  const bad = [...nodes];
+  bad[3] = node("read", "custom-code", { intent: "讀檔", code: "return { ...ctx.input };", note: "{{ghostNode.attachmentPath}}" });
+  assert.equal(lintVarRefWarnings(bad, edges, []).length, 1);
+});

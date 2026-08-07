@@ -211,3 +211,17 @@ test("確認凍結：排程觸發的執行遇到還沒產碼的節點要拒絕,�
     db.prepare(`DELETE FROM runs WHERE id = ?`).run(runId);
   }
 });
+
+test("沙箱分開層：ctx.outputs 在子程序可用——撞名欄位能精準取「某一步」自己的值", async () => {
+  const ctx = prodContext(
+    "return { ...ctx.input, picked: ctx.outputs['downloadAttach'].attachmentPath };",
+    { input: { attachmentPath: "/被後面步驟蓋掉的.xlsx" } },
+  );
+  (ctx as { outputs: Record<string, Record<string, unknown>> }).outputs = {
+    downloadAttach: { attachmentPath: "/日報.xlsx" },
+    downloadOther: { attachmentPath: "/被後面步驟蓋掉的.xlsx" },
+  };
+  const result = await customCodeNode.execute(ctx);
+  assert.equal(result.output?.picked, "/日報.xlsx");
+  assert.equal(result.output?.attachmentPath, "/被後面步驟蓋掉的.xlsx", "攤平 input 行為不變");
+});

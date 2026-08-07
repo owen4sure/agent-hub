@@ -239,6 +239,7 @@ async function main() {
     config: Object.assign(Object.create(null), payload.ctx.config || {}),
     secrets: Object.assign(Object.create(null), payload.ctx.secrets || {}),
     vars: Object.assign(Object.create(null), payload.ctx.vars || {}),
+    outputs: Object.assign(Object.create(null), payload.ctx.outputs || {}),
     // 正式模式給真的 AbortSignal(程式碼可能把它塞給 fetch,假物件會讓 fetch 直接 TypeError)。
     // 實際取消由家長行程 kill 子程序完成,這個 signal 不需要真的觸發。
     cancelSignal: payload.mode === 'production' ? new AbortController().signal : Object.freeze({ aborted: false }),
@@ -372,6 +373,7 @@ export async function executeCustomCodeInProcessSandbox(
     mode,
     ctx: {
       runId: ctx.runId, workflowId: ctx.workflowId, nodeId: ctx.nodeId, input: ctx.input, config: ctx.config,
+      outputs: ctx.outputs ?? {}, // 分開層:各上游步驟自己產出的欄位,撞名時精準取值用(ctx.outputs["步驟代號"].欄位)
       secrets: ctx.secrets, vars: ctx.vars, model: ctx.model, baseUrl: ctx.baseUrl, headed: false,
       outputDir: ctx.outputDir, debugDir: ctx.debugDir, dryRun: mode !== "production",
     },

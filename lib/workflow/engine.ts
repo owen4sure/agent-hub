@@ -52,6 +52,8 @@ export interface ResumeSpec {
   seeds: Record<string, Record<string, unknown>>;
   /** 沿用節點上次選中的分支 port(if/switch)，續跑時要重放否則下游分支邏輯全失效 */
   seedPorts: Record<string, string[]>;
+  /** 沿用節點上次記錄的「自身輸出」——分開層({{節點代號.欄位}}/ctx.outputs)在沿用時也要能解析 */
+  ownSeeds?: Record<string, Record<string, unknown>>;
   /** 要重新執行的節點(失敗那步+它的下游+需要瀏覽器狀態的上游鏈) */
   rerunNodeIds: string[];
   /** 簽核恢復用：這個節點不執行，直接視為成功、輸出指定資料並走指定分支 */
@@ -412,8 +414,8 @@ export function startWorkflowRun(
     const rows = prior
       ? (db.prepare(`SELECT node_id, status, input_json, output_json, active_ports FROM node_runs WHERE run_id = ?`).all(prior.id) as RunSeedRow[])
       : [];
-    const { seeds, seedPorts } = collectRunSeeds(wf.nodes, rows);
-    resume = { seeds, seedPorts, rerunNodeIds: partialIds, skipUnseeded: true };
+    const { seeds, seedPorts, ownSeeds } = collectRunSeeds(wf.nodes, rows);
+    resume = { seeds, seedPorts, ownSeeds, rerunNodeIds: partialIds, skipUnseeded: true };
     const label = (nid: string) => wf.nodes.find((n) => n.id === nid)?.label ?? nid;
     // 「執行」vs「只測」是兩種模式,開場橫幅要講對:預設是真的執行(含寫入/發送),勾了「只測試」才是安全排練
     const mode = dryRun ? "只測" : "執行";
@@ -535,7 +537,7 @@ export function resumeRun(
   };
   const nodeTypeById = new Map(wf.nodes.map((n) => [n.id, n.type]));
   // 成功節點的合併輸出+分支重放,與「從這一步開始測」共用同一套萃取規則(partialRun.ts)
-  const { seeds, seedPorts } = collectRunSeeds(wf.nodes, rows);
+  const { seeds, seedPorts, ownSeeds } = collectRunSeeds(wf.nodes, rows);
   // 簽核節點自己沒有「成功輸出」(它是 waiting)——把它上次收到的 input 當 seed，
   // preResolved 的簽核結果會疊在上面，下游才拿得到上游算好的欄位+簽核結果。
   if (opts.preResolved) {
@@ -613,7 +615,7 @@ export function resumeRun(
     secretOverrides,
     nodeConfigOverrides,
     testSendOverride: run.test_send_override ?? undefined,
-    resume: { seeds, seedPorts, rerunNodeIds: [...rerun], preResolved: opts.preResolved },
+    resume: { seeds, seedPorts, ownSeeds, rerunNodeIds: [...rerun], preResolved: opts.preResolved },
   });
   processQueue();
   return { ok: true };
@@ -1167,6 +1169,46 @@ async function executeWorkflow(item: QueueItem) {
 
   const vars: Record<string, unknown> = {};
   const nodeOutputs = new Map<string, Record<string, unknown>>();
+  // ── 分開層 ──
+  // ownOutputs: 每個節點「自己產出/改動」的欄位(不含沿路繼承)。攤平的 nodeOutputs 同名後蓋前會丟資訊,
+  // 這份不會——{{節點代號.欄位}} 與 ctx.outputs 都從這裡查(真實踩過:兩次下載都輸出 attachmentPath,
+  // 後者蓋掉前者,下游讀錯檔且完全無警告)。
+  const ownOutputs = new Map<string, Record<string, unknown>>();
+  // fieldWriters: 欄位 → 依執行順序真的寫過它的節點。只記「這次 run 實際執行」的節點(沿用的種子不記,
+  // 因為種子存的是上次的合併值,分不出真正來源,記進來只會讓警告變成噪音)。
+  const fieldWriters = new Map<string, { nodeId: string; label: string }[]>();
+  // 上游祖先集合(往上游走到底)。ctx.outputs 只放祖先的輸出——平行分支的節點執行順序不保證,
+  // 讓節點看得到「不在自己上游」的輸出會引入不確定性。
+  const ancestorCache = new Map<string, Set<string>>();
+  const ancestorsOf = (nodeId: string): Set<string> => {
+    const hit = ancestorCache.get(nodeId);
+    if (hit) return hit;
+    const seen = new Set<string>();
+    const queue = [nodeId];
+    while (queue.length) {
+      const cur = queue.pop()!;
+      for (const e of wf.edges) {
+        if (e.to === cur && !seen.has(e.from)) { seen.add(e.from); queue.push(e.from); }
+      }
+    }
+    ancestorCache.set(nodeId, seen);
+    return seen;
+  };
+  // 節點自己產出的欄位=跟收到的 input 不同的那些。先比參照(展開透傳的欄位參照相同,零成本),
+  // 參照不同再比內容(沙箱回傳經過序列化,參照必不同,但內容一樣就不是這個節點改的)。
+  const diffOwnFields = (input: Record<string, unknown>, output: Record<string, unknown>): Record<string, unknown> => {
+    const own: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(output)) {
+      if (!(k in input)) { own[k] = v; continue; }
+      const prev = input[k];
+      if (prev === v) continue;
+      if (prev !== null && v !== null && typeof prev === "object" && typeof v === "object") {
+        try { if (JSON.stringify(prev) === JSON.stringify(v)) continue; } catch { /* 循環參照等,當作有改 */ }
+      }
+      own[k] = v;
+    }
+    return own;
+  };
   // trigger 參數(相對日期已在觸發時解析)當作 trigger 節點的 input 種子
   nodeOutputs.set("__trigger__", triggerParams);
 
@@ -1287,6 +1329,7 @@ async function executeWorkflow(item: QueueItem) {
       const pr = item.resume.preResolved;
       const merged = { ...(item.resume.seeds[node.id] ?? {}), ...pr.output };
       nodeOutputs.set(node.id, merged);
+      ownOutputs.set(node.id, pr.output);
       if (pr.activePort) nodeActivePorts.set(node.id, [pr.activePort]);
       succeededNodes.add(node.id);
       successCount++;
@@ -1303,6 +1346,8 @@ async function executeWorkflow(item: QueueItem) {
       const seed = item.resume.seeds[node.id];
       if (seed) {
         nodeOutputs.set(node.id, seed);
+        const ownSeed = item.resume.ownSeeds?.[node.id];
+        if (ownSeed) ownOutputs.set(node.id, ownSeed);
         const ports = item.resume.seedPorts[node.id];
         if (ports) nodeActivePorts.set(node.id, ports); // 重放上次選的分支，下游分支邏輯才會一致
         succeededNodes.add(node.id);
@@ -1395,11 +1440,38 @@ async function executeWorkflow(item: QueueItem) {
       .run(JSON.stringify(input), runId, node.id);
     log(runId, node.id, `[${node.label}] 開始`);
 
+    // 分開層視圖:這個節點的所有上游祖先各自產出的欄位
+    const outputsView: Record<string, Record<string, unknown>> = {};
+    for (const aid of ancestorsOf(node.id)) {
+      const own = ownOutputs.get(aid);
+      if (own && Object.keys(own).length) outputsView[aid] = own;
+    }
+    // 消費端撞名警告:這個節點引用的攤平欄位若被多個上游寫過不同來源,明講「目前用的是誰的值」
+    // 並教精準寫法。掃 config 的 {{欄位}} 與 custom-code 的 ctx.input.欄位——只警告真的被引用的,
+    // 不然透傳欄位(sourceEvidence 這類)每步都在改,全部警告等於沒有警告。
+    {
+      const referenced = new Set<string>();
+      for (const v of Object.values(node.config ?? {})) {
+        if (typeof v !== "string") continue;
+        for (const m of v.matchAll(/\{\{\s*([^}.\s]+)\s*\}\}/g)) referenced.add(m[1]);
+        for (const m of v.matchAll(/ctx\.input\.([A-Za-z_$][\w$]*)/g)) referenced.add(m[1]);
+        for (const m of v.matchAll(/ctx\.input\[['"]([^'"]+)['"]\]/g)) referenced.add(m[1]);
+      }
+      for (const key of referenced) {
+        const writers = fieldWriters.get(key) ?? [];
+        if (writers.length > 1) {
+          const last = writers[writers.length - 1];
+          log(runId, node.id, `⚠️ 欄位「${key}」在這之前被 ${writers.length} 個步驟寫過(${writers.map((w) => `「${w.label}」`).join("、")})——這裡拿到的是最後的「${last.label}」的值。若要的是其他步驟的,請用 {{${writers[0].nodeId}.${key}}} 這種「步驟代號.欄位」寫法精準指定`);
+        }
+      }
+    }
+
     const ctx: NodeContext = {
       runId,
       workflowId,
       nodeId: node.id,
       input,
+      outputs: outputsView,
       config: resolveDatesInConfig(withSchemaDefaults({
         ...node.config,
         ...(item.nodeConfigOverrides?.[node.id] ?? {}),
@@ -1442,6 +1514,13 @@ async function executeWorkflow(item: QueueItem) {
       // 就消失、下游拿到的是原封不動的 {{欄位}} 字面文字」的真實根因。改在這個唯一存放輸出的地方統一處理，
       // 不用去每個節點檔案裡各自補 spread、以後新增節點型別也不會漏。
       nodeOutputs.set(node.id, { ...input, ...result.output });
+      const ownFields = diffOwnFields(input, (result.output ?? {}) as Record<string, unknown>);
+      ownOutputs.set(node.id, ownFields);
+      for (const k of Object.keys(ownFields)) {
+        const list = fieldWriters.get(k) ?? [];
+        list.push({ nodeId: node.id, label: node.label });
+        fieldWriters.set(k, list);
+      }
       // custom-code 的空殼在執行期才產碼,產出的碼若含寫出動作是在節點「裡面」被只讀防護攔住的
       // (回傳 success+標記,不走上面的 engine 層略過)——這種也算被攔下,總結一樣要點名。
       if (dryRun && result.output && (result.output as Record<string, unknown>)[DRY_RUN_SKIPPED_WRITES_KEY]) {

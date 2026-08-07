@@ -24,6 +24,8 @@
 
 ### Added
 
+- Added｜節點資料流加入「分開層」：同名欄位可精準指定要哪一步的值｜攤平合併(同名後蓋前)是為了讓 {{欄位}} 引用保持白話,但流程一複雜(例如兩個下載步驟都輸出 attachmentPath)後面的值會靜默蓋掉前面的,下游讀錯資料且全綠無警告(真實踩過)。現在:①每個節點「自己產出」的欄位另外分開保存,範本可寫 {{節點代號.欄位}}、custom-code 可用 ctx.outputs["節點代號"].欄位精準取值,部分執行沿用舊結果時同樣可解析;②執行時引用到「被多個步驟寫過」的攤平欄位,紀錄會警告「目前用的是誰的值」並教精準寫法;③AI 建圖/產碼/修復的規則同步教了這套寫法;④建圖檢查認得新語法不誤報。攤平層行為一個都沒變,既有流程零影響｜`lib/workflow/engine.ts`、`lib/workflow/nodeHelpers.ts`、`lib/workflow/partialRun.ts`、`lib/workflow/customCodeProcessSandbox.ts`、`lib/workflow/graphLint.ts`、`lib/workflow/codegen.ts`、`lib/workflow/builderPrompts.ts`、`lib/workflow/graphRepair.ts`｜驗證：範本解析(攤平優先/精準取值/查無保留字面)、種子含自身輸出、lint 不誤報、沙箱內 ctx.outputs 可用共 6 個新測試;1,198 個測試全綠
+
 - Added｜內建三條零設定範例流程,陌生人兩分鐘看到真實執行｜examples/ 機制早就存在但一直是空的——新裝好的平台首頁只有空清單,「這東西能幹嘛」全靠想像。現在首頁直接有：①把資料整理成報表檔(純本機:自訂步驟→組字串→寫檔→桌面通知) ②AI 幫你分類客戶訊息(表單輸入→AI 限定選項判斷) ③抓天氣資料請 AI 給建議(免金鑰公開 API→整理→AI 產生文字)。全部不需要任何帳密設定｜`examples/*.json`、`README.md`｜驗證：三條全部經由 API 真實執行成功(含 AI 真的回了分類與穿搭建議)
 - Added｜設定頁「進階」新增備份卡：第二備份位置＋換電腦還原說明｜備份每天都在做但使用者完全看不到;金鑰進 Keychain 後「跨機還原要先帶金鑰」這件事必須寫在畫面上。第二備份位置在儲存當下實際試寫一次,外接碟沒插會立刻講,不是半夜備份失敗隔天看 log｜`app/settings/BackupCard.tsx`、`app/api/settings/route.ts`、`lib/dataBackup.ts`｜驗證：tsc、change-guard、部署後截圖
 - Added｜執行紀錄頁預設顯示最近 50 筆｜實測整頁 10.9 個螢幕高(2026-08 審計 #12),翻舊帳才按「顯示更早的」;換篩選會重設避免「看不到符合的舊紀錄」錯覺｜`app/runs/page.tsx`

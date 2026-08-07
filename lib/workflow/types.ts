@@ -139,6 +139,14 @@ export interface NodeContext {
   workflowId: string;
   nodeId: string;
   input: Record<string, unknown>;
+  /**
+   * 「分開層」：每個上游節點**自己產出**的欄位(不含沿路繼承的)，key 是節點代號。
+   * input 是攤平合併(同名後蓋前，可能丟資訊)；同名欄位有多個來源時，用這裡才能精準拿到
+   * 「某一步的值」——範本寫 {{節點代號.欄位}}、custom-code 寫 ctx.outputs["節點代號"].欄位。
+   * (真實踩過:兩次下載都輸出 attachmentPath,後者蓋掉前者,下游讀錯檔。)
+   * optional 是為了讓測試/重播的假 ctx 不用每處都補；引擎正常執行一定會給。
+   */
+  outputs?: Record<string, Record<string, unknown>>;
   config: Record<string, unknown>;
   secrets: Record<string, string>;
   vars: Record<string, unknown>;

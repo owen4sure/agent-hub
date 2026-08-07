@@ -703,6 +703,7 @@ ${schemaHelp}
 【修復原則】
 1. 先判斷真正的原因在哪個節點。若失敗節點要用的某個 {{欄位}} 上游根本沒產出(看上面的實際 input)，就去改「負責產出那個欄位的上游節點」——通常是某個 custom-code：把它的 code 補好，讓它 return 出正確的欄位。
 2. custom-code 節點可以直接改 config.code(一段 async 函式主體，收 ctx、return 物件；用 ...ctx.input 把上游資料一起往下傳；要用套件就 await import("exceljs") 這樣動態載入)。重寫解析類的 code 必須遵守：
+   【同名欄位】ctx.input 是攤平合併、後蓋前——錯誤原因若是「拿到的欄位值來自錯的步驟」(例如兩個下載步驟都輸出 attachmentPath)，正解是改用 ctx.outputs["步驟代號"].欄位(分開層,永遠是那一步自己的值)或範本 {{步驟代號.欄位}}，不要靠改順序或搬節點去賭。
 ${PARSE_RULES}
    若失敗節點的實際 input 已經有 rows/headers/sheetText，代表上游讀取節點已把檔案或試算表讀好了；必須直接解析 ctx.input，禁止改用 ctx.session 開網頁或點分頁。共享瀏覽器可能仍停在 webmail，改成 UI 操作只會逾時。
    重寫「用瀏覽器抓頁面資料」的 code 必須遵守(這些 DOM 事實是對真實失敗頁面實測過的,不是猜的)：

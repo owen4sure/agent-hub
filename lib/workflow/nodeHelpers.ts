@@ -89,6 +89,17 @@ function lookupTemplateValue(key: string, ctx: NodeContext): string | undefined 
   if (key in ctx.input) return stringify(ctx.input[key]);
   if (key in ctx.vars) return stringify(ctx.vars[key]);
   if (key in ctx.secrets) return ctx.secrets[key];
+  // 分開層：{{節點代號.欄位}} 直接取「那一步自己產出」的值。放在最後(攤平鍵優先)是刻意的——
+  // 既有流程的所有引用行為一個都不能變,這條只解析「以前本來就解不開」的 token。
+  // 同名欄位被後面步驟蓋掉時,這是唯一能精準拿到「較早那一步的值」的寫法。
+  if (key.includes(".") && ctx.outputs) {
+    const [head, ...rest] = key.split(".");
+    const own = ctx.outputs[head];
+    if (own && typeof own === "object") {
+      const v = rest.reduce<unknown>((acc, k) => (acc as Record<string, unknown>)?.[k], own);
+      if (v !== undefined) return stringify(v);
+    }
+  }
   return undefined;
 }
 

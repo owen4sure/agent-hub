@@ -77,3 +77,37 @@ test("本機驗證碼 OCR：去掉標點與信心值，只接受 4-6 個英數�
   assert.equal(normalizeCaptchaOcr("說明文字\nAB12\n"), "AB12");
   assert.equal(normalizeCaptchaOcr("X\nTOO-LONG-CODE\n"), "");
 });
+
+// ── 分開層 {{節點代號.欄位}}(2026-08 加入)──
+// 真實踩過的 bug:流程裡兩個下載步驟都輸出 attachmentPath,攤平合併後蓋前,下游讀到錯的檔
+// 且完全無警告。分開層讓下游能精準指定「某一步自己的值」;攤平鍵永遠優先=既有流程行為零變更。
+
+function contextWithOutputs(config: Record<string, unknown>, input: Record<string, unknown>, outputs: Record<string, Record<string, unknown>>) {
+  const logs: string[] = [];
+  const ctx = { config, input, vars: {}, secrets: {}, outputs, log: (line: string) => logs.push(line) } as unknown as NodeContext;
+  return { ctx, logs };
+}
+
+test("分開層：{{節點代號.欄位}} 取得那一步自己的值，即使攤平欄位已被後面步驟蓋掉", () => {
+  const { ctx } = contextWithOutputs(
+    { src: "{{downloadAttach.attachmentPath}}" },
+    { attachmentPath: "/後面那步的.xlsx" },
+    { downloadAttach: { attachmentPath: "/日報.xlsx" }, downloadOther: { attachmentPath: "/後面那步的.xlsx" } },
+  );
+  assert.equal(cfgStr(ctx, "src"), "/日報.xlsx");
+});
+
+test("分開層：攤平鍵優先——input 裡真的有「a.b 開頭那個名字的物件」時行為跟以前一樣", () => {
+  const { ctx } = contextWithOutputs(
+    { v: "{{stats.total}}" },
+    { stats: { total: 42 } },
+    { stats: { total: 999 } }, // 就算撞名,舊的 input 巢狀查找要贏
+  );
+  assert.equal(cfgStr(ctx, "v"), "42");
+});
+
+test("分開層：代號不存在時保留字面 {{}} 並警告，不默默清空", () => {
+  const { ctx, logs } = contextWithOutputs({ v: "{{noSuchNode.field}}" }, {}, {});
+  assert.equal(cfgStr(ctx, "v"), "{{noSuchNode.field}}");
+  assert.equal(logs.length, 1);
+});

@@ -35,6 +35,9 @@ export interface RunSeeds {
   seeds: Record<string, Record<string, unknown>>;
   /** 沿用節點上次選中的分支 port(if/switch)，不重放的話下游分支邏輯全失效 */
   seedPorts: Record<string, string[]>;
+  /** nodeId → 上次記錄的「節點自身輸出」(node_runs.output_json 原樣)。分開層({{節點代號.欄位}}/
+   * ctx.outputs)在部分執行沿用舊結果時也要能解析,不然「只測後段」會讓精準引用整批失效。 */
+  ownSeeds: Record<string, Record<string, unknown>>;
 }
 
 /**
@@ -48,6 +51,7 @@ export function collectRunSeeds(nodes: WorkflowNode[], rows: RunSeedRow[]): RunS
   };
   const seeds: Record<string, Record<string, unknown>> = {};
   const seedPorts: Record<string, string[]> = {};
+  const ownSeeds: Record<string, Record<string, unknown>> = {};
   const nodeTypeById = new Map(nodes.map((n) => [n.id, n.type]));
   for (const r of rows) {
     if (r.status !== "success") continue;
@@ -57,6 +61,7 @@ export function collectRunSeeds(nodes: WorkflowNode[], rows: RunSeedRow[]): RunS
     // 永遠不會發生，卻整條 run 回報成功。沒有種子時這個節點會老實標記跳過，比假裝已完成安全。
     if (output[DRY_RUN_SKIPPED_WRITES_KEY]) continue;
     seeds[r.node_id] = { ...parse(r.input_json), ...output };
+    ownSeeds[r.node_id] = output;
     if (r.active_ports) {
       try { seedPorts[r.node_id] = JSON.parse(r.active_ports) as string[]; } catch { /* 壞資料當沒有 */ }
     } else {
@@ -67,5 +72,5 @@ export function collectRunSeeds(nodes: WorkflowNode[], rows: RunSeedRow[]): RunS
       if (t === "switch" && typeof out.matched === "string") seedPorts[r.node_id] = [out.matched];
     }
   }
-  return { seeds, seedPorts };
+  return { seeds, seedPorts, ownSeeds };
 }

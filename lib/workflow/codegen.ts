@@ -130,7 +130,11 @@ export const ROLLING_WINDOW_ARCHIVE_RULES = `- 【使用者說「這張表每次
   這個模式底層讀寫 Google Sheet 儲存格的技術細節(readCells/writeCells 的正確格式)見上面的 GOOGLE_SHEET_SCRIPT_CELL_RULES，兩者要合併使用。`;
 
 export const CODE_CONTRACT = `這段程式碼是一個 async 函式的「函式主體」(不要寫 function 宣告、不要寫 async 關鍵字)，收到一個參數 ctx：
-- ctx.input：上游節點傳來的資料物件(用展開 {...ctx.input, 新欄位} 把上游資料一起往下傳)
+- ctx.input：上游節點傳來的資料物件(用展開 {...ctx.input, 新欄位} 把上游資料一起往下傳)。
+  【注意】ctx.input 是攤平合併：同名欄位「離這一步最近的上游」會蓋掉更早的(例如流程有兩個下載步驟,
+  兩個都輸出 attachmentPath,這裡只看得到後面那個)。要精準拿「某一步」的值用 ctx.outputs。
+- ctx.outputs：分開層——每個上游步驟「自己產出」的欄位,key 是步驟代號(例如
+  ctx.outputs["downloadAttach"].attachmentPath)。同名欄位有多個來源時**一律用這個**,不要賭 ctx.input 剩下的是哪個。
 - ctx.config：這個節點的設定(含 intent)
 - ctx.secrets：使用者設定的帳密(物件)
 - ctx.log(訊息)：記錄進度，出錯時使用者靠這個判斷
@@ -163,6 +167,7 @@ ${ROLLING_WINDOW_ARCHIVE_RULES}
 // intent、真實 Excel 欄位與舊程式擠出上下文，還讓產碼慢到使用者以為卡死。保留不可退讓的契約即可。
 const REPAIR_CODE_CONTRACT = `你輸出的是 async 函式的函式主體（不要 function 宣告），只能使用 ctx。
 - 保留 ...ctx.input，最後 return 一個物件；不得 return 裸陣列。
+- ctx.input 同名欄位後蓋前；要精準拿「某一步」的值用 ctx.outputs["步驟代號"].欄位(分開層,不會被蓋)。
 - 延續底稿已正確的資料來源與欄位對照；目前需求明確新增／變更的部分才修改。
 - Excel 要用 await import("exceljs")，依真實分頁、標題列與欄位處理；找不到必要資料時 throw 中文錯誤，不可猜值或回傳 0 假裝成功。
 - 不得寫入試算表、寄信、發通知或呼叫 POST；這一步只讀取／計算並輸出資料。

@@ -548,6 +548,20 @@ export function lintVarRefWarnings(
   }
 
   const dateTokenRe = new RegExp(`^(${DATE_TOKENS.join("|")})(-\\d+)?$`);
+  // 分開層引用 {{節點代號.欄位}}:代號是上游祖先節點就合法(欄位內容靜態列舉不了,不誤報也不硬猜)
+  const ancestorMemo = new Map<string, Set<string>>();
+  const ancestorIdsOf = (id: string): Set<string> => {
+    const hit = ancestorMemo.get(id);
+    if (hit) return hit;
+    const seen = new Set<string>();
+    const queue = [id];
+    while (queue.length) {
+      const cur = queue.pop()!;
+      for (const pid of parents.get(cur) ?? []) if (!seen.has(pid)) { seen.add(pid); queue.push(pid); }
+    }
+    ancestorMemo.set(id, seen);
+    return seen;
+  };
   for (const n of nodes) {
     const avail = availableFor(n.id, new Set());
     if (avail === null) continue;
@@ -562,6 +576,7 @@ export function lintVarRefWarnings(
         if (token.startsWith("period.")) continue; // 期間衍生值
         const head = token.split(".")[0];
         if (avail.has(head)) continue; // 上游輸出(含 a.b 巢狀引用的頭)
+        if (token.includes(".") && ancestorIdsOf(n.id).has(head)) continue; // 分開層 {{節點代號.欄位}}
         if (secretKeys.has(head)) continue; // 帳密欄位(執行期由設定頁提供)
         // 帳密/觸發參數是執行期才知道的集合，這裡放行「常見命名」以外一律不猜——
         // 但 llm-decide 的 prompt、template-text 的 template 本來就可能要字面 {{}}，只提醒不擋。

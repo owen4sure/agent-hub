@@ -48,3 +48,14 @@ test("collectRunSeeds：status=success 但帶 DRY_RUN_SKIPPED_WRITES_KEY 標記�
   const { seeds } = collectRunSeeds(nodes, rows);
   assert.equal(seeds["write-step"], undefined);
 });
+
+test("collectRunSeeds：ownSeeds 保留各節點自身輸出(分開層在沿用舊結果時也要能解析 {{節點代號.欄位}})", () => {
+  const nodes = [node("a"), node("b")];
+  const rows = [
+    { node_id: "a", status: "success", input_json: '{"x":1}', output_json: '{"attachmentPath":"/日報.xlsx"}', active_ports: null },
+    { node_id: "b", status: "failed", input_json: null, output_json: '{"z":9}', active_ports: null },
+  ];
+  const { ownSeeds } = collectRunSeeds(nodes, rows);
+  assert.deepEqual(ownSeeds.a, { attachmentPath: "/日報.xlsx" }); // 只有自身輸出,不含 input 合併
+  assert.equal(ownSeeds.b, undefined); // 失敗的一樣不收
+});

@@ -8,6 +8,8 @@
 
 所有外部寫入皆經 `dryRun / preview / confirm`；所有 workflow 寫回皆經 `saveWorkflow`；所有 AI 建圖、直接修改、AI 修復都必須走相同的結構驗證與版本保護。
 
+節點間資料流是「雙層」的：攤平層(`ctx.input`,上游輸出合併、同名後蓋前)為既有預設；分開層(`ctx.outputs` 與範本 `{{節點代號.欄位}}`,每個上游節點自身輸出、永不互蓋)供同名欄位撞名時精準取值。改動 `engine.ts` 的輸出合併、`nodeHelpers.ts` 的範本解析、`partialRun.ts` 的種子萃取、custom-code 沙箱的 ctx 序列化時，兩層都要一起驗證(單元測試分別在 nodeHelpers/partialRun/graphLint/customCode 的測試檔)。
+
 ## 模組責任與連鎖影響
 
 | 區域／檔案群 | 業務責任 | 改動時必查 |
