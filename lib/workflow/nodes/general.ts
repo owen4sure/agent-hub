@@ -14,7 +14,7 @@ export const httpRequestNode: NodeDefinition = {
   label: "打 API",
   description: "對任意網址發 HTTP 請求(GET/POST 等)，取得或送出資料。輸出回應內容給下游。",
   icon: "🌐",
-  outputs: "status(HTTP狀態碼), body(回應文字), json(回應JSON物件)",
+  outputs: "status(HTTP狀態碼), body(回應文字), json(回應JSON物件), items(開自動分頁時所有頁合併的清單), itemCount(合併筆數), pages(抓了幾頁)",
   configSchema: [
     { key: "method", label: "方法", type: "select", options: ["GET", "POST", "PUT", "DELETE", "PATCH"], default: "GET" },
     { key: "url", label: "網址", type: "text", default: "" },
@@ -27,7 +27,34 @@ export const httpRequestNode: NodeDefinition = {
     // 一次就是真的送出資料。所以做成明確、預設關閉的宣告：勾了才會在只讀試跑時真的執行，也才不會被
     // 「只讀取／不要修改」的需求驗收攔下。沒勾 = 一律當成會寫入(既有行為)。
     { key: "readOnly", label: "這個呼叫只是查詢，不會改動對方的資料", type: "boolean", default: "false" },
+    // ── 驗證(2026-08,n8n 差距補齊 P3):OAuth2/Bearer。帳密值放設定頁(secrets),這裡只選方式 ──
+    { key: "authType", label: "驗證方式", type: "select", default: "none", options: ["none=不用", "bearer=Bearer Token", "oauth2-client=OAuth2(用戶端憑證)", "oauth2-refresh=OAuth2(更新權杖)"], advanced: true },
+    { key: "tokenUrl", label: "OAuth2 權杖網址(選 OAuth2 才要填)", type: "text", default: "", allowEmpty: true, advanced: true },
+    { key: "authSecretPrefix", label: "帳密欄位字首(同流程多組 API 憑證時才需要改)", type: "text", default: "http", advanced: true },
+    // ── 自動分頁:一直抓到沒有下一頁,各頁資料合併進 items ──
+    { key: "paginate", label: "自動分頁", type: "select", default: "none", options: ["none=不分頁", "cursor=游標(回應告訴你下一頁)", "page=頁碼遞增"], advanced: true },
+    { key: "itemsField", label: "每頁資料清單在回應哪個欄位(如 data.items)", type: "text", default: "", allowEmpty: true, advanced: true },
+    { key: "cursorField", label: "下一頁游標在回應哪個欄位(如 next_cursor)", type: "text", default: "", allowEmpty: true, advanced: true },
+    { key: "cursorParam", label: "游標要用什麼參數名送出(如 cursor)", type: "text", default: "cursor", advanced: true },
+    { key: "pageParam", label: "頁碼參數名(頁碼模式用)", type: "text", default: "page", advanced: true },
+    { key: "maxPages", label: "最多抓幾頁(保護上限)", type: "number", default: "10", advanced: true },
   ],
+  // 驗證方式決定需要哪些帳密欄位——宣告了設定頁才會長出輸入框(平台鐵則 16)
+  secretFields(config) {
+    const prefix = String(config.authSecretPrefix ?? "http").trim() || "http";
+    const t = String(config.authType ?? "none");
+    if (t === "bearer") return [{ key: `${prefix}BearerToken`, label: `${prefix} API Token`, type: "password" as const }];
+    if (t === "oauth2-client") return [
+      { key: `${prefix}ClientId`, label: `${prefix} Client ID`, type: "text" as const },
+      { key: `${prefix}ClientSecret`, label: `${prefix} Client Secret`, type: "password" as const },
+    ];
+    if (t === "oauth2-refresh") return [
+      { key: `${prefix}ClientId`, label: `${prefix} Client ID`, type: "text" as const },
+      { key: `${prefix}ClientSecret`, label: `${prefix} Client Secret`, type: "password" as const },
+      { key: `${prefix}RefreshToken`, label: `${prefix} Refresh Token`, type: "password" as const },
+    ];
+    return [];
+  },
   retryable: true,
   async execute(ctx) {
     const method = cfgStr(ctx, "method", "GET");
@@ -47,6 +74,39 @@ export const httpRequestNode: NodeDefinition = {
         }
       }
     }
+    // ── 驗證:依 authType 取得權杖並掛上 Authorization(使用者已自填 Authorization 就不動) ──
+    const authType = cfgStr(ctx, "authType", "none");
+    if (authType !== "none" && !Object.keys(headers).some((h) => h.toLowerCase() === "authorization")) {
+      const prefix = cfgStr(ctx, "authSecretPrefix", "http").trim() || "http";
+      const need = (key: string) => {
+        const v = ctx.secrets[key];
+        if (!v) throw new PermanentError(`這個 API 的驗證需要「${key}」——請到設定頁的帳密區塊填入(存一次即可)`);
+        return v;
+      };
+      if (authType === "bearer") {
+        headers = { ...headers, Authorization: `Bearer ${need(`${prefix}BearerToken`)}` };
+      } else {
+        const tokenUrl = cfgStr(ctx, "tokenUrl", "").trim();
+        if (!tokenUrl) throw new PermanentError("選了 OAuth2 卻沒填「權杖網址」(tokenUrl)——通常在對方 API 文件的 OAuth/Token 章節");
+        const form = new URLSearchParams(
+          authType === "oauth2-refresh"
+            ? { grant_type: "refresh_token", refresh_token: need(`${prefix}RefreshToken`), client_id: need(`${prefix}ClientId`), client_secret: need(`${prefix}ClientSecret`) }
+            : { grant_type: "client_credentials", client_id: need(`${prefix}ClientId`), client_secret: need(`${prefix}ClientSecret`) },
+        );
+        const tokenRes = await fetchWithUrlGuard(tokenUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: form.toString(),
+          signal: AbortSignal.any([ctx.cancelSignal, AbortSignal.timeout(30_000)]),
+        });
+        const tokenJson = (await tokenRes.json().catch(() => null)) as { access_token?: string; error?: string; error_description?: string } | null;
+        if (!tokenRes.ok || !tokenJson?.access_token) {
+          throw new PermanentError(`OAuth2 換權杖失敗(HTTP ${tokenRes.status}${tokenJson?.error ? `,${tokenJson.error}${tokenJson.error_description ? ":" + tokenJson.error_description : ""}` : ""})——請確認權杖網址與帳密欄位是否正確`);
+        }
+        headers = { ...headers, Authorization: `Bearer ${tokenJson.access_token}` };
+        ctx.log(`OAuth2 權杖已取得(${authType === "oauth2-refresh" ? "更新權杖" : "用戶端憑證"}模式)`);
+      }
+    }
     const bodyStr = cfgStr(ctx, "body");
     let statusSpec: ReturnType<typeof parseStatusSpec>;
     try { statusSpec = parseStatusSpec(cfgStr(ctx, "successStatus", "200-299")); } catch (error) { throw new PermanentError(error instanceof Error ? error.message : "成功狀態碼格式不正確"); }
@@ -55,59 +115,111 @@ export const httpRequestNode: NodeDefinition = {
     // 加上逾時與大小上限，避免卡死或把巨大回應塞爆記憶體。同時接上 ctx.cancelSignal——
     // 不接的話使用者按「停止執行」對這個節點完全沒作用，要等 30 秒逾時自然到才會真的停下來
     // (這是「按停止不會停」的其中一個根因：這是一個 fetch，跟瀏覽器頁面無關，resetPage() 救不到它)。
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30_000);
-    // 取消可能發生在上一輪重試的退避期間；這時 signal 已經 aborted，單純加 listener 不會補發事件。
-    if (ctx.cancelSignal.aborted) controller.abort();
-    const onCancel = () => controller.abort();
-    ctx.cancelSignal.addEventListener("abort", onCancel, { once: true });
-    let res: Response;
-    try {
-      res = await fetchWithUrlGuard(url, {
-        method,
-        headers,
-        body: method === "GET" || method === "DELETE" || !bodyStr ? undefined : bodyStr,
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-      ctx.cancelSignal.removeEventListener("abort", onCancel);
-    }
-    const MAX = 5 * 1024 * 1024;
-    const reader = res.body?.getReader();
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    let truncated = false;
-    if (reader) {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const remaining = MAX - total;
-        if (value.byteLength > remaining) {
-          if (remaining > 0) chunks.push(value.subarray(0, remaining));
-          truncated = true;
-          await reader.cancel();
-          break;
+    const doOnce = async (reqUrl: string) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30_000);
+      // 取消可能發生在上一輪重試的退避期間；這時 signal 已經 aborted，單純加 listener 不會補發事件。
+      if (ctx.cancelSignal.aborted) controller.abort();
+      const onCancel = () => controller.abort();
+      ctx.cancelSignal.addEventListener("abort", onCancel, { once: true });
+      let res: Response;
+      try {
+        res = await fetchWithUrlGuard(reqUrl, {
+          method,
+          headers,
+          body: method === "GET" || method === "DELETE" || !bodyStr ? undefined : bodyStr,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+        ctx.cancelSignal.removeEventListener("abort", onCancel);
+      }
+      const MAX = 5 * 1024 * 1024;
+      const reader = res.body?.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      let truncated = false;
+      if (reader) {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const remaining = MAX - total;
+          if (value.byteLength > remaining) {
+            if (remaining > 0) chunks.push(value.subarray(0, remaining));
+            truncated = true;
+            await reader.cancel();
+            break;
+          }
+          chunks.push(value);
+          total += value.byteLength;
         }
-        chunks.push(value);
-        total += value.byteLength;
+      }
+      const text = Buffer.concat(chunks).toString("utf-8");
+      if (truncated) ctx.log(`回應超過 5MB，已在讀取時停止，避免塞爆記憶體`);
+      let json: unknown = null;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        // 非 JSON 回應
+      }
+      ctx.log(`${method} ${reqUrl} → ${res.status}`);
+      if (!statusMatches(res.status, statusSpec)) {
+        throw new PermanentError(`${method} ${reqUrl} 回傳 HTTP ${res.status}，不在允許的成功狀態 ${cfgStr(ctx, "successStatus", "200-299")} 內`);
+      }
+      const contractErrors = validateResponseContract(json, responseContract);
+      if (contractErrors.length > 0) throw new PermanentError(`API 回應不符合欄位合約：${contractErrors.slice(0, 8).join("；")}`);
+      return { status: res.status, text, json };
+    };
+
+    const paginate = cfgStr(ctx, "paginate", "none");
+    if (paginate === "none") {
+      const r = await doOnce(url);
+      return { output: { status: r.status, body: r.text, json: r.json, sourceEvidence: urlSourceEvidence(url, { observed: { status: r.status, textChars: r.text.length } }) } };
+    }
+
+    // ── 自動分頁(2026-08):一直抓到沒有下一頁,各頁清單合併進 items。只支援 GET——
+    //    對「寫入型」請求自動重發多次是危險動作,想都不用想直接擋。 ──
+    if (method !== "GET") throw new PermanentError("自動分頁只支援 GET(寫入型請求不能自動重發多次)");
+    const getPath = (obj: unknown, dotted: string): unknown =>
+      dotted.split(".").reduce<unknown>((acc, k) => (acc && typeof acc === "object" ? (acc as Record<string, unknown>)[k] : undefined), obj);
+    const itemsField = cfgStr(ctx, "itemsField", "").trim();
+    const maxPages = Math.max(1, Math.min(50, Number(cfgStr(ctx, "maxPages", "10")) || 10));
+    const withParam = (base: string, key: string, value: string): string => {
+      const u = new URL(base);
+      u.searchParams.set(key, value);
+      return u.toString();
+    };
+    const allItems: unknown[] = [];
+    let pages = 0;
+    let lastStatus = 0;
+    let lastJson: unknown = null;
+    let lastText = "";
+    let nextUrl: string | null = url;
+    let pageNo = 1;
+    while (nextUrl && pages < maxPages) {
+      const r = await doOnce(nextUrl);
+      pages++;
+      lastStatus = r.status; lastJson = r.json; lastText = r.text;
+      const pageItems = itemsField ? getPath(r.json, itemsField) : r.json;
+      if (Array.isArray(pageItems)) allItems.push(...pageItems);
+      else if (pages === 1 && itemsField) throw new PermanentError(`回應的「${itemsField}」不是清單——請確認欄位路徑(收到的頂層欄位:${r.json && typeof r.json === "object" ? Object.keys(r.json as object).slice(0, 10).join("、") : "非 JSON"})`);
+      if (paginate === "cursor") {
+        const cursorField = cfgStr(ctx, "cursorField", "").trim();
+        if (!cursorField) throw new PermanentError("游標分頁要填「下一頁游標在回應哪個欄位」(cursorField)");
+        const cursor = getPath(r.json, cursorField);
+        nextUrl = cursor !== undefined && cursor !== null && String(cursor) !== "" && cursor !== false
+          ? withParam(url, cfgStr(ctx, "cursorParam", "cursor").trim() || "cursor", String(cursor))
+          : null;
+      } else {
+        // 頁碼模式:這一頁拿到空清單就停,否則頁碼+1 繼續
+        nextUrl = Array.isArray(pageItems) && pageItems.length > 0
+          ? withParam(url, cfgStr(ctx, "pageParam", "page").trim() || "page", String(++pageNo))
+          : null;
       }
     }
-    const text = Buffer.concat(chunks).toString("utf-8");
-    if (truncated) ctx.log(`回應超過 5MB，已在讀取時停止，避免撠爆記憶體`);
-    let json: unknown = null;
-    try {
-      json = JSON.parse(text);
-    } catch {
-      // 非 JSON 回應
-    }
-    ctx.log(`${method} ${url} → ${res.status}`);
-    if (!statusMatches(res.status, statusSpec)) {
-      throw new PermanentError(`${method} ${url} 回傳 HTTP ${res.status}，不在允許的成功狀態 ${cfgStr(ctx, "successStatus", "200-299")} 內`);
-    }
-    const contractErrors = validateResponseContract(json, responseContract);
-    if (contractErrors.length > 0) throw new PermanentError(`API 回應不符合欄位合約：${contractErrors.slice(0, 8).join("；")}`);
-    return { output: { status: res.status, body: text, json, sourceEvidence: urlSourceEvidence(url, { observed: { status: res.status, textChars: text.length } }) } };
+    if (nextUrl && pages >= maxPages) ctx.log(`⚠️ 到達分頁保護上限(${maxPages} 頁)仍有下一頁——資料可能不完整;確定要更多就調高「最多抓幾頁」`);
+    ctx.log(`分頁完成:抓了 ${pages} 頁,合併 ${allItems.length} 筆`);
+    return { output: { status: lastStatus, body: lastText, json: lastJson, items: allItems, itemCount: allItems.length, pages, sourceEvidence: urlSourceEvidence(url, { observed: { status: lastStatus, textChars: lastText.length } }) } };
   },
 };
 
