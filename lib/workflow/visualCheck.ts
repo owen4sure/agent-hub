@@ -74,7 +74,10 @@ export async function checkRunVisually(
       nodeId,
       reason: `視覺驗收:${String(parsed.reason ?? "").slice(0, 200) || "成品圖片看起來有問題"}(檔案:${images[0].filename})`,
     };
-  } catch {
+  } catch (err) {
+    // 使用者按了停止 → 一定要往上丟(跟 resultCheck 同一套)。吞掉的話「他按停止」會被翻譯成
+    // 「驗收通過」,一條被中斷的執行會被回報成 ✅ 全綠、甚至可以被設成正式流程。
+    if (signal?.aborted) throw err;
     return pass; // 驗收員自己出事永遠不能扣住流程
   }
 }

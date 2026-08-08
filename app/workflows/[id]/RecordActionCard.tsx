@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { uniquifyProposalIds } from "@/lib/workflow/proposalIds";
 
 /**
  * 「錄一段操作給我看」的完整介面。
@@ -135,12 +136,15 @@ export function RecordActionCard({ workflowId, onClose, onSaved }: {
     setBusy(true); setError("");
     try {
       const wfRes = await fetch(`/api/workflows/${workflowId}`);
-      const wf = (await wfRes.json()) as { nodes: ProposalNode[]; edges: { from: string; to: string }[] };
-      if (!wfRes.ok || !Array.isArray(wf.nodes)) throw new Error("讀不到目前的流程圖");
+      // 這支 API 回的是 { workflow: {...} }，不是流程圖本身——直接讀 .nodes 永遠是 undefined
+      const wf = ((await wfRes.json()) as { workflow?: { nodes: ProposalNode[]; edges: { from: string; to: string }[] } }).workflow;
+      if (!wfRes.ok || !wf || !Array.isArray(wf.nodes)) throw new Error("讀不到目前的流程圖");
+      // 提案的節點代號固定是 rec-1/rec-2…,錄第二次示範會跟第一次撞代號被整包退回,先讓開
+      const { idMap, edges: proposalEdges } = uniquifyProposalIds(wf.nodes.map((n) => n.id), result.proposal);
       const maxY = wf.nodes.reduce((m, n) => Math.max(m, n.position?.y ?? 0), 0);
-      const shifted = result.proposal.nodes.map((n) => ({ ...n, position: { x: n.position.x, y: maxY + 180 } }));
+      const shifted = result.proposal.nodes.map((n) => ({ ...n, id: idMap.get(n.id) ?? n.id, position: { x: n.position.x, y: maxY + 180 } }));
       const trigger = wf.nodes.find((n) => n.type === "trigger");
-      const newEdges = [...wf.edges, ...result.proposal.edges, ...(trigger && shifted[0] ? [{ from: trigger.id, to: shifted[0].id }] : [])];
+      const newEdges = [...wf.edges, ...proposalEdges, ...(trigger && shifted[0] ? [{ from: trigger.id, to: shifted[0].id }] : [])];
       const put = await fetch(`/api/workflows/${workflowId}/build`, {
         method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ nodes: [...wf.nodes, ...shifted], edges: newEdges }),

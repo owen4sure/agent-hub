@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import { z } from "zod";
 import { getNodeDef } from "./registry";
+import { allowedConfigKeys } from "./nodePolicy";
 import { validateConfigTypes, withSchemaDefaults } from "./graphLint";
 import { getWorkflow, saveWorkflow } from "./store";
 import { findRelevantFixes } from "./learnedFixes";
@@ -207,8 +208,8 @@ async function finishEditNode(
   // 執行時讀不到、UI 表單也不顯示，看起來就像「AI 說改了卻沒改」。
   // (configSchema 為空的節點型別如 custom-code，config 由 AI 自由決定，不過濾)
   let newConfig: Record<string, unknown> = { ...node.config, ...parsed.data.config };
-  const allowedKeys = new Set(def.configSchema.map((f) => f.key));
-  if (allowedKeys.size > 0) {
+  const allowedKeys = allowedConfigKeys(def);
+  if (def.configSchema.length > 0) {
     newConfig = Object.fromEntries(Object.entries(newConfig).filter(([k]) => allowedKeys.has(k)));
   }
 

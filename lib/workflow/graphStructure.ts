@@ -1,4 +1,5 @@
 import { getNodeDef } from "./registry";
+import { allowedConfigKeys } from "./nodePolicy";
 import { lintGraph, validateConfigTypes, withSchemaDefaults } from "./graphLint";
 import { autoLayout, separateOverlappingNodes } from "./layout";
 import { getWorkflow, saveWorkflow } from "./store";
@@ -110,7 +111,7 @@ export function planGraphStructureEdits(
     if (!def) { problems.push(`新增節點「${rawNode.id}」的型別「${String(rawNode.type)}」不存在`); continue; }
     if (def.type === "trigger") { problems.push("不能新增第二個觸發起點"); continue; }
     if (!rawNode.config || typeof rawNode.config !== "object" || Array.isArray(rawNode.config)) { problems.push(`新增節點「${rawNode.id}」的 config 必須是物件`); continue; }
-    const allowedConfig = new Set(def.configSchema.map((field) => field.key));
+    const allowedConfig = allowedConfigKeys(def);
     const config = Object.fromEntries(Object.entries(rawNode.config).filter(([key]) => allowedConfig.has(key)));
     const configErrors = validateConfigTypes(rawNode.id, config, def.configSchema);
     if (configErrors.length) { problems.push(...configErrors); continue; }

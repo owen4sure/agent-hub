@@ -3,7 +3,7 @@ import { PermanentError, RetryableError } from "../types";
 import { cfgStr } from "../nodeHelpers";
 import { isPrivateHost, privateUrlsAllowed } from "../../urlGuard";
 import { renderPageText } from "../../renderPage";
-import { firecrawlConfigured, firecrawlScrape } from "../../firecrawl";
+import { firecrawlConfigured, firecrawlScrape, FirecrawlError } from "../../firecrawl";
 import { urlSourceEvidence } from "../runtimeEvidence";
 
 const MAX_BYTES = 3 * 1024 * 1024;
@@ -53,20 +53,33 @@ async function fetchViaFallbacks(
   } catch (err) {
     browserErr = err instanceof Error ? err.message.slice(0, 160) : String(err);
   }
+  // Firecrawl 這一層一定要包起來:它丟出來的錯若直接往外跑,①上面辛苦記下的「試過哪些路」
+  // 就永遠不會被組出來(使用者只看到一句 Firecrawl 錯誤,不知道前兩層也失敗了)②這個節點是
+  // retryable,整條降級鏈會被重跑三次=三次瀏覽器 + 三次付費抓取。
+  let firecrawlErr = "";
+  let firecrawlPermanent = false;
   if (firecrawlConfigured()) {
     ctx.log("內建瀏覽器也失敗,改用你設定的 Firecrawl 服務抓取…");
-    const page = await firecrawlScrape(href, { signal: ctx.cancelSignal });
-    if (page.text) {
-      ctx.log(`Firecrawl 抓到「${page.title || href}」：${page.text.length} 字`);
-      return { pageText: page.text.slice(0, maxChars), pageTitle: page.title, pageHtml: page.html.slice(0, 60_000), finalUrl: page.finalUrl, sourceEvidence: urlSourceEvidence(page.finalUrl, { observed: { status: 200, textChars: page.text.length } }) };
+    try {
+      const page = await firecrawlScrape(href, { signal: ctx.cancelSignal });
+      if (page.text) {
+        ctx.log(`Firecrawl 抓到「${page.title || href}」：${page.text.length} 字`);
+        return { pageText: page.text.slice(0, maxChars), pageTitle: page.title, pageHtml: page.html.slice(0, 60_000), finalUrl: page.finalUrl, sourceEvidence: urlSourceEvidence(page.finalUrl, { observed: { status: 200, textChars: page.text.length } }) };
+      }
+      firecrawlErr = "Firecrawl 也沒抓到任何文字";
+    } catch (err) {
+      if (ctx.cancelSignal.aborted) throw err; // 使用者按停止,不要翻譯成「抓不到」
+      firecrawlErr = err instanceof Error ? err.message.slice(0, 200) : String(err);
+      firecrawlPermanent = err instanceof FirecrawlError && err.permanent;
     }
   }
-  throw new RetryableError(
+  const detail =
     `這個網頁抓不下來(${why.slice(0, 120)})。已試過:輕量抓取→內建瀏覽器(${browserErr})` +
     (firecrawlConfigured()
-      ? "→Firecrawl,全部失敗。可能要登入才看得到,或網站把自動抓取全擋了"
-      : "。若這個網站長期擋自動抓取,可以在「設定 → 進階」串接 Firecrawl(選配的專業抓取服務)再重試;要登入才看得到的頁面請改用瀏覽器登入類節點"),
-  );
+      ? `→Firecrawl(${firecrawlErr}),全部失敗。可能要登入才看得到,或網站把自動抓取全擋了`
+      : "。若這個網站長期擋自動抓取,可以在「設定 → 進階」串接 Firecrawl(選配的專業抓取服務)再重試;要登入才看得到的頁面請改用瀏覽器登入類節點");
+  // 金鑰錯/額度用完 → 重跑一定也是同樣結果,而且每跑一次都要錢:當場停下來,不進重試。
+  throw firecrawlPermanent ? new PermanentError(detail) : new RetryableError(detail);
 }
 
 export const webPageNode: NodeDefinition = {

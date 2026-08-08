@@ -18,7 +18,7 @@ const img = path.join(dir, "成品.png");
 // 1x1 png
 fs.writeFileSync(img, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64"));
 
-saveWorkflow({ id: WF, name: "zz-test 視覺驗收", status: "draft", requiresSecrets: [], nodes: [
+saveWorkflow({ id: WF, name: "zz-test 視覺驗收", status: "draft", builtin: false, defaultModel: "", requiresSecrets: [], nodes: [
   { id: "t", type: "trigger", label: "開始", config: {}, position: { x: 0, y: 0 } },
   { id: "draw", type: "custom-code", label: "畫圖", config: { intent: "畫" }, position: { x: 1, y: 0 } },
 ], edges: [{ from: "t", to: "draw" }] });
@@ -63,4 +63,14 @@ test("模型連不上/回垃圾=放行(加分網不能變單點故障)", async (
 test("沒有圖片型成品=這層沒事做,直接放行", async () => {
   const v = await checkRunVisually(fakeClient(new Error("不該被呼叫")), visionModel, WF, "沒有這個run");
   assert.equal(v.suspicious, false);
+});
+
+test("使用者按停止=往上丟,絕不翻譯成「驗收通過」", async () => {
+  // 吞掉的話，一條被使用者中斷的執行會被回報成 ✅ 全綠、甚至可以被設成正式流程。
+  const ac = new AbortController();
+  ac.abort();
+  await assert.rejects(
+    () => checkRunVisually(fakeClient(new Error("The operation was aborted")), visionModel, WF, RUN, ac.signal),
+    /abort/i,
+  );
 });

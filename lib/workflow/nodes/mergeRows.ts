@@ -24,14 +24,26 @@ export const mergeRowsNode: NodeDefinition = {
   retryable: false,
   async execute(ctx) {
     const srcKey = cfgStr(ctx, "sourceField", "rows").trim() || "rows";
-    // 分開層是這個節點的地基:每個上游「自己的」清單,不吃攤平後蓋前的結果
-    const sources = Object.entries(ctx.outputs ?? {})
-      .filter(([, own]) => Array.isArray(own[srcKey]))
-      .map(([nodeId, own]) => ({ nodeId, rows: own[srcKey] as Record<string, unknown>[] }));
+    // 分開層是這個節點的地基:每個上游「自己的」清單,不吃攤平後蓋前的結果。
+    // 但來源必須「一條直屬分支算一個」——不能拿整個祖先集合(ctx.outputs)去撈,那會把中間步驟
+    // 也算成來源(讀Excel→篩選A/篩選B→合併 會變成三個來源,未篩選的原始清單被一起合進去,全綠)。
+    // 每條分支往上找「最近一個真的產出這份清單」的步驟:分支上有不改清單的步驟也接得起來。
+    const own = ctx.outputs ?? {};
+    const seenSource = new Set<string>();
+    const sources: { nodeId: string; rows: Record<string, unknown>[] }[] = [];
+    for (const chain of ctx.upstreamChains ?? []) {
+      const hit = chain.find((id) => Array.isArray(own[id]?.[srcKey]));
+      if (!hit || seenSource.has(hit)) continue; // 兩條線最後匯到同一個來源=只算一次,不重複計入
+      seenSource.add(hit);
+      sources.push({ nodeId: hit, rows: own[hit][srcKey] as Record<string, unknown>[] });
+    }
     if (sources.length === 0) {
       throw new PermanentError(
-        `所有上游步驟都沒有輸出「${srcKey}」清單——這個節點要接在兩個以上「會輸出資料清單」的步驟後面(讀試算表/篩選資料等)。`,
+        `直接接到這一步的分支都沒有提供「${srcKey}」清單——這個節點要接在兩個以上「會輸出資料清單」的步驟後面(讀試算表/篩選資料等)。`,
       );
+    }
+    if (sources.length === 1) {
+      ctx.log(`⚠️ 只有一條分支提供「${srcKey}」清單(來自「${sources[0].nodeId}」)——合併資料要接兩條以上分支才有意義,請確認另一條線有接上來`);
     }
     const mode = cfgStr(ctx, "mode", "append");
     if (mode === "append") {

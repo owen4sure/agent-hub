@@ -147,6 +147,13 @@ export interface NodeContext {
    * optional 是為了讓測試/重播的假 ctx 不用每處都補；引擎正常執行一定會給。
    */
   outputs?: Record<string, Record<string, unknown>>;
+  /**
+   * 「直屬分支鏈」：每一條**直接接進這個節點**的線各一個陣列，內容是那條線往上游走的節點代號
+   * (自己排第一，再由近到遠)。要分辨「這份資料是哪一條分支給的」只能看這裡——`outputs` 是整個
+   * 祖先集合，分不出直屬分支與中間步驟(真實踩過:合併資料節點把未篩選的原始清單也一起合進去)。
+   * optional 同 outputs：假 ctx 不用補，引擎正常執行一定會給。
+   */
+  upstreamChains?: string[][];
   config: Record<string, unknown>;
   secrets: Record<string, string>;
   vars: Record<string, unknown>;

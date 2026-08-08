@@ -13,6 +13,20 @@ export function firecrawlConfigured(): boolean {
   return Boolean(getFirecrawlConfig().apiKey);
 }
 
+/**
+ * Firecrawl 呼叫失敗。`permanent` 代表「同一份設定再打一次也不會變好」——金鑰錯、額度用完、
+ * 被限流。呼叫端要靠這個旗標決定**不要**重跑整條降級鏈:每重跑一次就是再開一次瀏覽器 + 再打
+ * 一次要付費的抓取,對著一個已經用完的額度連打三次,只是把錢和時間一起燒掉。
+ */
+export class FirecrawlError extends Error {
+  readonly permanent: boolean;
+  constructor(message: string, permanent: boolean) {
+    super(message);
+    this.name = "FirecrawlError";
+    this.permanent = permanent;
+  }
+}
+
 export interface FirecrawlPage {
   text: string;
   title: string;
@@ -37,9 +51,9 @@ export async function firecrawlScrape(url: string, opts: { signal?: AbortSignal 
   } | null;
   if (!res.ok || !json?.success || !json.data) {
     const detail = json?.error ?? `HTTP ${res.status}`;
-    if (res.status === 401 || res.status === 403) throw new Error(`Firecrawl 金鑰無效或沒有權限(${detail})——請到設定頁重新貼一次金鑰`);
-    if (res.status === 402 || res.status === 429) throw new Error(`Firecrawl 額度用完或請求太頻繁(${detail})——免費額度是一次性的,用完要升級方案或改用自架`);
-    throw new Error(`Firecrawl 抓取失敗:${detail}`);
+    if (res.status === 401 || res.status === 403) throw new FirecrawlError(`Firecrawl 金鑰無效或沒有權限(${detail})——請到設定頁重新貼一次金鑰`, true);
+    if (res.status === 402 || res.status === 429) throw new FirecrawlError(`Firecrawl 額度用完或請求太頻繁(${detail})——免費額度是一次性的,用完要升級方案或改用自架`, true);
+    throw new FirecrawlError(`Firecrawl 抓取失敗:${detail}`, false);
   }
   return {
     text: json.data.markdown ?? "",

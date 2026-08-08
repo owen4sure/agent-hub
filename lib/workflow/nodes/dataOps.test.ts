@@ -42,3 +42,35 @@ test("去重:依多欄位判重,留第一筆並回報移除數", async () => {
   assert.equal(r.output.rowCount, 3);
   assert.equal(r.output.removedCount, 1);
 });
+
+test("大於/小於遇到比不了的值:當場報錯,絕不靜默留下 0 筆", async () => {
+  // 「日期 大於 2026-01-01」——比較值不是數字。NaN 的比較永遠是 false，
+  // 舊行為是安安靜靜濾掉全部資料、流程全綠、報表整份空白。
+  await assert.rejects(
+    () => filterRowsNode.execute(ctx({ field: "金額", op: "gt", value: "2026-01-01" }, { rows })),
+    /不是數字|沒辦法比大小/,
+  );
+  // 欄位本身整欄都不是數字(日期字串)
+  const dates = [{ 訂單日期: "2026-01-05" }, { 訂單日期: "2026-02-11" }];
+  await assert.rejects(
+    () => filterRowsNode.execute(ctx({ field: "訂單日期", op: "gt", value: "20260101" }, { rows: dates })),
+    /沒有任何一格是數字/,
+  );
+  // 只有部分是空白/非數字 → 照樣比得下去，空的那筆不符合而已
+  const mixed = [{ 金額: 100 }, { 金額: "" }, { 金額: 50000 }];
+  const r = await filterRowsNode.execute(ctx({ field: "金額", op: "gt", value: "1000" }, { rows: mixed }));
+  assert.equal(r.output.rowCount, 1);
+});
+
+test("排序:空白格一律排最後,而且順序必須是穩定可預測的", async () => {
+  // 舊行為讓空白「跟誰都一樣大」→ 比較器不遞移 → 排出來的順序取決於原始資料順序，
+  // 「排序後取前 N 名」會拿到錯的名單。這裡用同一份資料的兩種排列驗證結果一致。
+  const a = [{ 金額: 100 }, { 金額: "" }, { 金額: 21000 }, { 金額: 7200 }];
+  const b = [{ 金額: 21000 }, { 金額: 7200 }, { 金額: "" }, { 金額: 100 }];
+  const pick = async (rowsIn: Record<string, unknown>[]) =>
+    ((await sortRowsNode.execute(ctx({ field: "金額", direction: "desc" }, { rows: rowsIn }))).output.rows as { 金額: unknown }[]).map((x) => x.金額);
+  assert.deepEqual(await pick(a), [21000, 7200, 100, ""]);
+  assert.deepEqual(await pick(b), [21000, 7200, 100, ""], "換一種輸入順序，結果必須一模一樣");
+  const asc = await sortRowsNode.execute(ctx({ field: "金額", direction: "asc" }, { rows: a }));
+  assert.deepEqual((asc.output.rows as { 金額: unknown }[]).map((x) => x.金額), [100, 7200, 21000, ""], "小到大時空白一樣排最後");
+});

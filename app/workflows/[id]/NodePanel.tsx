@@ -10,6 +10,7 @@ import { AppsScriptSetupSteps } from "./AppsScriptSetupSteps";
 import type { Part } from "@/lib/wfChatStore";
 import { findFieldMistakes, type InsertableField } from "@/lib/workflow/insertableFields";
 import { parseUserFields } from "@/lib/workflow/userStepFields";
+import { POLICY_FIELDS } from "@/lib/workflow/nodePolicy";
 
 /** select 選項支援 "value=顯示文字";只有「=」前後都有內容才切(跟 graphLint 同一套規則,別把 == 切壞) */
 function parseOption(o: string): { value: string; label: string } {
@@ -323,7 +324,12 @@ export function NodePanel({
   // CSS 選擇器、內部系統代號這類欄位(advanced:true)一般使用者看不懂也不用手動改——收進
   // 預設收合的「進階設定」，跟「標題關鍵字」這種一看就懂的欄位分開，見 ParamField.advanced 註解。
   const basicFields = editableFields.filter((f) => !f.advanced);
-  const advancedFields = editableFields.filter((f) => f.advanced);
+  // 失敗策略(重試幾次/失敗也繼續)不屬於任何節點型別的 schema，是引擎層對每一步都適用的保留鍵。
+  // 一定要在這裡長出表單欄位——不然使用者只能手改 JSON，等於這個功能不存在(唯一入口原則)。
+  const advancedFields = [
+    ...editableFields.filter((f) => f.advanced),
+    ...(POLICY_FIELDS as ParamFieldLite[]).filter((p) => !editableFields.some((f) => f.key === p.key)),
+  ];
   // AI 微調後的回報是給使用者確認「有沒有改對」，不是除錯用的 raw config dump。程式碼、內嵌步驟、
   // JSON 與沒有對應表單的內部欄位一律收成白話結論；真正技術細節仍只在後端與 AI 的修復現場使用。
   const friendlyLastDiff = lastDiff

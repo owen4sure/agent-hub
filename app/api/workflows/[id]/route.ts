@@ -6,6 +6,7 @@ import { describeWorkflowModelPlan } from "@/lib/modelPolicy";
 import { listRuns } from "@/lib/workflow/engine";
 import { autorunActive } from "@/lib/workflow/busyLocks";
 import { getNodeDef } from "@/lib/workflow/registry";
+import { allowedConfigKeys, POLICY_FIELDS } from "@/lib/workflow/nodePolicy";
 import { lintGraph, validateConfigTypes, withSchemaDefaults } from "@/lib/workflow/graphLint";
 import type { WorkflowNode, WorkflowEdge } from "@/lib/workflow/types";
 import { separateOverlappingNodes } from "@/lib/workflow/layout";
@@ -266,13 +267,13 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     if (!cur || !target) return NextResponse.json({ error: "找不到要改的節點(可能剛被刪除)" }, { status: 404 });
     const def = getNodeDef(target.type);
     if (!def) return NextResponse.json({ error: `未知節點型別:${target.type}` }, { status: 400 });
-    const schemaKeys = new Set(def.configSchema.map((f) => f.key));
+    const schemaKeys = allowedConfigKeys(def);
     const filtered: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(nodeConfig.config)) {
       if (schemaKeys.has(k) && (typeof v === "string" || typeof v === "number" || typeof v === "boolean")) filtered[k] = v;
     }
     const merged = { ...target.config, ...filtered };
-    const errors = validateConfigTypes(target.id, merged, def.configSchema);
+    const errors = validateConfigTypes(target.id, merged, [...def.configSchema, ...POLICY_FIELDS]);
     if (errors.length > 0) return NextResponse.json({ error: errors.join("\n") }, { status: 400 });
     const applySheetScriptUrlToAll = body.applySheetScriptUrlToAll === true;
     if (body.applySheetScriptUrlToAll !== undefined && typeof body.applySheetScriptUrlToAll !== "boolean") {
@@ -324,9 +325,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
       if (raw.config !== undefined && (!raw.config || typeof raw.config !== "object" || Array.isArray(raw.config))) {
         return NextResponse.json({ error: `新增節點 ${nid} 的 config 必須是物件` }, { status: 400 });
       }
-      const schemaKeys = new Set(def.configSchema.map((field) => field.key));
+      const schemaKeys = allowedConfigKeys(def);
       const config = Object.fromEntries(Object.entries((raw.config ?? {}) as Record<string, unknown>).filter(([key]) => schemaKeys.has(key)));
-      const configErrors = validateConfigTypes(nid, config, def.configSchema);
+      const configErrors = validateConfigTypes(nid, config, [...def.configSchema, ...POLICY_FIELDS]);
       if (configErrors.length > 0) return NextResponse.json({ error: configErrors.join("\n") }, { status: 400 });
       created.push({
         id: nid,

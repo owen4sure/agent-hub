@@ -40,6 +40,33 @@ function toNumber(v: unknown): number {
   return cleaned === "" ? NaN : Number(cleaned);
 }
 
+function isBlank(v: unknown): boolean {
+  return String(v ?? "").trim() === "";
+}
+
+/**
+ * 數字比較前先確認「真的比得了」——比不了就當場報錯,不准靜默回 0 筆。
+ * NaN 的任何比較都是 false,所以「日期欄位 大於 2026-01-01」「金額 大於 一萬」這種設定
+ * 會安安靜靜濾掉全部資料、流程全綠、報表整份空白,而使用者永遠不知道是比較根本沒成立
+ * (這正是平台明令禁止的「全綠但走樣」)。
+ */
+function assertComparable(rows: Record<string, unknown>[], field: string, value: string, opLabel: string) {
+  if (Number.isNaN(toNumber(value))) {
+    throw new PermanentError(
+      `「${opLabel}」要拿數字來比,但你填的比較值是「${value}」——這不是數字,沒辦法比大小。` +
+      `要比日期請改用「等於/包含文字」,或先用步驟把它換算成數字。`,
+    );
+  }
+  const usable = rows.filter((r) => !isBlank(r[field]) && !Number.isNaN(toNumber(r[field])));
+  if (rows.length > 0 && usable.length === 0) {
+    const samples = rows.slice(0, 3).map((r) => `「${String(r[field] ?? "")}」`).join("、");
+    throw new PermanentError(
+      `「${field}」這一欄裡沒有任何一格是數字(前幾筆長這樣:${samples}),沒辦法用「${opLabel}」比大小。` +
+      `如果是日期或帶單位的文字,請改用「等於/包含文字」,或先加一步把它換算成純數字。`,
+    );
+  }
+}
+
 export const filterRowsNode: NodeDefinition = {
   type: "filter-rows",
   category: "data",
@@ -61,6 +88,7 @@ export const filterRowsNode: NodeDefinition = {
     assertField(rows, field);
     const op = cfgStr(ctx, "op", "equals");
     const value = cfgStr(ctx, "value", "");
+    if (op === "gt" || op === "lt") assertComparable(rows, field, value, op === "gt" ? "大於" : "小於");
     const keep = rows.filter((r) => {
       const v = r[field];
       switch (op) {
@@ -97,12 +125,25 @@ export const sortRowsNode: NodeDefinition = {
     if (!field) throw new PermanentError("還沒設定「依哪個欄位排序」");
     assertField(rows, field);
     const dir = cfgStr(ctx, "direction", "desc") === "asc" ? 1 : -1;
-    const numeric = rows.length > 0 && rows.every((r) => !Number.isNaN(toNumber(r[field])) || String(r[field] ?? "").trim() === "");
+    const numeric = rows.length > 0 && rows.every((r) => !Number.isNaN(toNumber(r[field])) || isBlank(r[field]));
+    const blanks = rows.filter((r) => isBlank(r[field])).length;
+    // 空白格一律排最後(不管大到小還是小到大)。**不能讓空白參與數值比較**——NaN 的比較結果是
+    // NaN、`|| 0` 之後變成「跟誰都一樣大」,那是一個不遞移的比較器,JS 的排序在這種比較器下
+    // 產生的順序取決於原始資料順序(真實後果:「排序後取前 5 名」名單是錯的,而且完全看不出來)。
     const sorted = [...rows].sort((a, b) => {
-      if (numeric) return (toNumber(a[field]) - toNumber(b[field])) * dir || 0;
-      return String(a[field] ?? "").localeCompare(String(b[field] ?? ""), "zh-Hant") * dir;
+      const [av, bv] = [a[field], b[field]];
+      const [ab, bb] = [isBlank(av), isBlank(bv)];
+      if (ab || bb) return ab && bb ? 0 : ab ? 1 : -1;
+      if (numeric) {
+        const d = toNumber(av) - toNumber(bv);
+        return d === 0 ? 0 : (d > 0 ? 1 : -1) * dir;
+      }
+      return String(av).localeCompare(String(bv), "zh-Hant") * dir;
     });
-    ctx.log(`依「${field}」${dir === 1 ? "小到大" : "大到小"}排序 ${sorted.length} 筆(${numeric ? "數值" : "文字"}比較)`);
+    ctx.log(
+      `依「${field}」${dir === 1 ? "小到大" : "大到小"}排序 ${sorted.length} 筆(${numeric ? "數值" : "文字"}比較)` +
+      (blanks > 0 ? `,其中 ${blanks} 筆這一欄是空白,一律排在最後面` : ""),
+    );
     return { output: { rows: sorted, rowCount: sorted.length } };
   },
 };

@@ -33,3 +33,22 @@ test("全部失敗的錯誤訊息要誠實列出試過哪些路,沒設 Firecrawl
   assert.match(fn, /已試過/);
   assert.match(fn, /設定 → 進階/);
 });
+
+test("Firecrawl 的錯誤要被接住:誠實的「試過哪些路」不能被它衝掉", () => {
+  const fn = /async function fetchViaFallbacks[\s\S]*?\n}/.exec(source)?.[0] ?? "";
+  const call = /const page = await firecrawlScrape\([\s\S]{0,800}?catch \(err\)/.exec(fn);
+  assert.ok(call, "firecrawlScrape 必須包在 try/catch 裡");
+  assert.match(fn, /firecrawlErr/, "它的錯誤要記下來併進最後那句總結");
+  assert.match(fn, /→Firecrawl\(\$\{firecrawlErr\}\)/, "最後的訊息要含 Firecrawl 這一層的原因");
+});
+
+test("金鑰錯/額度用完=PermanentError,不准重跑整條降級鏈(每跑一次都要錢)", () => {
+  const fn = /async function fetchViaFallbacks[\s\S]*?\n}/.exec(source)?.[0] ?? "";
+  assert.match(fn, /firecrawlPermanent = err instanceof FirecrawlError && err\.permanent/);
+  assert.match(fn, /throw firecrawlPermanent \? new PermanentError\(detail\) : new RetryableError\(detail\)/);
+});
+
+test("使用者按停止時不能被翻譯成「這個網頁抓不下來」", () => {
+  const fn = /async function fetchViaFallbacks[\s\S]*?\n}/.exec(source)?.[0] ?? "";
+  assert.match(fn, /if \(ctx\.cancelSignal\.aborted\) throw err/);
+});

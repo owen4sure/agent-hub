@@ -15,6 +15,7 @@ import { createProposal } from "./fixProposals";
 import { assertRunnableGraph, hasExecutableSteps, withSchemaDefaults } from "./graphLint";
 import { getWorkflow, findWorkflowByRef, deriveRequiresSecrets } from "./store";
 import { getNodeDef } from "./registry";
+import { continueOnFailEnabled } from "./nodePolicy";
 import { dryRunSkipKind, DRY_RUN_SKIPPED_WRITES_KEY } from "./dryRun";
 import { approvedReadOnlyNodeIds } from "./httpReadOnlyApproval";
 import { assertSafetyContract, SafetyContractViolationError } from "./safetyContract";
@@ -1059,12 +1060,15 @@ async function runNodeWithRetry(node: WorkflowNode, ctx: NodeContext, retryable:
   // 每節點重試覆蓋(2026-08,n8n 差距補齊):節點 config 的保留鍵 retryTimes 讓使用者/AI 對
   // 「這一步」調重試次數(1=不重試)。夾在 [1, MAX_ATTEMPTS(3)] 之間——重試不是免費的,盲目
   // 加大只會燒時間(平台哲學:修不好交給修復迴圈,不靠原樣重跑變好)。沒設就照節點定義。
+  // 上限**永遠**是節點自己宣告的那個(def.maxAttempts)，使用者只能往下調、不能往上加：
+  // browser-login 這類節點宣告 maxAttempts:1 是因為它內部已經燒完自己的重試預算，引擎再乘上去
+  // 會讓一次登入變成三次真實登入(帳號可能被鎖)+整條 run 撞死在時間預算上。
+  // 同理 retryable:false 的節點(寄信、寫試算表)不管填幾次都只跑一次——重跑=重複寄信/重複寫入。
+  const ceiling = retryable ? Math.max(1, Math.min(MAX_ATTEMPTS, configuredMaxAttempts ?? MAX_ATTEMPTS)) : 1;
   const perNodeRetry = Number((node.config as Record<string, unknown>).retryTimes);
   const maxAttempts = Number.isFinite(perNodeRetry) && perNodeRetry >= 1
-    ? Math.min(MAX_ATTEMPTS, Math.floor(perNodeRetry))
-    : retryable
-      ? Math.max(1, Math.min(MAX_ATTEMPTS, configuredMaxAttempts ?? MAX_ATTEMPTS))
-      : 1;
+    ? Math.min(ceiling, Math.floor(perNodeRetry))
+    : ceiling;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (attempt > 1) {
       ctx.log(`第 ${attempt} 次重試`);
@@ -1200,6 +1204,24 @@ async function executeWorkflow(item: QueueItem) {
     ancestorCache.set(nodeId, seen);
     return seen;
   };
+  /** 從某個節點往上游走的鏈:自己排第一,再依「離自己多遠」由近到遠(BFS,不是 ancestorsOf 的無序集合)。
+   * 順序有意義——「這條分支的清單」要取鏈上『最近』那個真的產出清單的步驟。 */
+  const chainFrom = (startId: string): string[] => {
+    const order: string[] = [];
+    const seen = new Set<string>([startId]);
+    let frontier = [startId];
+    while (frontier.length) {
+      order.push(...frontier);
+      const next: string[] = [];
+      for (const cur of frontier) {
+        for (const e of wf.edges) {
+          if (e.to === cur && !seen.has(e.from)) { seen.add(e.from); next.push(e.from); }
+        }
+      }
+      frontier = next;
+    }
+    return order;
+  };
   // 節點自己產出的欄位=跟收到的 input 不同的那些。先比參照(展開透傳的欄位參照相同,零成本),
   // 參照不同再比內容(沙箱回傳經過序列化,參照必不同,但內容一樣就不是這個節點改的)。
   const diffOwnFields = (input: Record<string, unknown>, output: Record<string, unknown>): Record<string, unknown> => {
@@ -1271,6 +1293,13 @@ async function executeWorkflow(item: QueueItem) {
   let waiting: { nodeLabel: string; message: string } | null = null;
   /** 這輪被失敗分支接住的錯誤(run 最後算成功，但要老實告訴使用者哪步出過事) */
   const handledFailures: { label: string; error: string }[] = [];
+  /** 設了「失敗也繼續」而被跳過的步驟。**絕不能跟 handledFailures 混在一起**——那句總結寫的是
+   * 「已由你畫好的失敗分支(Plan B)接手處理」,而這裡根本沒有 Plan B,只是這一步沒做、流程照走。
+   * 混用等於跟使用者謊報「有備援跑過了」,是平台明令禁止的「全綠但走樣」。 */
+  const skippedFailures: { label: string; error: string }[] = [];
+  /** 寫入後回讀核對沒過的步驟。核對本身不擋流程(加分網),但「檔案寫出去了、回讀打不開」這件事
+   * 必須浮到 runs.reason 和無人值守通知——埋在逐節點紀錄裡等於沒講(這正是回讀核對要防的場景)。 */
+  const verifyMisses: { label: string; evidence: string }[] = [];
   /** 沒接失敗分支、但因為有不相干的獨立分支而讓迴圈繼續跑的失敗——run 最後仍算失敗，
    * 但總結要列出「還有哪些其他失敗」，不能因為只記第一個而讓使用者漏看其他也失敗的分支。 */
   const unhandledFailures: { label: string; error: string }[] = [];
@@ -1452,6 +1481,11 @@ async function executeWorkflow(item: QueueItem) {
       const own = ownOutputs.get(aid);
       if (own && Object.keys(own).length) outputsView[aid] = own;
     }
+    // 直屬分支鏈:每條「直接接進這個節點」的線,各自往上走出來的節點鏈(最近的排最前面)。
+    // 「合併資料」這種要分辨「這份清單是哪一條分支給的」的節點只能看這個,不能看 outputs——
+    // outputs 是整個祖先集合,拿它當分支來源會把中間步驟的清單也一起撈進來(真實踩過:
+    // 讀Excel→篩選A/篩選B→合併,結果連未篩選的 100 筆原始資料都被合進去,而且全綠)。
+    const upstreamChains = wf.edges.filter((e) => e.to === node.id).map((e) => chainFrom(e.from));
     // 消費端撞名警告:這個節點引用的攤平欄位若被多個上游寫過不同來源,明講「目前用的是誰的值」
     // 並教精準寫法。掃 config 的 {{欄位}} 與 custom-code 的 ctx.input.欄位——只警告真的被引用的,
     // 不然透傳欄位(sourceEvidence 這類)每步都在改,全部警告等於沒有警告。
@@ -1478,6 +1512,7 @@ async function executeWorkflow(item: QueueItem) {
       nodeId: node.id,
       input,
       outputs: outputsView,
+      upstreamChains,
       config: resolveDatesInConfig(withSchemaDefaults({
         ...node.config,
         ...(item.nodeConfigOverrides?.[node.id] ?? {}),
@@ -1528,6 +1563,7 @@ async function executeWorkflow(item: QueueItem) {
           log(runId, node.id, v.ok
             ? `✓ 已核對:${v.evidence}`
             : `⚠️ 寫入後回讀核對沒過:${v.evidence}——寫入動作本身已執行,請人工確認結果`);
+          if (!v.ok) verifyMisses.push({ label: node.label, evidence: v.evidence });
         } catch (verr) {
           log(runId, node.id, `⚠️ 回讀核對執行失敗(${verr instanceof Error ? verr.message.slice(0, 120) : String(verr)})——不影響這一步的結果`);
         }
@@ -1600,15 +1636,14 @@ async function executeWorkflow(item: QueueItem) {
       //    這一步失敗不擋整條流程——錯誤放進 {{error}}/{{errorStep}} 照常往下走(適合「抓不到
       //    就算了,別讓整條報表卡住」的非關鍵步驟)。跟失敗分支(Plan B)的差別:不用另外接線,
       //    下游走的是「正常」出線。節點照樣標紅、總結會點名,不會假裝成功。 ──
-      const cfgContinue = (node.config as Record<string, unknown>).continueOnFail;
-      if (!isCancel && !hasErrorBranch && (cfgContinue === true || cfgContinue === "true")) {
+      if (!isCancel && !hasErrorBranch && continueOnFailEnabled(node.config as Record<string, unknown>)) {
         db.prepare(`UPDATE node_runs SET status='failed', error=?, finished_at=datetime('now') WHERE run_id=? AND node_id=?`)
           .run(errMsg, runId, node.id);
         log(runId, node.id, `[${node.label}] 失敗：${errMsg}`);
         log(runId, node.id, `[${node.label}] ⏭ 這一步設了「失敗也繼續」——錯誤已放進 {{error}}，流程照常往下走`);
         nodeOutputs.set(node.id, { ...input, error: errMsg, errorStep: node.label });
         ownOutputs.set(node.id, { error: errMsg, errorStep: node.label });
-        handledFailures.push({ label: node.label, error: errMsg });
+        skippedFailures.push({ label: node.label, error: errMsg });
         continue;
       }
       if (!isCancel && hasErrorBranch) {
@@ -1770,6 +1805,12 @@ async function executeWorkflow(item: QueueItem) {
       deadBranchNote +
       (handledFailures.length > 0
         ? `🆘 其中「${handledFailures.map((h) => h.label).join("、")}」出了錯，已由你畫好的失敗分支(Plan B)接手處理——請確認備案結果符合預期(原錯誤：${handledFailures[0].error.slice(0, 100)})。`
+        : "") +
+      (skippedFailures.length > 0
+        ? `⏭ 其中「${skippedFailures.map((h) => h.label).join("、")}」出了錯，因為你把${skippedFailures.length > 1 ? "這幾步" : "這一步"}設成「失敗也繼續」，${skippedFailures.length > 1 ? "它們" : "它"}這次沒有做完，後面的步驟是在缺這份資料的情況下跑完的——請確認產出結果沒有因此少東西(原錯誤：${skippedFailures[0].error.slice(0, 100)})。`
+        : "") +
+      (verifyMisses.length > 0
+        ? `⚠️ 「${verifyMisses.map((v) => v.label).join("、")}」寫出去之後回頭核對沒過(${verifyMisses[0].evidence.slice(0, 100)})——動作本身已經執行，但產出的東西可能是壞的，請人工打開確認。`
         : "") +
       (varWarnings > 0 ? `⚠️ 但有 ${varWarnings} 個設定裡的 {{變數}} 沒有對應到資料，可能讓檔名或內容出現 {{...}} 字樣——請檢查產出結果，不對就在對話裡跟 AI 說。` : "");
     db.prepare(`UPDATE runs SET status='success', reason=?, finished_at=datetime('now') WHERE id=?`).run(reason, runId);

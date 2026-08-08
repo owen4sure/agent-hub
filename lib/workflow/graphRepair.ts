@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import OpenAI from "openai";
 import { getNodeDef, listNodeDefsForAI } from "./registry";
+import { allowedConfigKeys } from "./nodePolicy";
 import { validateConfigTypes, withSchemaDefaults } from "./graphLint";
 import { customCodeSyntaxError, isPlaceholderCode, PARSE_RULES, BROWSER_SCRAPE_RULES, GOOGLE_SLIDES_TEXT_UPDATE_RULES, GOOGLE_SLIDES_CHART_REPLACE_RULES, GOOGLE_SHEET_SCRIPT_CELL_RULES, ROLLING_WINDOW_ARCHIVE_RULES } from "./codegen";
 import { getWorkflow, saveWorkflow } from "./store";
@@ -220,8 +221,8 @@ export function applyNodeConfigEdits(
         newStepConfig.code = step.config.code;
       }
       if (stepDef) {
-        const allowed = new Set(stepDef.configSchema.map((f) => f.key));
-        if (allowed.size > 0) newStepConfig = Object.fromEntries(Object.entries(newStepConfig).filter(([k]) => allowed.has(k)));
+        const allowed = allowedConfigKeys(stepDef);
+        if (stepDef.configSchema.length > 0) newStepConfig = Object.fromEntries(Object.entries(newStepConfig).filter(([k]) => allowed.has(k)));
         const errs = validateConfigTypes(`${node.id}[步驟${e.stepIndex}]`, newStepConfig, stepDef.configSchema);
         if (errs.length > 0) {
           skipped.push({ nodeId: node.id, reason: `內嵌步驟設定值型別不正確，未套用：${errs.join("；")}` });
@@ -283,12 +284,15 @@ export function applyNodeConfigEdits(
       continue;
     }
     let newConfig: Record<string, unknown> = restoreEchoedCodeMarkers(node, { ...node.config, ...e.config, ...(replaced?.ok ? { code: replaced.code } : {}) });
-    const allowedKeys = new Set(def.configSchema.map((f) => f.key));
+    const allowedKeys = allowedConfigKeys(def);
     // 「我的步驟」展開出來的節點會帶著使用者自訂的設定欄位，那些 key 不在型別的 schema 裡。
     // 不放行的話，AI 只要改過這個節點一次，使用者親手設定的收件人/網址/關鍵字就會被整批清掉——
     // 而且畫面上只會看到欄位默默消失，沒有任何錯誤訊息。
     for (const field of parseUserFields(node.config.userFields)) allowedKeys.add(field.key);
-    if (allowedKeys.size > 0) {
+    // 判斷「這個型別有沒有 schema」要看 configSchema 本身，不能看 allowedKeys.size——
+    // allowedKeys 現在永遠含引擎層保留鍵(retryTimes/continueOnFail)，用 size 判斷會讓
+    // custom-code 這種「config 由 AI 自由決定」的型別被誤判成有 schema，intent/code 全被濾掉。
+    if (def.configSchema.length > 0) {
       allowedKeys.add("userFields");
       allowedKeys.add("userStepId");
       newConfig = Object.fromEntries(Object.entries(newConfig).filter(([k]) => allowedKeys.has(k)));
