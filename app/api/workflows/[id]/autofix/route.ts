@@ -7,6 +7,7 @@ import { applyGraphStructureEdits } from "@/lib/workflow/graphStructure";
 import { checkOscillation, computeEditFingerprint } from "@/lib/workflow/oscillationGuard";
 import { runWorkflowAndWait, getMissingWorkflowSettings, isUserCancelled, getVarWarnings } from "@/lib/workflow/engine";
 import { checkRunSemantics } from "@/lib/workflow/resultCheck";
+import { checkRunVisually } from "@/lib/workflow/visualCheck";
 import { autorunActive, loopCancelRequested, loopAbortControllers } from "@/lib/workflow/busyLocks";
 import { beginRepairSession, endRepairSession, hasActiveRepairSession } from "@/lib/workflow/repairSessions";
 import { recordFix } from "@/lib/workflow/learnedFixes";
@@ -570,7 +571,9 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
       // 3) 乾淨通過 → 先過語意驗收才記學習庫(與 autorun 同一套防污染原則：「全綠但輸出是語意垃圾」的
       // 修法記進 learned_fixes 會以「優先參考」身分誤導往後每一次修復)。驗收員可疑不擋成功——
       // 流程能跑就交還使用者，把疑點講明白請他親自看一眼。
-      const verdict = await checkRunSemantics(client, model, id, result.runId, loopSignal);
+      // 語意驗收過了再做視覺驗收(#101):有圖片型成品時真的看一眼——兩層都是加分網,失敗一律放行
+      let verdict = await checkRunSemantics(client, model, id, result.runId, loopSignal);
+      if (!verdict.suspicious) verdict = await checkRunVisually(client, model, id, result.runId, loopSignal);
       for (const e of edits) {
         verifiedFixes.set(e.nodeId, { config: e.after, label: e.nodeLabel });
         if (!verdict.suspicious && JSON.stringify(e.before) !== JSON.stringify(e.after)) {

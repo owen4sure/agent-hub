@@ -12,6 +12,7 @@ import { autorunActive, loopCancelRequested, loopAbortControllers } from "@/lib/
 import { beginRepairSession, endRepairSession, hasActiveRepairSession } from "@/lib/workflow/repairSessions";
 import { recordFix } from "@/lib/workflow/learnedFixes";
 import { checkRunSemantics, verifyAgainstExpected } from "@/lib/workflow/resultCheck";
+import { checkRunVisually } from "@/lib/workflow/visualCheck";
 import { resolveParams } from "@/lib/relativeDate";
 import { CancelledError } from "@/lib/aiRetry";
 import { getDb } from "@/lib/db";
@@ -389,7 +390,9 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
         semanticOk = true;
         continue;
       }
-      const verdict = await checkRunSemantics(client, model, id, result.runId, loopSignal);
+      // 語意驗收過了再做視覺驗收(#101):有圖片型成品時真的看一眼——兩層都是加分網,失敗一律放行
+      let verdict = await checkRunSemantics(client, model, id, result.runId, loopSignal);
+      if (!verdict.suspicious) verdict = await checkRunVisually(client, model, id, result.runId, loopSignal);
       if (!verdict.suspicious) {
         semanticOk = true;
         lastSuspicion = null;
