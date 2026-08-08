@@ -15,7 +15,9 @@ import { useCallback, useEffect, useState } from "react";
  */
 
 interface RecordedAction { kind: string; describe: string; value?: string }
+interface ProposalNode { id: string; type: string; label: string; config: Record<string, unknown>; position: { x: number; y: number } }
 interface Result {
+  proposal?: { nodes: ProposalNode[]; edges: { from: string; to: string }[] };
   actionCount: number;
   code: string;
   actions: RecordedAction[];
@@ -121,6 +123,35 @@ export function RecordActionCard({ workflowId, onClose, onSaved }: {
       if (!res.ok) { setError(data.error ?? "存檔失敗"); return; }
       setRejected(data.rejected ?? []);
       if ((data.rejected ?? []).length === 0) onSaved(data.step?.name ?? stepName);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 示範一次變流程(#100):把切好段的步驟串直接加進流程圖。接在「開始」節點後當新支線
+  // (自動接哪裡都可能猜錯,接 trigger 最中性;使用者拖一條線就能改接點,訊息會講清楚)。
+  async function applyAsSteps() {
+    if (!result?.proposal?.nodes.length) return;
+    setBusy(true); setError("");
+    try {
+      const wfRes = await fetch(`/api/workflows/${workflowId}`);
+      const wf = (await wfRes.json()) as { nodes: ProposalNode[]; edges: { from: string; to: string }[] };
+      if (!wfRes.ok || !Array.isArray(wf.nodes)) throw new Error("讀不到目前的流程圖");
+      const maxY = wf.nodes.reduce((m, n) => Math.max(m, n.position?.y ?? 0), 0);
+      const shifted = result.proposal.nodes.map((n) => ({ ...n, position: { x: n.position.x, y: maxY + 180 } }));
+      const trigger = wf.nodes.find((n) => n.type === "trigger");
+      const newEdges = [...wf.edges, ...result.proposal.edges, ...(trigger && shifted[0] ? [{ from: trigger.id, to: shifted[0].id }] : [])];
+      const put = await fetch(`/api/workflows/${workflowId}/build`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nodes: [...wf.nodes, ...shifted], edges: newEdges }),
+      });
+      const putData = (await put.json()) as { error?: string };
+      if (!put.ok) throw new Error(putData.error ?? "加進流程圖失敗");
+      onSaved(`已把示範切成 ${shifted.length} 個步驟加進流程圖(接在「開始」後的新支線,拖線即可改接點)`);
+      onClose();
+      window.location.reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "加進流程圖失敗");
     } finally {
       setBusy(false);
     }
@@ -254,6 +285,11 @@ export function RecordActionCard({ workflowId, onClose, onSaved }: {
               <button onClick={() => void save()} disabled={busy || !stepName.trim()} className="btn btn-primary text-sm flex-1">
                 {busy ? "存檔中…" : "⭐ 存成我的步驟"}
               </button>
+              {Boolean(result?.proposal?.nodes.length) && (
+                <button onClick={() => void applyAsSteps()} disabled={busy} className="btn btn-ghost text-sm" title="把示範自動切成一段一段的步驟(每段帶白話說明),直接加進這條流程">
+                  ➕ 加成流程步驟({result?.proposal?.nodes.length})
+                </button>
+              )}
               <button onClick={() => { setPhase("idle"); setResult(null); }} disabled={busy} className="btn btn-ghost text-sm">重錄一次</button>
             </div>
           </>

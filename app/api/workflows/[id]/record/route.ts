@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getWorkflow } from "@/lib/workflow/store";
 import {
-  cancelRecording, describeRecording, finishRecording, recordingStatus, scrubRecordedSecrets, startRecording, toNodeCode,
+  cancelRecording, describeRecording, finishRecording, recordingStatus, recordingToNodes, scrubRecordedSecrets, startRecording, toNodeCode,
 } from "@/lib/workflow/actionRecorder";
 import { resolveSharedSessionKeyForGraph } from "@/lib/workflow/sharedLoginSession";
 import { isPrivateHost, privateUrlsAllowed } from "@/lib/urlGuard";
@@ -45,6 +45,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         actions: describeRecording(scrubbed.code),
         replacedKeys: scrubbed.replacedKeys,
         clearedPasswordFields: scrubbed.suspiciousFields,
+        // 示範一次變流程(#100):同一份錄製切成帶白話說明的步驟串,前端可一鍵加進流程圖
+        proposal: recordingToNodes(scrubbed.code),
       });
     } catch (err) {
       return NextResponse.json({ error: err instanceof Error ? err.message : "結束錄製失敗" }, { status: 400 });

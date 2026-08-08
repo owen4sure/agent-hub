@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { describeRecording, scrubRecordedSecrets, toNodeCode } from "./actionRecorder";
+import { describeRecording, recordingToNodes, scrubRecordedSecrets, toNodeCode } from "./actionRecorder";
 
 /** Playwright codegen 真實產出的形狀(含它固定的 boilerplate)。 */
 const RAW = `const { chromium } = require('playwright');
@@ -120,4 +120,22 @@ test("共用登入狀態：有共用代號時，錄製要讀寫共用檔案，�
     /const storage = path\.join\(SESSION_DIR, sessionFileNameFor\(workflowId, sharedSessionKey\)\);/,
     "storage 檔名一律由 sessionFileNameFor 推導(單一真相),不能自己拼",
   );
+});
+
+test("示範一次變流程:依「打開網址」切段,每段是帶白話 intent 的步驟並釘上選擇器錨定規則", () => {
+  const code = [
+    "const page = await ctx.session.getPage();",
+    "  await page.goto('https://a.example.com/list');",
+    "  await page.getByRole('button', { name: '下載' }).click();",
+    "  await page.goto('https://b.example.com/upload');",
+    "  await page.fill('input[name=title]', '週報');",
+    "return { ...ctx.input, recordedDone: true };",
+  ].join("\n");
+  const { nodes, edges } = recordingToNodes(code);
+  assert.equal(nodes.length, 2, "兩次 goto = 兩個步驟");
+  assert.match(nodes[0].label, /a\.example\.com/);
+  assert.match(String(nodes[0].config.intent), /打開網址/);
+  assert.match(String(nodes[0].config.intent), /錨定規則/);
+  assert.match(String(nodes[1].config.code), /input\[name=title\]/);
+  assert.deepEqual(edges, [{ from: "rec-1", to: "rec-2" }]);
 });

@@ -269,6 +269,54 @@ export function describeRecording(code: string): RecordedAction[] {
 }
 
 /** 錄製要用的起始網址；沒指定就從使用者的家目錄開一個空白頁(不猜他要去哪)。 */
+/**
+ * 「示範一次變流程」(2026-08,#100):把錄好的一段示範,轉成**一串帶白話說明的流程步驟**,
+ * 而不是一顆看不懂的程式碼節點。切分規則是確定性的:每次「打開網址」就是一個新步驟
+ * (人類示範的自然段落——換頁=換一件事);每個步驟的名稱與 intent 由白話覆述組成,
+ * intent 並釘上「選擇器來自真人示範,重產程式碼必須原樣保留」的錨定規則,
+ * 讓未來 AI 重產也不會把真實選擇器改成猜的。不經過模型,錄到什麼就是什麼。
+ */
+export function recordingToNodes(scrubbedNodeCode: string): {
+  nodes: { id: string; type: string; label: string; config: Record<string, unknown>; position: { x: number; y: number } }[];
+  edges: { from: string; to: string }[];
+} {
+  // 取出動作行(去掉 toNodeCode 的前言與收尾)
+  const bodyLines = scrubbedNodeCode
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("//") && !/^const page = await ctx\.session\.getPage\(\);$/.test(l) && !/^return \{/.test(l));
+  const segments: string[][] = [];
+  for (const line of bodyLines) {
+    const isGoto = /page\.goto\(/.test(line);
+    if (isGoto || segments.length === 0) segments.push([]);
+    segments[segments.length - 1].push(line);
+  }
+  const nodes: { id: string; type: string; label: string; config: Record<string, unknown>; position: { x: number; y: number } }[] = [];
+  const edges: { from: string; to: string }[] = [];
+  segments.forEach((seg, i) => {
+    const acts = describeRecording(seg.join("\n"));
+    const gotoAct = acts.find((a) => a.kind === "goto");
+    const host = gotoAct ? (() => { try { return new URL(gotoAct.describe.replace("打開網址 ", "")).hostname; } catch { return ""; } })() : "";
+    const label = host ? `示範:在 ${host} 操作(${acts.length} 步)` : `示範步驟 ${i + 1}(${acts.length} 步)`;
+    const intent = [
+      "這一段來自使用者親手示範一次的錄製,動作依序是:",
+      ...acts.map((a, j) => `${j + 1}. ${a.describe}`),
+      "【錨定規則】程式碼裡的選擇器全部來自真實頁面(不是猜的);若要重新產生這段程式碼,必須原樣保留這些選擇器與動作順序,只能調整包裝與錯誤處理。",
+    ].join("\n");
+    const code = [
+      "// 這一段是你親手示範一次錄下來的（選擇器來自真實頁面，不是 AI 猜的）。",
+      "// 用流程共用的瀏覽器分頁，所以前面的登入步驟會被沿用。",
+      "const page = await ctx.session.getPage();",
+      ...seg.map((l) => `  ${l}`),
+      "return { ...ctx.input, recordedDone: true };",
+    ].join("\n");
+    const id = `rec-${i + 1}`;
+    nodes.push({ id, type: "custom-code", label, config: { intent, code }, position: { x: 240 * (i + 1), y: 0 } });
+    if (i > 0) edges.push({ from: `rec-${i}`, to: id });
+  });
+  return { nodes, edges };
+}
+
 export function defaultRecordUrl(): string {
   return "about:blank";
 }
