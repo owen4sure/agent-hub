@@ -22,6 +22,7 @@ import { getWorkflowCoverage } from "@/lib/workflow/coverage";
 import { recordEvidencePassport } from "@/lib/workflow/evidencePassport";
 import { hasExecutableSteps } from "@/lib/workflow/graphLint";
 import { appendServerAutorunSummary } from "@/lib/workflow/chatStateStore";
+import { downstreamNodeIds } from "@/lib/workflow/partialRun";
 import type { WorkflowNode } from "@/lib/workflow/types";
 
 // 一輪自動測試最多修幾次(跨節點總和)，以及同一個節點最多連續修幾次就放棄
@@ -451,6 +452,10 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
       // 這不是 bug，AI 沒有東西可修——以前這種失敗被當一般失敗餵給修復迴圈，AI 對著不存在的
       // 問題一輪一輪燒算力(實測踩過)。到這裡=演練能驗的都驗過了，老實收工並講清楚下一步。
       if (outcome?.resolution === "dry-run-boundary") {
+        // 收工前一定要走跟其他出口同一套的還原：這一輪之前若套過「沒被驗證有效」的 AI 改動
+        // (沒讓失敗點前進的那些)，不能因為這次是好結局就把它們默默留在使用者的流程上。
+        // 驗證過有效的修復由 verifiedFixes 保護，不會被這一步回滾。
+        restoreIfEdited();
         steps.push({
           kind: "done",
           title: "已測到只讀演練的可驗證邊界——能驗的步驟全部通過",
@@ -574,17 +579,10 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
     // 登入/找信/下載/計算結果，不再整條從頭重跑——實測每一輪修復都在重新登入信箱、重抓同一封
     // 附件，一輪多花好幾分鐘。動到上游節點或改了流程結構時，上游行為已變、舊輸出不可信，
     // 照舊整條重跑；續跑起不來(run 被清掉等)也安全退回整條重跑，絕不因此漏驗證。
+    // 「起點+它的所有下游」的走訪規則只有 partialRun.ts 那一份(AGENTS.md 鐵則 24)——
+    // 在這裡自己再寫一次 BFS，日後改動連線/分支語意時一定會有一邊漏改而悄悄分歧。
     const graphNow = getWorkflow(id);
-    const downstreamOfFailure = new Set<string>([failedNode]);
-    if (graphNow) {
-      const queue = [failedNode];
-      while (queue.length) {
-        const cur = queue.pop()!;
-        for (const e of graphNow.edges) {
-          if (e.from === cur && !downstreamOfFailure.has(e.to)) { downstreamOfFailure.add(e.to); queue.push(e.to); }
-        }
-      }
-    }
+    const downstreamOfFailure = new Set(graphNow ? downstreamNodeIds(graphNow.edges, failedNode) : [failedNode]);
     const canResume = !structure && graphNow && edits.every((e) => downstreamOfFailure.has(e.nodeId));
     let reran = false;
     if (canResume) {

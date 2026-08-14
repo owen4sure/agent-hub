@@ -189,12 +189,23 @@ export function normalizeCaptchaOcr(raw: string): string {
   return candidates[0] ?? "";
 }
 
+/**
+ * 這台機器到底有沒有本機 OCR 這條路。
+ * 「沒有視覺模型時換一張驗證碼再試」只有在本機 OCR 真的跑得動時才有意義——辨識是機率性的，
+ * 換一張有機會讀對；但在沒有本機 OCR 的平台上，換幾張都不會有人去讀它，那個重試等於空轉
+ * (還會反覆重填帳密)，必須維持「立刻停下來、告訴使用者接視覺模型或手動登入」的原行為。
+ */
+export function localCaptchaOcrAvailable(): boolean {
+  return process.platform === "darwin"
+    && fs.existsSync("/usr/bin/swift")
+    && fs.existsSync(path.join(process.cwd(), "scripts", "captcha-ocr.swift"));
+}
+
 /** macOS 內建 Vision OCR：本機處理、不把驗證碼送出去；其他平台直接回空字串走遠端視覺模型。 */
 async function tryLocalCaptchaOcr(buffer: Buffer, ctx: NodeContext): Promise<string> {
-  if (process.platform !== "darwin") return "";
+  if (!localCaptchaOcrAvailable()) return "";
   const swift = "/usr/bin/swift";
   const script = path.join(process.cwd(), "scripts", "captcha-ocr.swift");
-  if (!fs.existsSync(swift) || !fs.existsSync(script)) return "";
   const dir = path.join(ctx.debugDir, ctx.nodeId);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const imagePath = path.join(dir, `.captcha-ocr-${process.pid}-${randomUUID().slice(0, 8)}.png`);
@@ -362,7 +373,12 @@ export async function solveCaptchaFromLocator(
   // 歷史驗證碼 3/3，但單張仍可能失手)。以前這裡直接讓空模型鏈變成 PermanentError 把整個登入節點
   // 判死——連 OCR 有機會讀對的新驗證碼都不給試。改丟「換一張再試」的可重試錯誤，登入迴圈會
   // 換一張新驗證碼再讓 OCR 讀；連續多張都讀不出來才會用盡額度、帶著接視覺模型的指引收場。
+  // **但這只在本機 OCR 真的跑得動的平台成立**：沒有 OCR 又沒有視覺模型時，換幾張都不會有人讀，
+  // 重試只是反覆重填帳密後給一句指錯方向的「多半是驗證碼判讀錯」——維持原本的立即停止+指路。
   if (plan.chain.length === 0) {
+    if (!localCaptchaOcrAvailable()) {
+      throw new PermanentError(plan.reason ?? "這一步需要辨識圖片驗證碼，但目前沒有可用的視覺模型。可到「設定 → 模型來源」接一顆看得懂圖的模型，或改用流程頁「⋯ → 🔐 手動登入一次」避開驗證碼。");
+    }
     throw new Error(`本機文字辨識沒讀出這一張驗證碼，需要換一張驗證碼再試。若每一張都讀不出來：${plan.reason ?? "可到「設定 → 模型來源」接一顆看得懂圖的模型，或改用「⋯ → 🔐 手動登入一次」。"}`);
   }
 

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dryRunSkipKind, DRYRUN_WRITE_TYPES } from "./dryRun";
+import { dryRunSkipKind, dryRunBoundaryProviders, DRYRUN_WRITE_TYPES } from "./dryRun";
 import type { WorkflowNode } from "./types";
 
 function node(type: string, config: Record<string, unknown> = {}): WorkflowNode {
@@ -120,4 +120,47 @@ test("只讀驗證:讀取/計算型節點一律照跑(這些就是要驗證的�
   for (const t of ["excel-process", "pdf-read", "read-image", "google-sheet-read", "template-text", "set-variable", "if-condition", "unzip"]) {
     assert.equal(dryRunSkipKind(node(t), true), null, `${t} 應照常執行`);
   }
+});
+
+// ── 只讀演練的「可驗證邊界」判定 ──
+// 這條性質判錯的代價是把**真的 bug** 回報成「能驗的步驟全部通過」(修復迴圈就此收手)，
+// 所以誤判方向只允許往「當成一般失敗、照樣去修」倒，不允許往「謊報通過」倒。
+function boundary(failError: string, nodes: WorkflowNode[], withheld: string[], ancestors?: string[]) {
+  return dryRunBoundaryProviders({
+    failError,
+    ancestorIds: ancestors ?? nodes.map((n) => n.id),
+    withheldWriteIds: new Set(withheld),
+    nodes,
+    declaredOutputsOf: (n) => (n.type === "google-slides-create" ? "presentationId、presentationUrl" : ""),
+  }).map((n) => n.id);
+}
+
+const deckNode: WorkflowNode = {
+  id: "prez", type: "custom-code", label: "找最新簡報並準備可編輯版本", position: { x: 0, y: 0 },
+  config: { intent: "輸出:presentationId、presentationUrl(組成簡報網址)、isTemp", code: "" },
+};
+const notifyNode: WorkflowNode = {
+  id: "notify", type: "telegram-notify", label: "開跑通知", position: { x: 0, y: 0 }, config: { message: "開始了" },
+};
+
+test("演練邊界:缺的欄位確實由被攔下的上游產生 → 認定為邊界(不是流程壞掉)", () => {
+  assert.deepEqual(boundary('看不懂這個簡報網址/ID:「{{presentationUrl}}」', [deckNode], ["prez"]), ["prez"]);
+  // 「{{步驟代號.欄位}}」這種寫法也要認得(比對尾段欄位名)
+  assert.deepEqual(boundary('拿不到「{{prez.presentationId}}」', [deckNode], ["prez"]), ["prez"]);
+  // 節點型別自己宣告的 outputs 也算數(不是只有 custom-code 的 intent)
+  const created: WorkflowNode = { id: "mk", type: "google-slides-create", label: "建立簡報", position: { x: 0, y: 0 }, config: {} };
+  assert.deepEqual(boundary("缺 {{presentationId}}", [created], ["mk"]), ["mk"]);
+});
+
+test("演練邊界:上游只是剛好有被攔的通知步驟、缺的欄位跟它無關 → 不算邊界(要照常交給修復)", () => {
+  // 真實會踩到的誤判情境:前段一個通知被攔,後段某個 custom-code 沒算出 fileType(真的是 bug)。
+  // 舊判準「上游有任何被攔步驟 + 訊息含 {{」兩條都成立,會把這個真 bug 說成「能驗的全部通過」。
+  assert.deepEqual(boundary("分類欄位拿到字面 {{fileType}}", [notifyNode], ["notify"]), []);
+});
+
+test("演練邊界:沒有沒解析到的變數,或那個上游沒有被攔 → 都不算邊界", () => {
+  assert.deepEqual(boundary("找不到指定的分頁「每週彙總」", [deckNode], ["prez"]), []);
+  assert.deepEqual(boundary("缺 {{presentationUrl}}", [deckNode], []), []);
+  // 被攔的節點不在這個失敗節點的上游祖先裡,也不能算
+  assert.deepEqual(boundary("缺 {{presentationUrl}}", [deckNode], ["prez"], []), []);
 });

@@ -73,6 +73,32 @@ export const googleSlidesCopyPageNode: NodeDefinition = {
 
     ctx.log(`準備把來源簡報的「${sourceSlideTitle}」頁複製過來，取代目標簡報的「${targetSlideTitle}」頁`);
 
+    // 舊部署沒有這個動作(它是後來才加進腳本範本的)——先問一次腳本的能力清單，這是無副作用的查詢。
+    // 少了這道檢查，早就部署過換圖腳本的使用者只會拿到腳本回的「不認得的動作: copySlideByTitle」，
+    // 完全看不出要做什麼(這個節點又是 retryable:false，錯誤就這樣停在畫面上)。
+    // 跟試算表寫入節點的版本檢查同一套思路(見 googleSheet.ts 的 probeSheetScript)。
+    try {
+      const capRes = await fetch(scriptUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, action: "capabilities" }),
+        signal: ctx.cancelSignal,
+        redirect: "follow",
+      });
+      const cap = JSON.parse(await capRes.text()) as { actions?: unknown };
+      const actions = Array.isArray(cap.actions) ? cap.actions : [];
+      if (!actions.includes("copySlideByTitle")) {
+        throw new PermanentError(
+          "你目前部署的簡報腳本還是舊版，沒有「複製頁面」這個能力。請到流程頁「⚙ 這條流程的設定」→「換掉簡報上的圖片」重新部署一次"
+          + "(有連結 Google 帳號的話按「🔄 更新腳本到最新版」即可，網址不會變；手動部署則要在 Apps Script 用「管理部署作業 → 編輯 → 新版本」，只按儲存不會生效)。",
+        );
+      }
+    } catch (err) {
+      if (err instanceof PermanentError) throw err;
+      // 能力查詢本身失敗(網路抖動/回應不是 JSON)不該擋住主要動作——真的有問題下面的複製請求會報得更具體。
+      ctx.log(`(略過腳本版本預檢：${err instanceof Error ? err.message : String(err)})`);
+    }
+
     // 安全試跑：不送出複製請求。這一步會真的改到使用者拿去開會的簡報，
     // 「只測試不改資料」的承諾必須是「根本沒送出」。
     if (ctx.dryRun) {

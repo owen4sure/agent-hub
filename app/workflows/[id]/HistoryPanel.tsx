@@ -565,7 +565,11 @@ export function HistoryPanel({
               </div>
               {failed && (
                 <div className="flex items-center gap-1.5">
-                  {r.resolution === "ai-fixable" ? (
+                  {/* 只讀演練停在「可驗證邊界」不是故障、也不需要人處理——標成需人工處理會跟對話裡的
+                      ✅ 說法互相矛盾，使用者只會更困惑(所以這個值要獨立一支，不能落進 else)。 */}
+                  {r.resolution === "dry-run-boundary" ? (
+                    <span className="badge">🔒 演練可驗證範圍已跑完</span>
+                  ) : r.resolution === "ai-fixable" ? (
                     <span className="badge badge-accent">🤖 AI 可修</span>
                   ) : (
                     <span className="badge badge-amber">🙋 需人工處理</span>

@@ -83,20 +83,12 @@ export function deleteWorkflowChatState(id: string): void {
 }
 
 /**
- * 建圖(/build)完成時，把 AI 回覆補寫進伺服器端的對話備份。
- *
- * 為什麼需要：建圖是綁在瀏覽器分頁上的一個長 POST(動輒好幾分鐘)，使用者中途重新整理或關掉分頁，
- * 伺服器端其實會把整個建圖跑完，但回應沒有地方落地——結果直接蒸發，使用者重開頁面只會被告知
- * 「請再送一次」，等於同一份算力要花兩次(實測踩過)。這裡讓完成的結果永遠有一份在伺服器上，
- * 搭配前端 recoverChatRuntime 的「建圖進行中→等它完成→撈回結果」即可無縫接回。
- *
- * 只在「最後一則是使用者訊息」時補寫：發起建圖的分頁若還活著，它稍後會用更完整的版本
- * (含設定卡等)PUT 覆蓋這份，內容等價不衝突；分頁已經死了，這份就是唯一的結果來源。
- */
-/**
  * 「測到會跑」(autorun)結束時發起的分頁已經關閉的話，把步驟摘要補寫進伺服器端對話備份——
  * 結果本身都在執行紀錄裡，但少了對話裡的交代，使用者重開頁面會以為自動測試無聲失蹤(實測踩過)。
  * 只在呼叫端確認 client 已斷線時呼叫，不會跟活著的分頁自己寫的摘要重複。
+ *
+ * 跟下面的 appendServerBuildOutcome 不同，這裡**不要求**「最後一則是使用者訊息」：自動測試是
+ * 使用者按按鈕觸發的，最後一則往往是系統訊息或 AI 回覆，套那條規則會讓摘要永遠寫不進去。
  */
 export function appendServerAutorunSummary(id: string, payload: { ok?: boolean; steps?: { title?: string; detail?: string }[] }): void {
   const current = getWorkflowChatState(id);
@@ -114,6 +106,17 @@ export function appendServerAutorunSummary(id: string, payload: { ok?: boolean; 
   } catch { /* 超量等異常時放棄補寫；執行紀錄仍在 */ }
 }
 
+/**
+ * 建圖(/build)完成時，把 AI 回覆補寫進伺服器端的對話備份。
+ *
+ * 為什麼需要：建圖是綁在瀏覽器分頁上的一個長 POST(動輒好幾分鐘)，使用者中途重新整理或關掉分頁，
+ * 伺服器端其實會把整個建圖跑完，但回應沒有地方落地——結果直接蒸發，使用者重開頁面只會被告知
+ * 「請再送一次」，等於同一份算力要花兩次(實測踩過)。這裡讓完成的結果永遠有一份在伺服器上，
+ * 搭配前端 recoverChatRuntime 的「建圖進行中→等它完成→撈回結果」即可無縫接回。
+ *
+ * 只在「最後一則是使用者訊息」時補寫：發起建圖的分頁若還活著，它稍後會用更完整的版本
+ * (含設定卡等)PUT 覆蓋這份，內容等價不衝突；分頁已經死了，這份就是唯一的結果來源。
+ */
 export function appendServerBuildOutcome(id: string, message: string, pendingGraph: unknown | null): void {
   if (typeof message !== "string" || !message.trim()) return;
   const current = getWorkflowChatState(id);

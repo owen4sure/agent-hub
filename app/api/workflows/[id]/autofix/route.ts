@@ -273,6 +273,22 @@ async function runAutofixLoop(req: Request, id: string, wf: NonNullable<ReturnTy
   // 過去還會把明確的「路徑是空」送進整圖修復，等模型一分鐘回一個無效方案後再重跑，
   // 是最純粹的浪費。只在失敗節點真的引用那個空欄位、錯誤也明示輸入為空時才立即停；
   // 上游算錯日期／選錯檔名等仍會照既有規則讓 AI 先修一次。
+  // 只讀演練的「可驗證邊界」不是故障：這一步拿不到資料，是因為上游會寫入的步驟被安全攔下了，
+  // 正式執行時它們會真的跑。引擎已經在 run 上判定好(resolution)，這裡直接照它收工——
+  // 不然使用者從節點面板按「讓 AI 修」還是會讓修復迴圈對著一個不存在的問題想上好幾輪
+  // (autorun 那條路已經處理，這條路以前沒有，是同一個問題的另一個入口)。
+  const boundaryRun = lastFailedRunId
+    ? (db.prepare(`SELECT resolution, reason FROM runs WHERE id=?`).get(lastFailedRunId) as { resolution: string | null; reason: string | null } | undefined)
+    : undefined;
+  if (boundaryRun?.resolution === "dry-run-boundary") {
+    return NextResponse.json({
+      ok: false,
+      needsHuman: true,
+      code: "DRY_RUN_BOUNDARY",
+      error: `${boundaryRun.reason ?? "這一步的資料要由上游會寫入的步驟產生，只讀演練把那些步驟安全攔下了。"}\n\n沒有東西需要修，所以這次沒有讓 AI 改動任何節點。要驗證這一段，請用「▶ 執行」完整執行。`,
+    });
+  }
+
   const initialFailureInput = lastFailedRunId ? getNodeInput(lastFailedRunId, nodeId) : null;
   const missingRunInputs = missingTriggerInputsForFailure(failedNode, wf.triggerParams, initialFailureInput, lastError);
   if (missingRunInputs.length > 0) {

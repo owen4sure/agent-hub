@@ -83,6 +83,52 @@ export function customCodeIsUnsafeForDryRun(config: Record<string, unknown>): bo
   return false;
 }
 
+/**
+ * 只讀演練的「可驗證邊界」判定：這次失敗是不是「上游寫入步驟被安全攔下，所以這一步拿不到資料」？
+ *
+ * 抽成純函式跟 dryRunSkipKind 同一個理由——它是一條安全性質，必須能單獨測：判錯的代價是
+ * **把真的 bug 回報成「能驗的全部通過」**，正是這個專案最不能犯的「全綠不等於做對了」。
+ *
+ * 判準刻意嚴格：不只問「上游有沒有任何被攔的步驟」(那樣一條流程只要前段有個通知被攔，後段任何
+ * 真 bug 都會被誤判成邊界)，而是要求**失敗訊息裡沒解析到的那個欄位，真的可能由某個被攔下的
+ * 上游產生**——用該節點自己宣告的輸出(節點型別的 outputs、custom-code 的 intent/程式碼)比對。
+ * 判斷不出來就回空陣列(fail closed)，讓它照一般失敗走修復；寧可多修一次，也不要謊報通過。
+ */
+export function dryRunBoundaryProviders(input: {
+  /** 引擎記錄的失敗訊息原文 */
+  failError: string;
+  /** 失敗節點的所有上游祖先 id */
+  ancestorIds: Iterable<string>;
+  /** 這次執行被只讀模式攔下的寫入節點 id */
+  withheldWriteIds: ReadonlySet<string>;
+  nodes: readonly WorkflowNode[];
+  /** 這個節點型別宣告的輸出欄位說明(引擎傳 registry 的 outputs，避免這裡反向依賴 registry) */
+  declaredOutputsOf: (node: WorkflowNode) => string;
+}): WorkflowNode[] {
+  const names = [...input.failError.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)]
+    .flatMap((match) => {
+      const name = match[1].trim();
+      // {{步驟代號.欄位}} 這種引用要連尾段欄位名一起比對
+      return name.includes(".") ? [name, name.slice(name.lastIndexOf(".") + 1)] : [name];
+    })
+    .filter(Boolean);
+  if (names.length === 0) return [];
+  const byId = new Map(input.nodes.map((n) => [n.id, n]));
+  const providers: WorkflowNode[] = [];
+  for (const id of input.ancestorIds) {
+    if (!input.withheldWriteIds.has(id)) continue;
+    const node = byId.get(id);
+    if (!node) continue;
+    const declares = [
+      input.declaredOutputsOf(node),
+      String((node.config as Record<string, unknown> | undefined)?.intent ?? ""),
+      String((node.config as Record<string, unknown> | undefined)?.code ?? ""),
+    ].join("\n");
+    if (names.some((name) => declares.includes(name))) providers.push(node);
+  }
+  return providers;
+}
+
 export interface DryRunSkipOptions {
   /** 這條流程裡「已經被**使用者**確認為唯讀」的 http-request 節點 id(見 httpReadOnlyApproval.ts)。
    * dryRun 是純函式、碰不到 DB，由呼叫端(engine/preview)查好傳進來。沒傳 = 一律未確認 = 照樣攔住。

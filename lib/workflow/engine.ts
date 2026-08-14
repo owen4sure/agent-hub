@@ -16,7 +16,7 @@ import { assertRunnableGraph, hasExecutableSteps, withSchemaDefaults } from "./g
 import { getWorkflow, findWorkflowByRef, deriveRequiresSecrets } from "./store";
 import { getNodeDef } from "./registry";
 import { continueOnFailEnabled } from "./nodePolicy";
-import { dryRunSkipKind, DRY_RUN_SKIPPED_WRITES_KEY } from "./dryRun";
+import { dryRunSkipKind, dryRunBoundaryProviders, DRY_RUN_SKIPPED_WRITES_KEY } from "./dryRun";
 import { approvedReadOnlyNodeIds } from "./httpReadOnlyApproval";
 import { assertSafetyContract, SafetyContractViolationError } from "./safetyContract";
 import { markPendingNodeRunsSkipped } from "./runState";
@@ -1734,17 +1734,26 @@ async function executeWorkflow(item: QueueItem) {
     // 不會產生自己的輸出，下游引用 {{它的欄位}} 必然拿到字面樣板而失敗。這不是流程壞掉——
     // 正式執行時上游會真的跑、下游自然有資料。以前這種失敗被當成可修 bug 餵給修復迴圈，
     // AI 對著一個不存在的問題反覆燒算力、使用者看到的是「一直修不好」。
-    // 判準要兩個條件同時成立，缺一不可：①失敗節點的上游祖先裡有被攔下的寫入步驟
-    // ②失敗訊息帶著沒解析的 {{樣板}}(=缺的是資料，不是設定錯)。只有條件①的失敗
-    // (例如上游被攔、但這步是自己搜尋條件寫錯)仍照原分類走修復。
-    const dryRunChain = dryRun && failedNode
-      && failError.includes("{{")
-      && [...ancestorsOf(failedNode)].some((id) => withheldWriteIds.has(id));
-    if (dryRunChain) {
-      const blockedAncestors = [...ancestorsOf(failedNode!)]
-        .filter((id) => withheldWriteIds.has(id))
-        .map((id) => wf.nodes.find((n) => n.id === id)?.label ?? id);
-      reason = `這一步需要的資料要由上游「${blockedAncestors.join("」「")}」產生，但那幾步是寫入/操作外部系統的動作，只讀演練把它們安全攔下了，所以這一步拿不到資料——這不是流程壞掉，不需要修理。演練能驗證的範圍到這裡為止；後面的步驟要等正式執行(或按「▶ 執行」完整執行)才會真的跑。`;
+    // 判準要三個條件同時成立，缺一不可：①這是只讀演練 ②失敗訊息帶著沒解析的 {{樣板}}
+    // ③**那個缺的欄位真的可能由某個被攔下的上游產生**。
+    //
+    // 第③條是關鍵，不能只問「上游有沒有任何被攔的步驟」——一條流程只要前段有個通知步驟被攔，
+    // 後段任何「上游算錯欄位」的真 bug 都會被誤判成邊界、被回報成「能驗的全部通過」，那正是
+    // 這個專案最不能犯的「全綠不等於做對了」。判斷「可能由誰產生」用該節點自己宣告的輸出
+    // (節點型別的 outputs、custom-code 的 intent/程式碼)有沒有提到這個欄位名；判斷不出來就
+    // fail closed(當一般失敗、照常交給修復迴圈)，寧可多修一次，也不要把真 bug 說成通過。
+    // 判定本體是純函式(dryRun.ts 的 dryRunBoundaryProviders)，那裡有單獨的測試守著這條安全性質。
+    const blockedProviders = failedNode && dryRun
+      ? dryRunBoundaryProviders({
+        failError,
+        ancestorIds: ancestorsOf(failedNode),
+        withheldWriteIds,
+        nodes: wf.nodes,
+        declaredOutputsOf: (node) => getNodeDef(node.type)?.outputs ?? "",
+      })
+      : [];
+    if (blockedProviders.length > 0) {
+      reason = `這一步需要的資料要由上游「${blockedProviders.map((n) => n.label).join("」「")}」產生，但那幾步是寫入/操作外部系統的動作，只讀演練把它們安全攔下了，所以這一步拿不到資料——這不是流程壞掉，不需要修理。演練能驗證的範圍到這裡為止；後面的步驟要等正式執行(或按「▶ 執行」完整執行)才會真的跑。`;
       resolution = "dry-run-boundary";
       transient = false;
     }

@@ -88,6 +88,9 @@ export interface NodeRun {
   /** 只有 status==="failed" 才會有值——這個節點自己的 classifyFailure 結果，不是整條 run 的。
    * 使用者自己接了「出錯時」備援分支時，整條 run 會回報 success，但這個節點本身仍是真的失敗；
    * 要不要主動指引一定要看這裡，不能只看 run 層級的 resolution/failed_node(那時會是 null)。 */
+  // 注意：這是**節點層**的分類，只會是這兩個值(classifyFailure 的輸出)。
+  // run 層(RunRecord.resolution)另外還有一個 "dry-run-boundary"——那是引擎對整條 run 的判定，
+  // 不是單一節點的錯誤分類，兩者不要混用。
   resolution?: "ai-fixable" | "needs-human";
   category?: string;
 }

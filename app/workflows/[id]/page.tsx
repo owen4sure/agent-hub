@@ -2869,16 +2869,24 @@ export default function WorkflowPage() {
                       <button type="button" className="btn text-xs" style={{ background: "var(--red)", color: "#fff" }} onClick={() => stopAllChatWork(id)}>⏹ 停止</button>
                     )}
                     {activeExecution.status === "failed" && (
-                      <>
-                        {activeExecution.resolution === "needs-human" ? (
-                          <p className="text-xs muted leading-relaxed">這一步缺少只有你手上才有的資料或授權；先依上方提示補好再試，AI 不會假裝能替你猜出來。</p>
-                        ) : (
-                          <button type="button" className="btn btn-primary text-xs" onClick={() => startAutoTest(id, undefined, { source: "chat" })}>🛠 讓 AI 安全修復並測試</button>
-                        )}
-                        <button type="button" className="btn btn-ghost text-xs" onClick={() => retryChatExecution(id)}>
-                          {activeExecution.mode === "preview" ? "以只讀模式從失敗處再試" : "從失敗處再試"}
-                        </button>
-                      </>
+                      activeExecution.resolution === "dry-run-boundary" ? (
+                        // 演練的可驗證邊界不是故障：沒有東西可修，給「讓 AI 修」只會讓他按下去空轉。
+                        // 下一步是完整執行(會真的寫入)，所以按鈕也不能是「再試一次演練」——再試還是停在同一個地方。
+                        <p className="text-xs muted leading-relaxed">
+                          能在不寫入的前提下驗證的步驟都通過了。後面的步驟要真的寫入才驗得到——確認上面的結果沒問題後，按上方「▶ 執行」完整執行。
+                        </p>
+                      ) : (
+                        <>
+                          {activeExecution.resolution === "needs-human" ? (
+                            <p className="text-xs muted leading-relaxed">這一步缺少只有你手上才有的資料或授權；先依上方提示補好再試，AI 不會假裝能替你猜出來。</p>
+                          ) : (
+                            <button type="button" className="btn btn-primary text-xs" onClick={() => startAutoTest(id, undefined, { source: "chat" })}>🛠 讓 AI 安全修復並測試</button>
+                          )}
+                          <button type="button" className="btn btn-ghost text-xs" onClick={() => retryChatExecution(id)}>
+                            {activeExecution.mode === "preview" ? "以只讀模式從失敗處再試" : "從失敗處再試"}
+                          </button>
+                        </>
+                      )
                     )}
                   </div>
                 </div>

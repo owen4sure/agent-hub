@@ -732,6 +732,9 @@ export function NodePanel({
           // 「缺 Apps Script 網址」「報表名稱/日期不對」這些同樣是 AI 猜不出來的問題，卻還留一顆
           // 「讓 AI 修」等使用者白等一輪注定失敗的嘗試，跟「缺東西就直接問、AI 能修才修」的原則不符。
           const isNeedsHuman = failureResolution === "needs-human";
+          // 只讀演練的可驗證邊界：這一步是因為上游寫入被安全攔下才拿不到資料，不是壞掉。
+          // 給「讓 AI 修」等於請他按一顆注定空轉的按鈕(修復迴圈會對著不存在的問題想三輪)。
+          const isDryRunBoundary = failureResolution === "dry-run-boundary";
           // classifyFailure 的 reason 是「原始錯誤｜具體指引」的格式，後半段已經講清楚下一步要做什麼
           const guidance = failureReason?.includes("｜") ? failureReason.split("｜").slice(1).join("｜") : null;
           return (
@@ -761,6 +764,10 @@ export function NodePanel({
               )}
               {credNamed ? (
                 <p className="text-xs faint">(這種缺帳密的問題 AI 修不了——填好上面的欄位就能重試，不用按修復。)</p>
+              ) : isDryRunBoundary ? (
+                <p className="text-xs" style={{ color: "var(--amber)" }}>
+                  🔒 這一步的資料要由上游「會真的寫入/操作外部系統」的步驟產生，只讀演練把那些步驟安全攔下了，所以這裡拿不到資料——不是流程壞掉，按「讓 AI 修」沒有東西可修。要驗證這一段請用上方「▶ 執行」完整執行。
+                </p>
               ) : isNeedsHuman ? (
                 <p className="text-xs" style={{ color: "var(--amber)" }}>
                   ⚠️ 這不是 AI 猜得出來的問題{guidance ? `：${guidance}` : "，需要你確認後再重跑，按「讓 AI 修」也不會有用。"}
