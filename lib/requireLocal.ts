@@ -32,8 +32,10 @@ function cookieValue(req: Request, name: string): string | null {
 export function denyIfNotLocal(req: Request): NextResponse | null {
   const presented = req.headers.get(LOCAL_TOKEN_HEADER) ?? cookieValue(req, LOCAL_TOKEN_COOKIE);
   if (localTokenMatches(presented)) return null;
+  // 網址從請求的 Host 組出來，不寫死 3000——實際跑在別的 port 時，寫死的指路是錯的。
+  const host = req.headers.get("host") || "127.0.0.1:3000";
   return NextResponse.json({
-    error: "缺少本機存取權杖：請從瀏覽器開 http://127.0.0.1:3000 操作。"
+    error: `缺少本機存取權杖：請從瀏覽器開 http://${host} 操作。`
       + `如果你是用腳本或 curl 呼叫，把 data/local-token 的內容放進 ${LOCAL_TOKEN_HEADER} header。`,
   }, { status: 401 });
 }

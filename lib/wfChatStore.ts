@@ -91,8 +91,13 @@ async function applyPendingGraphFromChat(id: string, history: ChatMsg[], announc
   // 間隙讓卡片偶發消失；GET 分支只保留給舊版/外部呼叫端的相容備援。
   const slidesKeys = new Set(["googleOAuthClientId", "googleOAuthClientSecret", "googleOAuthRefreshToken"]);
   const usesSlides = graph.nodes.some((node) => node.type === "google-slides-refresh" || node.type === "google-slides-create");
+  // 「換圖腳本的驗證碼」也不能進這張必填卡(實測踩過的雞生蛋)：值是「換掉簡報圖片」設定流程的
+  // 產物(自動部署會自己產生並存好)，新使用者此刻不可能有——放進必填卡會讓其他填得出來的欄位
+  // 一起卡死存不了。它的設定入口由畫布上方的準備檢查橫幅「去設定換簡報圖片」負責。
+  const usesSlidesImage = graph.nodes.some((node) => node.type === "google-slides-replace-image");
   const missing = Array.isArray(data.missingSecrets)
-    ? data.missingSecrets.filter((field) => !usesSlides || !slidesKeys.has(field.key))
+    ? data.missingSecrets.filter((field) =>
+      (!usesSlides || !slidesKeys.has(field.key)) && (!usesSlidesImage || field.key !== "slidesImageScriptToken"))
     : null;
   if (missing?.length && !get(id).pendingInput) {
     promptForMissingSecrets(

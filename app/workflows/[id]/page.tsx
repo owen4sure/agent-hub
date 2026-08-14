@@ -47,6 +47,9 @@ import { nodeSummary } from "@/lib/workflow/nodeSummary";
 import { plainChatMessage, plainLanguage, userWordsToPreserve } from "@/lib/workflow/plainLanguage";
 import { latestLiveRunDetail, type PublicRunLog } from "@/lib/workflow/liveProgress";
 import { directGoogleSlidesRefreshUrls } from "@/lib/workflow/directGoogleLinks";
+
+// 一則訊息最多實際打開幾個網址(逐個有進度顯示、可隨時停止)。理由見使用處註解。
+const URL_READ_CAP = 8;
 import { RunForm } from "./RunForm";
 import { ChatInputCard } from "./ChatInputCard";
 import { SlidesOAuthSetupCard } from "./SlidesOAuthSetupCard";
@@ -1687,8 +1690,11 @@ export default function WorkflowPage() {
     // 演練中驗證 OAuth/簡報/圖表；一般「讀 Google Sheet 內容」仍照舊真的讀取。
     const directGoogleUrls = directGoogleSlidesRefreshUrls(text, allUrls);
     const readableUrls = allUrls.filter((url) => !directGoogleUrls.includes(url));
-    const urls = readableUrls.slice(0, 3);
-    const omittedUrls = readableUrls.slice(3);
+    // 上限 8：AI 常常一次就跟使用者要 4~5 個連結，使用者照做卻被「只讀前 3 個、剩下請重貼」打回，
+    // 等於把系統的等待成本轉嫁成使用者的重工(實測踩過)。讀取本來就有逐個進度顯示+隨時可停，
+    // 所以放寬到 8；超過 8 視為整批貼上的異常量，才請使用者分批。
+    const urls = readableUrls.slice(0, URL_READ_CAP);
+    const omittedUrls = readableUrls.slice(URL_READ_CAP);
     if (directGoogleUrls.length) {
       parts.push({
         kind: "file",
@@ -1743,9 +1749,9 @@ export default function WorkflowPage() {
         parts.push({
           kind: "file",
           name: "尚未讀取的網址",
-          content: `為避免一次等待過久，這則訊息只實際讀取前 3 個一般網址；以下 ${omittedUrls.length} 個還沒有打開，AI 不可以假裝已驗證：\n${omittedUrls.join("\n")}\n請分成下一則訊息再傳，我會接續同一份流程。`,
+          content: `為避免一次等待過久，這則訊息只實際讀取前 ${URL_READ_CAP} 個一般網址；以下 ${omittedUrls.length} 個還沒有打開，AI 不可以假裝已驗證：\n${omittedUrls.join("\n")}\n請分成下一則訊息再傳，我會接續同一份流程。`,
         });
-        flashToast(`這則有 ${readableUrls.length} 個需要讀取的網址；已讀前 3 個，其餘請下一則再傳`);
+        flashToast(`這則有 ${readableUrls.length} 個需要讀取的網址；已讀前 ${URL_READ_CAP} 個，其餘請下一則再傳`);
       }
       // 不再靜默吞掉失敗：AI 和使用者都要知道這次其實沒有讀到網頁內容，避免模型只看網址後假裝驗證過。
       if (controller.signal.aborted) {
@@ -2800,7 +2806,7 @@ export default function WorkflowPage() {
                       ) : p.kind === "image" ? (
                         <p key={j} className="text-xs faint break-all">🖼 {p.name ?? "圖片"}（送出時會重新載入）</p>
                       ) : p.kind === "sheet-script" ? (
-                        <SheetScriptCard key={j} nodeLabels={p.nodeLabels} />
+                        <SheetScriptCard key={j} nodeLabels={p.nodeLabels} workflowId={id} />
                       ) : p.kind === "slides-oauth-setup" ? (
                         <SlidesOAuthSetupCard key={j} nodeLabels={p.nodeLabels} />
                       ) : (

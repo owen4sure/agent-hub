@@ -83,6 +83,31 @@ export function deleteWorkflowChatState(id: string): void {
 }
 
 /**
+ * 建圖(/build)完成時，把 AI 回覆補寫進伺服器端的對話備份。
+ *
+ * 為什麼需要：建圖是綁在瀏覽器分頁上的一個長 POST(動輒好幾分鐘)，使用者中途重新整理或關掉分頁，
+ * 伺服器端其實會把整個建圖跑完，但回應沒有地方落地——結果直接蒸發，使用者重開頁面只會被告知
+ * 「請再送一次」，等於同一份算力要花兩次(實測踩過)。這裡讓完成的結果永遠有一份在伺服器上，
+ * 搭配前端 recoverChatRuntime 的「建圖進行中→等它完成→撈回結果」即可無縫接回。
+ *
+ * 只在「最後一則是使用者訊息」時補寫：發起建圖的分頁若還活著，它稍後會用更完整的版本
+ * (含設定卡等)PUT 覆蓋這份，內容等價不衝突；分頁已經死了，這份就是唯一的結果來源。
+ */
+export function appendServerBuildOutcome(id: string, message: string, pendingGraph: unknown | null): void {
+  if (typeof message !== "string" || !message.trim()) return;
+  const current = getWorkflowChatState(id);
+  // 沒有任何底稿代表 client 從未同步過對話(理論上送訊息時一定 PUT 過)；缺底稿時硬造一份
+  // 只有 AI 回覆、沒有使用者問句的對話反而誤導，所以放棄補寫。
+  if (!current || current.chat.length === 0) return;
+  const last = current.chat[current.chat.length - 1] as { role?: unknown } | null;
+  if (!last || typeof last !== "object" || (last as { role?: unknown }).role !== "user") return;
+  const chat = [...current.chat, { role: "assistant", parts: [{ kind: "text", text: message }] }];
+  try {
+    saveWorkflowChatState(id, { ...current, chat, pendingGraph: pendingGraph ?? current.pendingGraph ?? null });
+  } catch { /* 超過大小上限等異常就放棄補寫；不能影響主回應 */ }
+}
+
+/**
  * 已儲存的對話仍指著的附件不能因為剛好超過一般快取期限而失效。這裡只讀取聊天訊息裡的 assetId，
  * 不依賴瀏覽器 localStorage（使用者換瀏覽器／重整後它不可靠）。附件庫用這份集合決定哪些原檔要保留。
  */

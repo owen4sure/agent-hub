@@ -694,7 +694,7 @@ async function aiRepairGraphInner(
         .join("\n")}`
     : "";
 
-  const mainText = `你是自動化流程的修復專家。使用者用白話描述需求、由 AI 建了下面這整條流程，現在其中一步執行失敗了。請找出「真正的原因」並修好——原因常常不在報錯的那一步，而在它上游某個沒把資料準備好的節點。
+  const mainText = `你是自動化流程的修復專家。使用者用白話描述需求、由 AI 建了下面這整條流程，現在其中一步執行失敗了。請找出「真正的原因」並修好——原因常常不在報錯的那一步，而在它上游某個沒把資料準備好的節點。所有給使用者看的文字(message、reason)一律用繁體中文(台灣用語)，不准輸出簡體中文。
 
 ${describeGraph(wf.nodes, wf.edges, failedNodeId)}
 

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import { DATA_DIR, getDb } from "@/lib/db";
-import { getGlobalSettings, getSharedSecrets } from "@/lib/settingsStore";
+import { getSharedSecrets } from "@/lib/settingsStore";
+import { listUsableModels } from "@/lib/modelPolicy";
 import { listWorkflowFileIssues, listWorkflows } from "@/lib/workflow/store";
 import { lintGraph } from "@/lib/workflow/graphLint";
 import { getComponentHealth } from "@/lib/systemHealth";
@@ -25,7 +26,9 @@ export async function GET() {
     const components = getComponentHealth();
     const requiredComponents = ["engine", "scheduler", "folderWatcher", "mailWatcher", "telegramPoller", "backup"];
     const failedComponents = requiredComponents.filter((name) => !components[name]?.ok);
-    const { apiKey } = getGlobalSettings();
+    // 「AI 連上了沒」不能只看 gateway 金鑰——零設定的人走 Claude Code、也有人只接自己的地端模型。
+    // 只看金鑰會對這兩種人誤報「不能建立或修正流程」，把根本不需要金鑰的新使用者推去設定頁(實測踩過)。
+    const usableTextModels = await listUsableModels("text");
     const stat = fs.statSync(DATA_DIR);
     const permissionsPrivate = process.platform === "win32" || (stat.mode & 0o077) === 0;
     // missingSecretKeys 以前只是「算出來附在回應裡給人看」，卻沒有真的影響 ok 這個總結欄位——
@@ -40,7 +43,7 @@ export async function GET() {
       invalidWorkflows: invalid,
       workflowFileIssues,
       missingSecretKeys,
-      modelApiConfigured: Boolean(apiKey),
+      modelApiConfigured: usableTextModels.length > 0,
       dataPermissionsPrivate: permissionsPrivate,
       latestBackup: latestDataBackup(),
     }, { headers: { "Cache-Control": "no-store" } });

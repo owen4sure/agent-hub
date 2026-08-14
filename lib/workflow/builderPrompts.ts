@@ -464,9 +464,17 @@ const MAIL_RECIPE = `【寄信：兩個節點，別選錯，也別把運算塞�
 - 版型留在寄信節點、數字放上游：body 寫成「各位好，\\n\\n以下是 {{periodLabel}} 的成績：\\n{{channelTable}}」
   這種樣子——招呼語和段落順序使用者自己看得懂也改得動，不用碰程式碼。`;
 
+/**
+ * 回覆語言鐵則：接在兩份系統提示的開頭。
+ * 實測踩過：底層模型(Claude Code/gateway 模型都可能)在長對話裡自己切成簡體中文回覆，
+ * 使用者(台灣上班族)看到整段簡體當場出戲、還得先回一句「請用繁體」才能繼續。
+ * 語言是產品門面，不能靠模型自律，所以放在提示最前面明定。
+ */
+export const REPLY_LANGUAGE_RULE = "回覆一律使用繁體中文(台灣用語)，不准輸出簡體中文；使用者用其他語言提問時，跟隨使用者的語言。";
+
 export function systemPrompt(currentGraph: string, rc?: RuntimeContext, triggerParams?: ParamField[], graph?: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }, inheritedContext?: string, confirmedRules?: { text: string; confirmedAt: string }[]): string {
   const defs = listNodeDefsForAI();
-  return `你是一個自動化流程(workflow)建構助理。使用者只會用白話描述需求，不懂程式。你的工作是把需求變成一張「節點圖」。${inheritedContextSection(inheritedContext, confirmedRules)}
+  return `你是一個自動化流程(workflow)建構助理。使用者只會用白話描述需求，不懂程式。你的工作是把需求變成一張「節點圖」。${REPLY_LANGUAGE_RULE}${inheritedContextSection(inheritedContext, confirmedRules)}
 ${prefsSection()}
 
 可用的節點型別(只能用這些；真的都不適合才用 custom-code)：
@@ -507,6 +515,7 @@ ${runtimeSection(rc)}
 【最重要的規則：搞不懂的先問，但「你自己能決定的」不要拿去煩使用者】
 - 只問「你真的無從得知、猜錯會做壞」的事:要登入哪個系統(使用者完全沒講是哪個平台/網址時)？
   哪一封信/哪一筆才算對(下面有專門一條講何時才問)？業務規則到底是什麼？——這種才「先一次問一組具體問題」,這一輪只回問題、不要出圖。
+  **「一次」是真的一次：把這條需求裡所有你確定要問的問題，同一輪全部列完(編號列點)，不要這輪問兩題、下輪再想到三題**——每一輪反問使用者都要多等好幾分鐘，分批問等於把等待時間乘上輪數(實測：同一條需求被分成三輪反問，使用者多等了快十分鐘)。只有「必須先看到前一題的答案/連結內容，才知道要不要問下一題」的問題才允許留到下一輪。
 - **「帳號密碼從哪來」永遠不要用來當成聊天裡的問題問使用者**——這是你自己該判斷、自動接對機制的事，不是使用者要回答的問題：
   · 這個系統是 Google/Microsoft 這類會擋自動化登入的平台 → 直接假設會話已經用「手動登入一次」登入過(見下面熱門服務配方區的專門規則)，不要問密碼、也不要設計自動輸入帳密的步驟。
   · 是一般網站/內部系統(webmail、內部後台等) → 用 browser-login 節點,帳密欄位會自動變成使用者可以填的安全欄位(設定頁+對話裡都會出現輸入卡)，你完全不用知道值、也不用問使用者「密碼在哪」——這是系統自動處理的，你只要選對節點、把要不要用哪一種登入機制決定好就好。
@@ -702,7 +711,7 @@ export function existingGraphEditSystemPrompt(
     const params = def.configSchema.map((field) => `${field.key}:${field.type}${field.options?.length ? `(${field.options.map((option) => option.split("=")[0]).join("/")})` : ""}`).join(", ");
     return `- ${def.type}（${def.label}）${params ? `：${params}` : ""}${def.outputs ? `；輸出 ${def.outputs}` : ""}`;
   }).join("\n");
-  return `你是 Agent Hub 的「既有流程修改」助手。使用者只用白話說需求；你要直接修改下面這張既有圖，不要重畫整張流程、不准叫使用者去找節點或設定頁。${inheritedContextSection(inheritedContext, confirmedRules)}
+  return `你是 Agent Hub 的「既有流程修改」助手。使用者只用白話說需求；你要直接修改下面這張既有圖，不要重畫整張流程、不准叫使用者去找節點或設定頁。${REPLY_LANGUAGE_RULE}${inheritedContextSection(inheritedContext, confirmedRules)}
 
 【目前圖】
 ${currentGraph}

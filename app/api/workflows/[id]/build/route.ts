@@ -26,7 +26,7 @@ import { DEFAULT_MODEL } from "@/lib/models";
 import { getNodeDef } from "@/lib/workflow/registry";
 import { userWordsToPreserve, plainLanguage, shortFieldLabel, humanizeTemplates } from "@/lib/workflow/plainLanguage";
 import { appliedTextForCoverage, findCoverageGaps, coverageWarning } from "@/lib/workflow/editCoverage";
-import { extractAppsScriptExecUrl, putSheetUrlIntoAllWriteNodes } from "@/lib/sheetWriteUrlMigration";
+import { extractAppsScriptExecUrl, putSheetUrlIntoAllWriteNodes, putSheetUrlIntoMatchingWriteNodes } from "@/lib/sheetWriteUrlMigration";
 import { probeSheetScript } from "@/lib/workflow/nodes/googleSheet";
 import { sheetWriteNodesNeedingSetup } from "@/lib/googleSheetScriptTemplate";
 import { slidesRefreshNodesNeedingOAuthSetup } from "@/lib/googleSlidesApi";
@@ -34,11 +34,41 @@ import { applyGraphStructureEdits, hasStructureChanges } from "@/lib/workflow/gr
 import { tryApplySimpleChatStructure } from "@/lib/workflow/simpleChatStructure";
 import { shouldAutoInspectRuntime } from "@/lib/workflow/runtimeInspectionIntent";
 import { hasActiveRepairSession } from "@/lib/workflow/repairSessions";
+import { appendServerBuildOutcome } from "@/lib/workflow/chatStateStore";
 
 const isRepairActive = (workflowId: string) => autorunActive.has(workflowId) || hasActiveRepairSession(workflowId);
 
 // 提出建圖(可能回問題、回可套用的圖、或直接改好現有節點)
-export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+//
+// 這層薄包裝解決「建圖不耐重整」(實測踩過)：建圖是綁在分頁上的長 POST，使用者中途重整/關頁，
+// 伺服器端其實會把建圖跑完，但回應沒有地方落地、結果直接蒸發，重開頁面還被提示「請再送一次」。
+// 這裡在回應送出前，把結果補寫一份到伺服器端 chat-state(只在 client 還沒寫入回覆時才補，
+// 見 appendServerBuildOutcome 的防重複規則)；前端 recoverChatRuntime 重開頁面時就撈得回來。
+export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const response = await handleBuild(req, ctx);
+  try {
+    const { id } = await ctx.params;
+    const payload = await response.clone().json() as {
+      phase?: string; message?: string;
+      nodes?: unknown; edges?: unknown; triggerParams?: unknown; schedule?: unknown; autoWebhook?: unknown; onFailureWorkflow?: unknown;
+    };
+    if (typeof payload?.message === "string" && payload.message.trim()) {
+      const pendingGraph = payload.phase === "ready" && Array.isArray(payload.nodes) && Array.isArray(payload.edges)
+        ? {
+          nodes: payload.nodes, edges: payload.edges, message: payload.message,
+          ...(payload.triggerParams !== undefined ? { triggerParams: payload.triggerParams } : {}),
+          ...(payload.schedule !== undefined ? { schedule: payload.schedule } : {}),
+          ...(payload.autoWebhook !== undefined ? { autoWebhook: payload.autoWebhook } : {}),
+          ...(payload.onFailureWorkflow !== undefined ? { onFailureWorkflow: payload.onFailureWorkflow } : {}),
+        }
+        : null;
+      appendServerBuildOutcome(id, payload.message, pendingGraph);
+    }
+  } catch { /* 補寫是加分機制，任何失敗都不能影響主回應 */ }
+  return response;
+}
+
+async function handleBuild(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const diagnosticId = randomUUID().slice(0, 8);
   const startedAt = Date.now();
   const { id } = await params;
@@ -259,7 +289,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       if (isRepairActive(id)) {
         return NextResponse.json({ phase: "clarify", message: "這條流程的自動測試／修復正在執行，等它停下後再貼一次網址，避免兩邊同時改設定。" });
       }
-      let probed: { spreadsheetName?: string };
+      let probed: { spreadsheetName?: string; sheetNames?: string[] };
       try {
         probed = await probeSheetScript(pastedSheetScriptUrl, req.signal);
       } catch (error) {
@@ -270,9 +300,20 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       }
       const latest = getWorkflow(id);
       if (!latest) return NextResponse.json({ error: "找不到這個流程" }, { status: 404 });
-      const applied = putSheetUrlIntoAllWriteNodes(latest, pastedSheetScriptUrl);
+      // 同一條流程可能要寫兩份不同的試算表(各自一支腳本)。腳本有回報分頁清單時，只套用到
+      // 「目標分頁在這份試算表裡」的步驟，貼第二支的網址不會把第一份的步驟整批蓋掉；
+      // 舊版腳本沒回報分頁清單就維持原本的「全部套用」行為。
+      const applied = probed.sheetNames?.length
+        ? putSheetUrlIntoMatchingWriteNodes(latest, pastedSheetScriptUrl, probed.sheetNames)
+        : { ...putSheetUrlIntoAllWriteNodes(latest, pastedSheetScriptUrl), matchedLabels: [] as string[], unmatchedSheetNodes: [] as { label: string; sheetName: string }[] };
       if (applied.writeNodes === 0) {
         return NextResponse.json({ phase: "clarify", message: "網址本身檢查通過，但這條流程目前沒有 Google Sheet 寫入步驟，所以沒有地方可以套用。" });
+      }
+      if (applied.unmatchedSheetNodes.length > 0 && applied.matchedLabels.length === 0) {
+        return NextResponse.json({
+          phase: "clarify",
+          message: `這支腳本綁定的試算表${probed.spreadsheetName ? `是「${probed.spreadsheetName}」，` : ""}裡面沒有這條流程要寫入的分頁(${[...new Set(applied.unmatchedSheetNodes.map((n) => `「${n.sheetName}」`))].join("、")})——網址檢查是通過的，但套用上去只會寫錯地方，所以整次沒有改動。請確認你貼的是不是另一份試算表的腳本網址。`,
+        });
       }
       // 真實踩過的事故：這個檢查只驗得出「有沒有綁定某份試算表」，驗不出「綁定的是不是正確的
       // 那份」——使用者的腳本曾經綁在一份空白的 Untitled spreadsheet 上，這裡照樣顯示「確認正常」，
@@ -283,17 +324,27 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         : "";
       // P0 安全閘門：探測本身是不寫資料的唯讀檢查，維持照常執行(使用者就是想知道網址能不能用)；
       // 但使用者句尾明確叫停時，不能真的把網址存進節點——只回報「探測結果」，不落地。
+      // 有分頁清單時能點名「套用到哪幾步、還有哪幾步要另一份試算表的腳本」；沒有就沿用整批文案。
+      const scopeNote = applied.matchedLabels.length > 0
+        ? `套用到 ${applied.matchedLabels.length} 個寫入步驟(${applied.matchedLabels.map((label) => `「${label}」`).join("、")})`
+        : `套用到這條流程全部 ${applied.writeNodes} 個 Google Sheet 寫入步驟`;
+      const remainingNote = applied.unmatchedSheetNodes.length > 0
+        ? `\n\n📌 還有 ${applied.unmatchedSheetNodes.length} 個寫入步驟(${applied.unmatchedSheetNodes.map((n) => `「${n.label}」`).join("、")})要寫的是另一份試算表(分頁：${[...new Set(applied.unmatchedSheetNodes.map((n) => n.sheetName))].map((s) => `「${s}」`).join("、")})——請到那份試算表也照同一份教學部署一支腳本，把它的網址貼回來，我會自動填進剩下的步驟。`
+        : "";
       if (explicitEditRefusal) {
         return NextResponse.json({
           phase: "answer",
-          message: `我已用不寫資料的方式確認這個 Apps Script v3 正常可用，可以套用到這條流程全部 ${applied.writeNodes} 個 Google Sheet 寫入步驟。${boundNote}\n\n你說先不要改，所以這次沒有真的把網址存進任何節點——確定要套用的話，再貼一次網址或說「幫我套用這個網址」即可。`,
+          message: `我已用不寫資料的方式確認這個 Apps Script v3 正常可用，可以${scopeNote}。${boundNote}${remainingNote}\n\n你說先不要改，所以這次沒有真的把網址存進任何節點——確定要套用的話，再貼一次網址或說「幫我套用這個網址」即可。`,
         });
       }
       if (applied.changedNodes) saveWorkflow(applied.workflow);
+      const appliedLabelSet = new Set(applied.matchedLabels);
       return NextResponse.json({
         phase: "edits",
-        message: `✅ 已用不寫資料的方式確認 Apps Script v3 正常，並儲存到這條流程全部 ${applied.writeNodes} 個 Google Sheet 寫入步驟。正式寫入後還會讀回核對實際儲存格。${boundNote}`,
-        changes: applied.workflow.nodes.filter((node) => node.type === "google-sheet-update" || node.type === "google-sheet-append").map((node) => ({ label: node.label, detail: "已更新寫入網址" })),
+        message: `✅ 已用不寫資料的方式確認 Apps Script v3 正常，並${scopeNote.replace(/^套用/, "儲存")}。正式寫入後還會讀回核對實際儲存格。${boundNote}${remainingNote}`,
+        changes: applied.workflow.nodes
+          .filter((node) => (node.type === "google-sheet-update" || node.type === "google-sheet-append") && (appliedLabelSet.size === 0 || appliedLabelSet.has(node.label || node.id)))
+          .map((node) => ({ label: node.label, detail: "已更新寫入網址" })),
       });
     }
 
@@ -436,7 +487,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const client = getClient(model);
     // 快速通道剛替換過的話,模型看到的圖必須是「替換後的最新版」,不能用函式開頭那份過期快照
     const cur = pairs.length > 0 ? (getWorkflow(id) ?? wf) : wf;
-    const build = beginBuild(id, req.signal);
+    // 刻意不把 req.signal 接進主建圖：重新整理/關掉分頁會斷線，但建圖動輒 5~15 分鐘、斷線後
+    // 伺服器把它跑完的成本已經花下去了——跑完的結果會由 appendServerBuildOutcome 落地，重開頁面
+    // 由 recoverChatRuntime 接回(實測踩過：11 分鐘生成的完整流程圖因為分頁關閉整包蒸發)。
+    // 使用者「真的想停止」有明確的路：⏹ 停止鈕/清除對話都走 stop-build API(cancelBuild)，不受影響；
+    // 重複送出也仍由 beginBuild 的「新請求取代舊請求」守著。演練(preview)那條維持原樣。
+    const build = beginBuild(id);
     buildSignal = build.signal;
     let result;
     try {

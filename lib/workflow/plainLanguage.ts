@@ -23,6 +23,10 @@ const TOKEN_GLOSS: Record<string, string> = {
   // 「watchPath 預設為 macOS 桌面路徑」被改寫成「前面步驟提供的「macOS」資料 桌面路徑」。
   macOS: "macOS", iOS: "iOS", iPadOS: "iPadOS", watchOS: "watchOS", iCloud: "iCloud", iPhone: "iPhone", iPad: "iPad",
   GitHub: "GitHub", YouTube: "YouTube", PayPal: "PayPal", LinkedIn: "LinkedIn", WhatsApp: "WhatsApp", OneDrive: "OneDrive", SharePoint: "SharePoint", PowerPoint: "PowerPoint", OpenAI: "OpenAI",
+  // 平台自家 UI 文案裡的字面常數(換圖腳本的驗證碼欄位標籤寫著「要跟 Apps Script 裡的
+  // AGENT_HUB_TOKEN 一致」)——它是使用者要在腳本裡看到的真實名字，被翻成「前面步驟提供的
+  // 「AGENT_HUB_TOKEN」資料」後整句話就講不通了(實測踩過)。
+  AGENT_HUB_TOKEN: "AGENT_HUB_TOKEN",
 };
 
 const PREVIEW_FIELD_GLOSS: Record<string, string> = {

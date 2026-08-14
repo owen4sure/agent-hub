@@ -83,14 +83,21 @@ const keyOf = (id: string) => `agenthub_chat_${id}`;
  * 中途離開是常態不是意外(真實踩過)。這裡把那個沉默補上。
  * 標成 isControl，所以它不會被當成 AI 說過的話餵回模型。
  */
+const INTERRUPTED_NOTE_TEXT = "⚠️ 上一次的建立沒有完成——重新整理或關掉頁面會中斷這個分頁跟它的連線。不過伺服器通常會把建立跑完並保留結果，我正在確認；如果真的沒有結果，你剛才那句話還在上面，直接再送一次就可以了。";
+
 export function withInterruptedNote(chat: ChatMsg[], hasPendingGraph: boolean): ChatMsg[] {
   const last = chat[chat.length - 1];
   if (!last || last.role !== "user" || hasPendingGraph) return chat;
   return [...chat, {
     role: "assistant" as const,
     isControl: true,
-    parts: [{ kind: "text" as const, text: "⚠️ 上一次的建立沒有完成——重新整理或關掉頁面會中斷正在進行的建立(這件事通常要幾分鐘)。你剛才那句話還在上面，直接再送一次就可以了。" }],
+    parts: [{ kind: "text" as const, text: INTERRUPTED_NOTE_TEXT }],
   }];
+}
+
+/** 偵測到建圖其實還在伺服器上進行、或已從伺服器撈回結果時，把上面那句「可能要重送」的提示撤掉。 */
+export function stripInterruptedNote(chat: ChatMsg[]): ChatMsg[] {
+  return chat.filter((m) => !(m.isControl && (m.parts ?? []).some((p) => p.kind === "text" && p.text === INTERRUPTED_NOTE_TEXT)));
 }
 
 function loadPersisted(id: string): WFChatState | null {

@@ -766,7 +766,7 @@ export default function HomePage() {
                   {(health.invalidWorkflows?.length ?? 0) > 0 && <p>有 {health.invalidWorkflows!.length} 條流程結構不完整，已禁止執行以避免做錯事；請打開流程讓 AI 修正。</p>}
                   {(health.workflowFileIssues?.length ?? 0) > 0 && <p>有 {health.workflowFileIssues!.length} 份流程檔案損毀或格式不完整，系統已隔離以免整站故障；請從該流程的版本備份還原。</p>}
                   {health.dataPermissionsPrivate === false && <p>這台電腦的資料保護設定不完整，其他登入這台電腦的人可能看得到流程資料。請先不要輸入帳密，並把這段提示截圖交給協助你安裝的人處理。</p>}
-                  {!health.modelApiConfigured && <p>AI 服務尚未連上，所以目前不能建立或修正流程。 <Link href="/settings" className="underline">前往設定</Link>，依頁面說明貼上服務提供者給你的金鑰即可。</p>}
+                  {!health.modelApiConfigured && <p>AI 服務尚未連上，所以目前不能建立或修正流程。 <Link href="/settings" className="underline">前往設定</Link>，依頁面說明貼上服務提供者給你的金鑰；或在這台電腦安裝 Claude Code（裝好即自動使用，不用填金鑰）。</p>}
                   {(health.missingSecretKeys?.length ?? 0) > 0 && <p>正式流程仍缺 {health.missingSecretKeys!.length} 個需要的帳密欄位。 <Link href="/settings" className="underline">補齊帳密</Link></p>}
                 </div>
               )}

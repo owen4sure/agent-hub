@@ -76,7 +76,8 @@ export function proxy(req: NextRequest) {
     const presented = req.headers.get(LOCAL_TOKEN_HEADER) ?? req.cookies.get(LOCAL_TOKEN_COOKIE)?.value ?? null;
     if (!localTokenMatches(presented)) {
       return NextResponse.json({
-        error: "缺少本機存取權杖：請從瀏覽器開 http://127.0.0.1:3000 操作。"
+        // host 前面已驗過是本機，拿來組指路網址不會被外部值污染；不寫死 3000，實際 port 是多少就指多少。
+        error: `缺少本機存取權杖：請從瀏覽器開 http://${host || "127.0.0.1:3000"} 操作。`
           + "如果你是用腳本或 curl 呼叫，把 data/local-token 的內容放進 " + LOCAL_TOKEN_HEADER + " header。",
       }, { status: 401 });
     }

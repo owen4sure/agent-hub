@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
 import path from "node:path";
-import { deleteWorkflowChatState, getWorkflowChatState, saveWorkflowChatState } from "./chatStateStore";
+import { appendServerBuildOutcome, deleteWorkflowChatState, getWorkflowChatState, saveWorkflowChatState } from "./chatStateStore";
 
 const STORE_DIR = path.join(process.cwd(), "data", "chat-state");
 
@@ -65,6 +65,38 @@ test("workflow 對話狀態：正確檔名遺失、只剩 iCloud 衝突重新命
   } finally {
     deleteWorkflowChatState(id);
     fs.rmSync(orphan, { force: true });
+  }
+});
+
+// 建圖不耐重整的伺服器半邊(實測踩過：11 分鐘生成的流程圖因分頁關閉整包蒸發)：
+// /build 完成時把結果補寫進伺服器備份，但只在「client 還沒寫入回覆」時補，不能蓋掉 client 的完整版本。
+test("appendServerBuildOutcome：最後一則是使用者訊息時補寫 AI 回覆與 pendingGraph；已有回覆或沒有底稿時不動", () => {
+  const id = `qa-chat-outcome-${Date.now()}`;
+  try {
+    // 沒有底稿：不硬造一份只有 AI 回覆的對話
+    appendServerBuildOutcome(id, "這輪的回覆", null);
+    assert.equal(getWorkflowChatState(id), null);
+
+    // 底稿停在使用者訊息：補寫回覆與 pendingGraph
+    saveWorkflowChatState(id, {
+      chat: [{ role: "user", parts: [{ kind: "text", text: "把整條流程建好" }] }],
+      pendingGraph: null,
+      pendingExecution: null,
+    });
+    const graph = { nodes: [{ id: "trigger", type: "trigger" }], edges: [], message: "建好了" };
+    appendServerBuildOutcome(id, "建好了", graph);
+    const withReply = getWorkflowChatState(id);
+    assert.equal(withReply?.chat.length, 2);
+    assert.deepEqual(withReply?.chat[1], { role: "assistant", parts: [{ kind: "text", text: "建好了" }] });
+    assert.deepEqual(withReply?.pendingGraph, graph);
+
+    // 最後一則已是 assistant(client 活著、自己寫入過)：不重複補寫、不覆蓋
+    appendServerBuildOutcome(id, "第二次不該進來的回覆", null);
+    const unchanged = getWorkflowChatState(id);
+    assert.equal(unchanged?.chat.length, 2);
+    assert.deepEqual(unchanged?.pendingGraph, graph);
+  } finally {
+    deleteWorkflowChatState(id);
   }
 });
 

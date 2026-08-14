@@ -7,7 +7,7 @@
 import type { ParamField } from "@/lib/workflow/types";
 import { humanizePreviewPair } from "@/lib/workflow/plainLanguage";
 import type { ChatExecutionState, ChatMsg, PendingExecution, PendingGraph } from "./types";
-import { appendAssistantNote, get, restorePendingInput, runtimeRecovering, set, verificationControllers, withInterruptedNote } from "./store";
+import { appendAssistantNote, get, restorePendingInput, runtimeRecovering, set, stripInterruptedNote, verificationControllers, withInterruptedNote } from "./store";
 import { monitorChatRun } from "./execution";
 
 export async function reportChatStatus(id: string) {
@@ -98,21 +98,56 @@ export async function recoverChatRuntime(id: string) {
   if (runtimeRecovering.has(id) || get(id).activeExecution) return;
   runtimeRecovering.add(id);
   try {
-    // 瀏覽器儲存滿了／被清掉時，先從本機 server 恢復 workflow 專屬對話，再查執行狀態。
-    if (get(id).chat.length === 0) {
+    // 從本機 server 備份恢復對話的兩種情況：
+    // ①本地全空(換電腦/清掉瀏覽器資料/localStorage 爆掉)。
+    // ②本地停在「使用者說完話、沒有回覆」而伺服器已經有後續——建圖期間重整/關頁時，
+    //   伺服器端會把建圖跑完並補寫結果(/build 的 appendServerBuildOutcome)，這裡撈回來，
+    //   使用者才不會白等好幾分鐘還被叫重送一次。
+    const adoptServerIfNewer = async (buildStillRunning: boolean) => {
       const saved = await fetch(`/api/workflows/${id}/chat-context`).then((response) => response.json()) as {
         state?: { chat?: ChatMsg[]; pendingGraph?: PendingGraph | null; pendingExecution?: PendingExecution | null; pendingInput?: unknown } | null;
       };
-      if (get(id).chat.length === 0 && Array.isArray(saved.state?.chat) && saved.state.chat.length > 0) {
-        set(id, {
-          // 從伺服器還原也要補「上次被中斷」的提示：換一台電腦、清掉瀏覽器資料的人走的是這條路。
-          chat: withInterruptedNote(saved.state.chat, Boolean(saved.state.pendingGraph)),
-          pendingGraph: saved.state.pendingGraph ?? null,
-          pendingExecution: saved.state.pendingExecution ?? null,
-          pendingInput: restorePendingInput(saved.state.pendingInput),
-        });
+      const server = saved.state;
+      if (!Array.isArray(server?.chat) || server.chat.length === 0) return;
+      const local = get(id).chat;
+      const localLast = local[local.length - 1] as ChatMsg | undefined;
+      const localWaitingForReply = local.length === 0
+        || (server.chat.length > local.length && (localLast?.role === "user" || Boolean(localLast?.isControl)));
+      if (!localWaitingForReply) return;
+      set(id, {
+        // 建圖還在跑的話不補「被中斷」提示(它會說「請再送一次」，跟事實矛盾)；其他情況照舊補。
+        chat: buildStillRunning ? stripInterruptedNote(server.chat) : withInterruptedNote(server.chat, Boolean(server.pendingGraph)),
+        pendingGraph: server.pendingGraph ?? null,
+        pendingExecution: server.pendingExecution ?? null,
+        pendingInput: restorePendingInput(server.pendingInput),
+      });
+    };
+
+    // 建圖是否還在伺服器上進行中(這個分頁若是重整後的新分頁，原本的請求已斷、thinking 不會為 true)
+    let buildActive = false;
+    if (!get(id).thinking) {
+      const progress = await fetch(`/api/workflows/${id}/build-progress`).then((response) => response.json()).catch(() => null) as { stage?: string } | null;
+      buildActive = Boolean(progress?.stage);
+    }
+    await adoptServerIfNewer(buildActive);
+
+    if (buildActive && !get(id).thinking) {
+      // 恢復「思考中」顯示＋撤掉誤導的中斷提示，等伺服器把建圖跑完再撈一次結果。
+      // thinking=true 也讓輸入區照常進入「建立中」狀態，擋住使用者誤以為沒送出而重送。
+      set(id, { thinking: true, chat: stripInterruptedNote(get(id).chat) });
+      try {
+        const deadline = Date.now() + 15 * 60_000; // 對齊 buildProgress 的殭屍階段上限
+        while (Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 2_000));
+          const progress = await fetch(`/api/workflows/${id}/build-progress`).then((response) => response.json()).catch(() => null) as { stage?: string } | null;
+          if (!progress?.stage) break;
+        }
+        await adoptServerIfNewer(false);
+      } finally {
+        set(id, { thinking: false });
       }
     }
+
     const data = await fetch(`/api/workflows/${id}/runs`).then((response) => response.json()) as {
       runs?: { id: string; status: string; dry_run?: number }[];
     };

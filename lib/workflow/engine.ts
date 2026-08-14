@@ -38,6 +38,8 @@ export function defaultMaxConcurrent() { return DEFAULT_MAX_CONCURRENT; }
 const RETRY_BACKOFF_MS = [3000, 9000];
 const MAX_ATTEMPTS = 3;
 const NODE_TIMEOUT_MS = 3 * 60 * 1000;
+// custom-code 第一次執行的臨場產碼(模型呼叫、可能多輪重試)專用逾時；理由見套用處的註解。
+const CODEGEN_TIMEOUT_MS = 6 * 60 * 1000;
 // 無人值守正式流程失敗、且判定為外部服務暫時性問題(見 classifyFailure 的 transient)時，
 // 延後自動重跑的等待時間與最多重試次數——避免真的卡死的東西被無限重試下去。
 const AUTO_RETRY_DELAY_MINUTES = 5;
@@ -1087,8 +1089,16 @@ async function runNodeWithRetry(node: WorkflowNode, ctx: NodeContext, retryable:
     // 個別接住 execute() 的 promise：Promise.race 逾時後這個 promise 還可能在背景繼續跑，
     // 之後(被 resetPage 關頁面)拋錯時若沒人接住會變成 unhandledRejection 讓整個 process 崩潰
     const nodeDef = getNodeDef(node.type)!;
-    // 容器型節點(repeat-steps 一個節點做 N 輪工作)可以宣告自己的逾時上限,其餘用引擎預設
-    const timeoutMs = nodeDef.timeoutMs ?? NODE_TIMEOUT_MS;
+    // 容器型節點(repeat-steps 一個節點做 N 輪工作)可以宣告自己的逾時上限,其餘用引擎預設。
+    // custom-code 的「第一次臨場產碼」另計：產碼是模型呼叫(本機 Claude Code 高力度在 2 萬字
+    // 提示上實測就要 60~120 秒、最多 3 輪)，90 秒的節點逾時是為「正常執行應在數秒完成」設的，
+    // 套在產碼上會把還在正常工作的產碼砍掉、然後修復迴圈再產再被砍——同一道牆撞到死
+    // (實測踩過：從零建的圖第一次演練，三個大計算節點全數死在這裡)。產碼完成存回後，
+    // 之後每次執行都回到嚴格的 90 秒。
+    const firstTimeCodegen = node.type === "custom-code" && isPlaceholderCode(node.config.code);
+    const timeoutMs = firstTimeCodegen
+      ? Math.max(nodeDef.timeoutMs ?? NODE_TIMEOUT_MS, CODEGEN_TIMEOUT_MS)
+      : nodeDef.timeoutMs ?? NODE_TIMEOUT_MS;
     // 每一次嘗試都有自己的中斷訊號。以前 Promise.race 只回「逾時」，真正的 fetch/AI/Claude
     // 子程序仍在背景跑；下一次重試又開一份，形成殭屍互踩。逾時時 abort 這一次，重試再拿新 signal。
     const attemptController = new AbortController();
