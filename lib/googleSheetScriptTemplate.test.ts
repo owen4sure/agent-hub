@@ -97,6 +97,8 @@ function harness(initial: unknown[][]): Harness {
   }
 
   const sheet = {
+    // capabilities 現在會回報分頁名單(sheetNames)，假分頁也要有名字才走得到那段
+    getName: () => "彙整表",
     getDataRange: () => ({ getDisplayValues: () => data.map((row) => row.map((value) => String(value ?? ""))) }),
     getRange: (rowOrA1: number | string, column?: number) => {
       if (typeof rowOrA1 === "string") return makeStringRange(rowOrA1);
@@ -294,5 +296,13 @@ describe("Google 試算表 Apps Script 官方範本", () => {
     const h = harness([["A"]]);
     const result = h.call({ action: "capabilities" });
     assert.ok(Array.isArray(result.actions) && (result.actions as string[]).includes("copyFormat"));
+  });
+
+  // 同一條流程可能要寫兩份不同的試算表：平台靠 capabilities 回報的分頁名單，
+  // 判斷「這支腳本管哪幾個分頁」，貼網址時只套用到分頁對得上的寫入步驟。
+  it("capabilities 回應要帶 sheetNames 分頁名單，讓平台能精準分配多試算表流程的寫入網址", () => {
+    const h = harness([["A"]]);
+    const result = h.call({ action: "capabilities" });
+    assert.deepEqual(result.sheetNames, ["彙整表"]);
   });
 });

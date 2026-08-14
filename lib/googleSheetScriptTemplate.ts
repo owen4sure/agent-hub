@@ -14,7 +14,9 @@ export const GOOGLE_SHEET_SCRIPT_TEMPLATE = `function doPost(e) {
       // 真的執行才發現寫錯地方，重新部署好幾次都因為同一個誤綁而沒有解決。回傳目前綁定的試算表
       // 名稱，讓使用者在按下「檢查並套用」的當下就能肉眼核對「這是不是我要的那份」，不用等到
       // 真的寫入失敗才發現。
-      return out({ ok: true, agentHubVersion: 5, actions: ["append", "updateTable", "readCells", "writeCells", "copyFormat"], spreadsheetName: ss.getName() });
+      // sheetNames：平台用它判斷「這支腳本管的是哪幾個分頁」——同一條流程要寫兩份不同試算表時，
+      // 貼上一支腳本的網址只會套用到分頁名對得上的寫入步驟，不會把另一份試算表的步驟一起蓋掉。
+      return out({ ok: true, agentHubVersion: 5, actions: ["append", "updateTable", "readCells", "writeCells", "copyFormat"], spreadsheetName: ss.getName(), sheetNames: ss.getSheets().map(function (s) { return s.getName(); }) });
     }
     var sheet = body.sheet ? ss.getSheetByName(body.sheet) : ss.getSheets()[0];
     if (!sheet) {

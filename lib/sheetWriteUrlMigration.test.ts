@@ -1,38 +1,55 @@
-import test from "node:test";
 import assert from "node:assert/strict";
-import { extractAppsScriptExecUrl, putLegacySheetUrlIntoNodes, putSheetUrlIntoAllWriteNodes } from "./sheetWriteUrlMigration";
+import test from "node:test";
+import { putSheetUrlIntoAllWriteNodes, putSheetUrlIntoMatchingWriteNodes } from "./sheetWriteUrlMigration";
 import type { Workflow } from "./workflow/types";
 
-function workflow(): Workflow {
-  return {
-    id: "wf-migrate-test", name: "test", status: "draft", builtin: false, defaultModel: "minimax-m3",
-    description: "", requiresSecrets: [{ key: "sheetAppendUrl", label: "舊欄位", type: "password" }],
-    triggerParams: [], edges: [], nodes: [
-      { id: "read", type: "google-sheet-read", label: "讀", config: { sheetUrl: "https://docs.google.com/x" }, position: { x: 0, y: 0 } },
-      { id: "write1", type: "google-sheet-update", label: "寫一", config: {}, position: { x: 300, y: 0 } },
-      { id: "write2", type: "google-sheet-append", label: "寫二", config: { scriptUrl: "https://script.google.com/macros/s/already/exec" }, position: { x: 600, y: 0 } },
-    ],
-  };
+// 真實案例：同一條流程要寫兩份不同的試算表，各自部署一支 Apps Script。
+// 舊的「貼網址→全部寫入節點一起換」行為會讓第二支網址把第一份試算表的步驟整批蓋掉，永遠設不完。
+function wf(nodes: Workflow["nodes"]): Workflow {
+  return { id: "wf-test", name: "測試", status: "draft", nodes, edges: [] } as unknown as Workflow;
 }
 
-test("舊 Google Sheet 寫入網址只補進空白寫入節點，不污染讀取節點也不蓋掉既有值", () => {
-  const source = workflow();
-  const result = putLegacySheetUrlIntoNodes(source, "https://script.google.com/macros/s/legacy/exec");
-  assert.equal(result.changedNodes, 1);
-  assert.equal(result.workflow.nodes[0].config.scriptUrl, undefined);
-  assert.equal(result.workflow.nodes[1].config.scriptUrl, "https://script.google.com/macros/s/legacy/exec");
-  assert.equal(result.workflow.nodes[2].config.scriptUrl, "https://script.google.com/macros/s/already/exec");
-  assert.equal(source.nodes[1].config.scriptUrl, undefined, "純函式不能修改呼叫端的 workflow");
+const URL_A = "https://script.google.com/macros/s/AAA/exec";
+const URL_B = "https://script.google.com/macros/s/BBB/exec";
+
+test("putSheetUrlIntoMatchingWriteNodes：只套用到分頁名在這份試算表裡的寫入步驟，其餘點名回報", () => {
+  const workflow = wf([
+    { id: "n1", type: "google-sheet-update", label: "更新月報表", config: { sheetName: "月報彙總", scriptUrl: "" } },
+    { id: "n2", type: "google-sheet-update", label: "更新統計文字", config: { sheetName: "統計文字區", scriptUrl: "" } },
+    { id: "n3", type: "custom-code", label: "無關步驟", config: {} },
+  ] as unknown as Workflow["nodes"]);
+
+  const first = putSheetUrlIntoMatchingWriteNodes(workflow, URL_A, ["月報彙總", "每週折線圖"]);
+  assert.equal(first.changedNodes, 1);
+  assert.deepEqual(first.matchedLabels, ["更新月報表"]);
+  assert.deepEqual(first.unmatchedSheetNodes, [{ label: "更新統計文字", sheetName: "統計文字區" }]);
+  assert.equal(first.workflow.nodes[0].config.scriptUrl, URL_A);
+  assert.equal(first.workflow.nodes[1].config.scriptUrl, "");
+
+  // 貼第二支(另一份試算表)的網址：只填對應那步，不把第一支已填好的蓋掉
+  const second = putSheetUrlIntoMatchingWriteNodes(first.workflow, URL_B, ["統計文字區", "2026"]);
+  assert.equal(second.changedNodes, 1);
+  assert.equal(second.workflow.nodes[0].config.scriptUrl, URL_A, "第一份試算表的步驟不能被第二支網址蓋掉");
+  assert.equal(second.workflow.nodes[1].config.scriptUrl, URL_B);
 });
 
-test("對話中的 Apps Script /exec 網址可確定性擷取並一次套用全部寫入節點", () => {
-  const url = "https://script.google.com/macros/s/new-deployment_123/exec";
-  assert.equal(extractAppsScriptExecUrl(`請改用這個：${url}，然後幫我測`), url);
-  assert.equal(extractAppsScriptExecUrl("https://docs.google.com/spreadsheets/d/abc/edit"), null);
-  const result = putSheetUrlIntoAllWriteNodes(workflow(), url);
-  assert.equal(result.writeNodes, 2);
-  assert.equal(result.changedNodes, 2);
-  assert.equal(result.workflow.nodes[0].config.scriptUrl, undefined);
-  assert.equal(result.workflow.nodes[1].config.scriptUrl, url);
-  assert.equal(result.workflow.nodes[2].config.scriptUrl, url);
+test("putSheetUrlIntoMatchingWriteNodes：分頁名留空或含樣板時視為可套用(無法靜態判斷，維持寬容)", () => {
+  const workflow = wf([
+    { id: "n1", type: "google-sheet-append", label: "寫第一個分頁", config: { scriptUrl: "" } },
+    { id: "n2", type: "google-sheet-update", label: "動態分頁", config: { sheetName: "{{monthTab}}", scriptUrl: "" } },
+  ] as unknown as Workflow["nodes"]);
+  const applied = putSheetUrlIntoMatchingWriteNodes(workflow, URL_A, ["某分頁"]);
+  assert.equal(applied.changedNodes, 2);
+  assert.equal(applied.unmatchedSheetNodes.length, 0);
+});
+
+test("putSheetUrlIntoAllWriteNodes：維持原本整批套用行為(舊版腳本沒回報分頁清單時的退路)", () => {
+  const workflow = wf([
+    { id: "n1", type: "google-sheet-update", label: "A", config: { sheetName: "甲", scriptUrl: URL_A } },
+    { id: "n2", type: "google-sheet-update", label: "B", config: { sheetName: "乙", scriptUrl: "" } },
+  ] as unknown as Workflow["nodes"]);
+  const applied = putSheetUrlIntoAllWriteNodes(workflow, URL_B);
+  assert.equal(applied.changedNodes, 2);
+  assert.equal(applied.workflow.nodes[0].config.scriptUrl, URL_B);
+  assert.equal(applied.workflow.nodes[1].config.scriptUrl, URL_B);
 });

@@ -160,13 +160,23 @@ export async function deployWebApp(input: {
   oauthScopes: string[];
   existingScriptId?: string | null;
   existingDeploymentId?: string | null;
+  /**
+   * 綁定目標(Drive 檔案 id，例如試算表 id)：給了就建「綁定在那份文件上」的專案——
+   * 試算表寫入腳本用 SpreadsheetApp.getActiveSpreadsheet()，只有綁定專案才拿得到那份表；
+   * 這也直接消滅「使用者從 script.google.com 開了獨立空白專案、寫入永遠失敗」的整類錯誤。
+   */
+  parentId?: string;
   signal?: AbortSignal;
 }): Promise<DeployResult> {
   const { accessToken, signal } = input;
   let scriptId = (input.existingScriptId ?? "").trim();
   const created = !scriptId;
   if (!scriptId) {
-    const project = await call<{ scriptId?: string }>(accessToken, "POST", "/projects", { title: input.title }, signal);
+    const project = await call<{ scriptId?: string }>(
+      accessToken, "POST", "/projects",
+      { title: input.title, ...(input.parentId ? { parentId: input.parentId } : {}) },
+      signal,
+    );
     if (!project.scriptId) throw new AppsScriptDeployError({ message: "Google 建立了專案卻沒有回傳 scriptId，無法繼續。", raw: "" });
     scriptId = project.scriptId;
   }

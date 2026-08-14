@@ -213,14 +213,16 @@ export function sheetScriptRuntimeErrorMessage(rawError: string): string {
  * 這裡把名稱回傳給呼叫端，讓使用者在「檢查並套用」當下就能肉眼核對，不用等到真的寫入
  * 失敗才發現綁錯試算表(真實踩過：使用者因此重新部署了 5 次都對不到正確的表)。
  */
-export async function probeSheetScript(scriptUrl: string, signal?: AbortSignal): Promise<{ spreadsheetName?: string }> {
+export async function probeSheetScript(scriptUrl: string, signal?: AbortSignal): Promise<{ spreadsheetName?: string; sheetNames?: string[] }> {
   // capabilities 純讀取、沒有副作用，可以放心重試撐過抖動
   const parsed = await callSheetScriptWithRetry(scriptUrl, { action: "capabilities" }, signal);
   const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
   if (Number(parsed.agentHubVersion) < 3 || !actions.includes("updateTable") || !actions.includes("readCells")) {
     throw new PermanentError("這個 Apps Script 部署版本太舊，還不能在寫入後讀回核對。請在寫入節點展開教學，複製完整 v3 程式碼，並在『管理部署作業』選『新版本』後部署；若用『新增部署作業』，請把新產生的 /exec 網址貼回這個節點。");
   }
-  return { spreadsheetName: typeof parsed.spreadsheetName === "string" ? parsed.spreadsheetName : undefined };
+  // sheetNames 是較新版模板才回傳的欄位；舊部署拿不到就回 undefined，呼叫端要能退回原本行為。
+  const sheetNames = Array.isArray(parsed.sheetNames) ? parsed.sheetNames.filter((name): name is string => typeof name === "string") : undefined;
+  return { spreadsheetName: typeof parsed.spreadsheetName === "string" ? parsed.spreadsheetName : undefined, sheetNames };
 }
 
 export function parseSheetRowValues(raw: string): { label: string; value: string | number | boolean }[] {
