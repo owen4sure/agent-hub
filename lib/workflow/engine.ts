@@ -1317,6 +1317,8 @@ async function executeWorkflow(item: QueueItem) {
    * 真實踩過:使用者框選 5 步只測,其中關鍵的那步(點正式簡報的重新整理)被安全模式默默略過,
    * 總結卻只寫「完成 3 個步驟」,使用者完全不知道為什麼圈了 5 步只跑 2 步。 */
   const withheldWrites: string[] = [];
+  /** 被只讀模式攔下的節點 id——用來判斷「下游失敗是不是攔截造成的連鎖」(見失敗分類處)。 */
+  const withheldWriteIds = new Set<string>();
 
   const now = new Date();
 
@@ -1467,7 +1469,7 @@ async function executeWorkflow(item: QueueItem) {
     if (dryRun) {
       const skipKind = dryRunSkipKind(node, hasProvidedFile, { readOnlyApprovedNodeIds });
       if (skipKind) {
-        if (skipKind === "write") withheldWrites.push(node.label);
+        if (skipKind === "write") { withheldWrites.push(node.label); withheldWriteIds.add(node.id); }
         nodeOutputs.set(node.id, { ...input });
         db.prepare(`UPDATE node_runs SET status='skipped', input_json=?, finished_at=datetime('now') WHERE run_id=? AND node_id=?`)
           .run(JSON.stringify(input), runId, node.id);
@@ -1589,6 +1591,7 @@ async function executeWorkflow(item: QueueItem) {
       // (回傳 success+標記,不走上面的 engine 層略過)——這種也算被攔下,總結一樣要點名。
       if (dryRun && result.output && (result.output as Record<string, unknown>)[DRY_RUN_SKIPPED_WRITES_KEY]) {
         withheldWrites.push(node.label);
+        withheldWriteIds.add(node.id);
       }
       successCount++;
       succeededNodes.add(node.id); // 成功的節點,它的失敗分支(fromPort="error")那條路是死的
@@ -1722,7 +1725,29 @@ async function executeWorkflow(item: QueueItem) {
       .run(recordError, reason, resolution, failedNode || null, runId);
     log(runId, null, cause ? "⏱ 系統時間預算用完，已停止執行" : "⏹ 使用者已停止執行");
   } else if (failed) {
-    const { reason, resolution, transient } = classifyFailure(failError);
+    const classified = classifyFailure(failError);
+    let reason = classified.reason;
+    let transient = classified.transient;
+    // "dry-run-boundary" 只會出現在只讀演練(見下)；正式執行的 resolution 仍只有原本兩種。
+    let resolution: "ai-fixable" | "needs-human" | "dry-run-boundary" = classified.resolution;
+    // ── 只讀演練的「攔截連鎖」失敗要跟真的 bug 分開講(實測踩過)：上游寫入步驟被 🔒 攔下後
+    // 不會產生自己的輸出，下游引用 {{它的欄位}} 必然拿到字面樣板而失敗。這不是流程壞掉——
+    // 正式執行時上游會真的跑、下游自然有資料。以前這種失敗被當成可修 bug 餵給修復迴圈，
+    // AI 對著一個不存在的問題反覆燒算力、使用者看到的是「一直修不好」。
+    // 判準要兩個條件同時成立，缺一不可：①失敗節點的上游祖先裡有被攔下的寫入步驟
+    // ②失敗訊息帶著沒解析的 {{樣板}}(=缺的是資料，不是設定錯)。只有條件①的失敗
+    // (例如上游被攔、但這步是自己搜尋條件寫錯)仍照原分類走修復。
+    const dryRunChain = dryRun && failedNode
+      && failError.includes("{{")
+      && [...ancestorsOf(failedNode)].some((id) => withheldWriteIds.has(id));
+    if (dryRunChain) {
+      const blockedAncestors = [...ancestorsOf(failedNode!)]
+        .filter((id) => withheldWriteIds.has(id))
+        .map((id) => wf.nodes.find((n) => n.id === id)?.label ?? id);
+      reason = `這一步需要的資料要由上游「${blockedAncestors.join("」「")}」產生，但那幾步是寫入/操作外部系統的動作，只讀演練把它們安全攔下了，所以這一步拿不到資料——這不是流程壞掉，不需要修理。演練能驗證的範圍到這裡為止；後面的步驟要等正式執行(或按「▶ 執行」完整執行)才會真的跑。`;
+      resolution = "dry-run-boundary";
+      transient = false;
+    }
     // 其他不相干的獨立分支也失敗時要老實列出來，不能因為只回報第一個失敗就讓使用者以為
     // 只有那一步出事——他們是各自獨立的分支，每一個都可能需要個別處理。
     const otherFailuresNote = unhandledFailures.length > 0

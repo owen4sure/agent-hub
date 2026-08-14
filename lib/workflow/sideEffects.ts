@@ -84,6 +84,8 @@ export const NODE_SIDE_EFFECTS: Readonly<Record<string, NodeSideEffectSpec>> = {
   "google-slides-refresh": { effects: ["remote-write"], dryRun: "self-guard" },
   // 真的會改到使用者拿去開會的簡報，跟寫進別人的試算表同一級。
   "google-slides-replace-image": { effects: ["remote-write"], dryRun: "self-guard" },
+  // 跨簡報複製整頁並移除目標舊頁——同樣直接改到會議用簡報；dry-run 由節點在送出前 return(參數驗證照跑)。
+  "google-slides-copy-page": { effects: ["remote-write"], dryRun: "self-guard" },
 
   // ── 只寫本次執行的工作區(把輸入抓進來)，不是使用者資料的變更 ──
   "download-attachment": { effects: ["workspace-file"], dryRun: "none" },
@@ -173,7 +175,12 @@ export function suggestsReadOnly(config: Record<string, unknown>): boolean {
  */
 // 已有 code 時只能用可執行的 side-effect 訊號判斷。把「填入」「寫回」這種中文放進來會誤傷
 // 讀取程式裡的防呆錯誤(例如「避免把 0 填入」)，安全試跑反而從未執行真正要驗的計算。
-const CUSTOM_CODE_WRITER_RE = /values\s*(?:\.|\[['"])(?:update|append)|batchUpdate|spreadsheets\s*\.\s*values|setValue|getCell\s*\([^)]*\)\s*\.\s*value\s*=|\.(?:addRow|spliceRows|insertRow|deleteRow)\s*\(|xlsx\s*\.\s*writeFile|(?:\.|\[['"])(?:writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream|truncate|truncateSync|unlink|unlinkSync|rm|rmSync|rmdir|rmdirSync|rename|renameSync|copyFile|copyFileSync|mkdir|mkdirSync|chmod|chmodSync|chown|chownSync)['"]?\s*(?:\]|\()|fs\s*\.\s*(?:promises\s*\.\s*)?(?:write|append|rm|unlink|rename|copyFile|mkdir|createWriteStream)|method\s*:\s*(?:['"]?(?:POST|PUT|PATCH|DELETE)|[^,}\n]*(?:POST|PUT|PATCH|DELETE))|axios\s*(?:\.|\[['"])(?:post|put|patch|delete)|(?:got|request)\s*(?:\.|\[['"])(?:post|put|patch|delete)|sendMail|sendMessage|child_process|\b(?:exec|execFile|spawn|fork)\s*\(|\b(?:INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+TABLE)\b/i;
+// 「exec(」那段刻意要求**前面不能是 . 或識別字**：`/正規式/.exec(字串)` 是讀取程式裡最常見的
+// 日期/字串解析寫法，跟 child_process 的 exec 毫無關係——被誤咬會讓純計算節點在安全試跑被整步
+// 略過、可驗證範圍憑空縮水(實測踩過：解析 YYYYMMDD 的節點因此被當成寫入)。真正拿得到
+// child_process exec 的途徑(require/import/字面 child_process)本來就各自有規則攔住，
+// 這裡只需要顧「裸呼叫」的防禦縱深。
+const CUSTOM_CODE_WRITER_RE = /values\s*(?:\.|\[['"])(?:update|append)|batchUpdate|spreadsheets\s*\.\s*values|setValue|getCell\s*\([^)]*\)\s*\.\s*value\s*=|\.(?:addRow|spliceRows|insertRow|deleteRow)\s*\(|xlsx\s*\.\s*writeFile|(?:\.|\[['"])(?:writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream|truncate|truncateSync|unlink|unlinkSync|rm|rmSync|rmdir|rmdirSync|rename|renameSync|copyFile|copyFileSync|mkdir|mkdirSync|chmod|chmodSync|chown|chownSync)['"]?\s*(?:\]|\()|fs\s*\.\s*(?:promises\s*\.\s*)?(?:write|append|rm|unlink|rename|copyFile|mkdir|createWriteStream)|method\s*:\s*(?:['"]?(?:POST|PUT|PATCH|DELETE)|[^,}\n]*(?:POST|PUT|PATCH|DELETE))|axios\s*(?:\.|\[['"])(?:post|put|patch|delete)|(?:got|request)\s*(?:\.|\[['"])(?:post|put|patch|delete)|sendMail|sendMessage|child_process|(?<![.\w$])(?:exec|execFile|spawn|fork)\s*\(|\b(?:INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+TABLE)\b/i;
 const CUSTOM_INTENT_WRITER_RE = /寫入|填入|回填|寫回|更新到|上傳到|送出到|刪除檔案|移動檔案|建立資料夾/i;
 
 // 規則必須與 codegen.isPlaceholderCode 一致(避免從 codegen 匯入而把 registry → customCode →

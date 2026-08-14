@@ -122,7 +122,8 @@ export function SlidesImageScriptCard({ workflowId, onClose }: { workflowId: str
   async function fillIntoWorkflow() {
     try {
       const wf = await (await fetch(`/api/workflows/${workflowId}`)).json();
-      const targets = (wf.nodes ?? []).filter((n: { type?: string }) => n.type === "google-slides-replace-image");
+      // 「複製簡報頁面」跟換圖共用同一支腳本與驗證碼，網址一起填
+      const targets = (wf.nodes ?? []).filter((n: { type?: string }) => n.type === "google-slides-replace-image" || n.type === "google-slides-copy-page");
       const done: string[] = [];
       for (const node of targets) {
         const res = await fetch(`/api/workflows/${workflowId}`, {

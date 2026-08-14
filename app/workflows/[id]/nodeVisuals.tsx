@@ -5,7 +5,7 @@ import { Handle, Position, type NodeProps } from "@xyflow/react";
 
 export const ICONS: Record<string, string> = {
   trigger: "⏰", "browser-login": "🔐", "find-email": "🔍", "download-attachment": "📥",
-  "excel-process": "📊", "excel-range-image": "🖼️", "google-slides-replace-image": "🖼️", "pdf-read": "📄", unzip: "🗜️", "http-request": "🌐", "template-text": "📝", "set-variable": "🔧",
+  "excel-process": "📊", "excel-range-image": "🖼️", "google-slides-replace-image": "🖼️", "google-slides-copy-page": "📑", "pdf-read": "📄", unzip: "🗜️", "http-request": "🌐", "template-text": "📝", "set-variable": "🔧",
   "if-condition": "🔀", "llm-decide": "🧠", "custom-code": "⚙️", "repeat-steps": "🔁",
   "telegram-notify": "✈️", "line-notify": "💬",
   "write-file": "💾", "read-file": "📂", "web-page": "🕸️", "desktop-notify": "🔔", "send-email": "✉️", "webmail-send": "📧",
@@ -28,6 +28,7 @@ export const TYPE_META: Record<string, { cat: string; label: string }> = {
   "excel-process": { cat: "data", label: "Excel 篩選+highlight" },
   "excel-range-image": { cat: "data", label: "Excel 範圍截圖" },
   "google-slides-replace-image": { cat: "integration", label: "換掉簡報上的圖片" },
+  "google-slides-copy-page": { cat: "integration", label: "複製簡報頁面" },
   "pdf-read": { cat: "data", label: "讀取 PDF" },
   "template-text": { cat: "data", label: "組字串" },
   unzip: { cat: "file", label: "解壓縮" },

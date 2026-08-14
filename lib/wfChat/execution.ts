@@ -332,7 +332,7 @@ export async function monitorChatRun(id: string, runId: string) {
     while (!controller.signal.aborted && Date.now() < deadline) {
       const res = await fetch(`/api/runs/${runId}`, { signal: controller.signal });
       const data = await res.json() as {
-        run?: { status?: string; reason?: string; failed_node?: string; dry_run?: number; resolution?: "ai-fixable" | "needs-human" | null };
+        run?: { status?: string; reason?: string; failed_node?: string; dry_run?: number; resolution?: "ai-fixable" | "needs-human" | "dry-run-boundary" | null };
         nodeRuns?: { node_id?: string; status?: string; output_json?: string | null; error?: string | null }[];
       };
       if (!res.ok || !data.run) throw new Error("暫時讀不到執行狀態");
@@ -391,6 +391,10 @@ export async function monitorChatRun(id: string, runId: string) {
         ? mode === "preview"
           ? "已停止只演練；這次沒有寫入或發送任何內容。"
           : "已停止正式執行。已經完成的外部寫入不會自動回滾；尚未執行的步驟不會再繼續。"
+        : data.run.resolution === "dry-run-boundary"
+          // 演練的可驗證邊界不是錯誤：能驗的都通過了，後面靠寫入的步驟要等正式執行。
+          // 不能用「⚠️ 停在…可以讓 AI 修」的口吻——這裡沒有東西可修(實測踩過:AI 對著它空轉)。
+          ? `✅ 只演練已經測到可驗證的邊界：${data.run.reason ?? "後面的步驟依賴被安全攔下的寫入動作"}\n\n能在不寫入的前提下驗證的步驟全部通過了。確認沒問題就可以按「▶ 執行」完整執行(會真的寫入/發送)。`
         : data.run.resolution === "needs-human"
           ? `⚠️ 停在「${data.run.failed_node ?? "某一步"}」：${data.run.reason ?? "還缺少只有你手上才有的資料"}\n\n這不是改流程能猜出來的問題。我已經指出需要補的資料；補好後直接再試，不會叫 AI 白跑。`
         : mode === "preview"

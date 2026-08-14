@@ -7,6 +7,7 @@ import { downloadAttachmentNode } from "./nodes/downloadAttachment";
 import { excelProcessNode } from "./nodes/excelProcess";
 import { excelRangeImageNode } from "./nodes/excelRangeImage";
 import { googleSlidesReplaceImageNode } from "./nodes/googleSlidesReplaceImage";
+import { googleSlidesCopyPageNode } from "./nodes/googleSlidesCopyPage";
 import { pdfReadNode } from "./nodes/pdfRead";
 import { unzipNode } from "./nodes/unzip";
 import {
@@ -78,6 +79,7 @@ const ALL: NodeDefinition[] = [
   desktopNotifyNode,
   googleSlidesRefreshNode,
   googleSlidesReplaceImageNode,
+  googleSlidesCopyPageNode,
   googleSlidesCreateNode,
 ];
 

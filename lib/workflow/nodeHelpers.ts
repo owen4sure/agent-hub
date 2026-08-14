@@ -358,6 +358,14 @@ export async function solveCaptchaFromLocator(
   const fullPlan = await planNodeModel(ctx, "captcha", cfgStr(ctx, "captchaModel", "").trim() || undefined);
   const plan: ModelPlan = { ...fullPlan, chain: fullPlan.chain.slice(0, 2) };
 
+  // 零視覺模型 ≠ 死路：本機 OCR 是機率性的，這一張沒讀出來不代表下一張也讀不出來(實測 Mail2000
+  // 歷史驗證碼 3/3，但單張仍可能失手)。以前這裡直接讓空模型鏈變成 PermanentError 把整個登入節點
+  // 判死——連 OCR 有機會讀對的新驗證碼都不給試。改丟「換一張再試」的可重試錯誤，登入迴圈會
+  // 換一張新驗證碼再讓 OCR 讀；連續多張都讀不出來才會用盡額度、帶著接視覺模型的指引收場。
+  if (plan.chain.length === 0) {
+    throw new Error(`本機文字辨識沒讀出這一張驗證碼，需要換一張驗證碼再試。若每一張都讀不出來：${plan.reason ?? "可到「設定 → 模型來源」接一顆看得懂圖的模型，或改用「⋯ → 🔐 手動登入一次」。"}`);
+  }
+
   let raw: string;
   try {
     raw = (

@@ -101,6 +101,16 @@ test("configuredSideEffects：custom-code 依實際程式碼判斷，空殼退�
   assert.equal(configuredSideEffects("custom-code", { intent: "計算加總" }).undetermined, false);
 });
 
+// 實測踩過：解析 YYYYMMDD 的純計算節點用 /正規式/.exec(str)，被「exec( = 執行外部程式」的
+// 樣式誤咬成寫入，安全試跑整步略過、可驗證範圍憑空縮水。RegExp 的 .exec 是讀取程式的家常寫法，
+// 絕不能跟 child_process 的裸 exec( 混為一談。
+test("configuredSideEffects：正規表示式的 .exec() 是讀取寫法，不是執行外部程式；裸 exec( 才要攔", () => {
+  const readerCode = "const m = /^(\\d{4})(\\d{2})(\\d{2})$/.exec(str); if (!m) return { ok: false }; return { y: m[1] };";
+  assert.deepEqual(configuredSideEffects("custom-code", { code: readerCode }).effects, []);
+  assert.equal(configuredSideEffects("custom-code", { code: 'exec("rm -rf /tmp/x");' }).effects.length > 0, true);
+  assert.equal(configuredSideEffects("custom-code", { code: 'spawn("ls");' }).effects.length > 0, true);
+});
+
 test("configuredSideEffects：只認得 http-request／custom-code 這兩種設定決定副作用的型別", () => {
   assert.deepEqual(configuredSideEffects("google-sheet-append", {}), { effects: [], undetermined: false });
   assert.deepEqual(configuredSideEffects("read-file", {}), { effects: [], undetermined: false });

@@ -93,6 +93,27 @@ export function deleteWorkflowChatState(id: string): void {
  * 只在「最後一則是使用者訊息」時補寫：發起建圖的分頁若還活著，它稍後會用更完整的版本
  * (含設定卡等)PUT 覆蓋這份，內容等價不衝突；分頁已經死了，這份就是唯一的結果來源。
  */
+/**
+ * 「測到會跑」(autorun)結束時發起的分頁已經關閉的話，把步驟摘要補寫進伺服器端對話備份——
+ * 結果本身都在執行紀錄裡，但少了對話裡的交代，使用者重開頁面會以為自動測試無聲失蹤(實測踩過)。
+ * 只在呼叫端確認 client 已斷線時呼叫，不會跟活著的分頁自己寫的摘要重複。
+ */
+export function appendServerAutorunSummary(id: string, payload: { ok?: boolean; steps?: { title?: string; detail?: string }[] }): void {
+  const current = getWorkflowChatState(id);
+  if (!current || current.chat.length === 0) return;
+  const lines = (payload.steps ?? [])
+    .map((step) => `• ${String(step.title ?? "").slice(0, 80)}${step.detail ? `：${String(step.detail).slice(0, 120)}` : ""}`)
+    .filter((line) => line !== "• ");
+  const text = [
+    `🪄 自動測試已在背景跑完(當時這個頁面已經關閉)：${payload.ok ? "全部通過" : "還沒有全部通過"}。`,
+    ...lines,
+  ].join("\n").slice(0, 4000);
+  const chat = [...current.chat, { role: "assistant", isControl: true, parts: [{ kind: "text", text }] }];
+  try {
+    saveWorkflowChatState(id, { ...current, chat });
+  } catch { /* 超量等異常時放棄補寫；執行紀錄仍在 */ }
+}
+
 export function appendServerBuildOutcome(id: string, message: string, pendingGraph: unknown | null): void {
   if (typeof message !== "string" || !message.trim()) return;
   const current = getWorkflowChatState(id);

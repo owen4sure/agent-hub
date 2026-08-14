@@ -2447,8 +2447,8 @@ export default function WorkflowPage() {
           onManualLogin={() => { setShowWorkflowSettings(false); setShowManualLoginDialog(true); }}
           onOpenRecorder={() => { setShowWorkflowSettings(false); setShowRecorder(true); }}
           slidesImage={{
-            used: wf.nodes.some((n) => n.type === "google-slides-replace-image"),
-            configured: wf.nodes.some((n) => n.type === "google-slides-replace-image" && String(n.config?.scriptUrl ?? "").trim() !== ""),
+            used: wf.nodes.some((n) => n.type === "google-slides-replace-image" || n.type === "google-slides-copy-page"),
+            configured: wf.nodes.some((n) => (n.type === "google-slides-replace-image" || n.type === "google-slides-copy-page") && String(n.config?.scriptUrl ?? "").trim() !== ""),
           }}
           onOpenSlidesImage={() => { setShowWorkflowSettings(false); setShowSlidesImageScript(true); }}
           onClose={() => setShowWorkflowSettings(false)}

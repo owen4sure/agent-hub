@@ -19,7 +19,7 @@ export async function announceWorkflowSecretsAfterApply(id: string, nodes: Pendi
     // 「換圖腳本的驗證碼」不能放進這張必填卡(實測踩過的雞生蛋)：新使用者這個時候根本還沒有
     // 這個值——它是「換掉簡報圖片」設定卡(自動部署會自己產生並存好；手動路徑教學裡才會建立)
     // 的產物。放進必填卡等於要求使用者先填一個還不存在的東西，其他三格填好了也存不了。
-    const hasSlidesImageSetup = nodes.some((node) => node.type === "google-slides-replace-image");
+    const hasSlidesImageSetup = nodes.some((node) => node.type === "google-slides-replace-image" || node.type === "google-slides-copy-page");
     const excluded = [...(needsSlidesSetup ? slidesKeys : []), ...(hasSlidesImageSetup ? ["slidesImageScriptToken"] : [])];
     const missing = missingWorkflowSecretFields(snapshot, excluded);
     // 另一張安全卡正在顯示時不覆蓋它；使用者存好後，演練仍會精準補出下一組缺少的資料。

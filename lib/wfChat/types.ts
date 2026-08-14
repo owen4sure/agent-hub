@@ -98,7 +98,7 @@ export interface ChatExecutionState {
   reason?: string;
   failedNode?: string | null;
   /** needs-human 代表缺的是只有使用者手上才有的資料，不能假裝 AI 改程式就能補出來。 */
-  resolution?: "ai-fixable" | "needs-human" | null;
+  resolution?: "ai-fixable" | "needs-human" | "dry-run-boundary" | null;
 }
 export interface PendingChatApproval {
   id: string;

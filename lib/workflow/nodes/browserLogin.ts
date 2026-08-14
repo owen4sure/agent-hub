@@ -193,7 +193,19 @@ export const browserLoginNode: NodeDefinition = {
       await saveDebug(ctx, `00-filled-${attempt}`);
 
       ctx.log("正在讀取這一張登入驗證碼");
-      const captcha = await solveCaptchaFromLocator(page, captchaImgSel, ctx);
+      let captcha: string;
+      try {
+        captcha = await solveCaptchaFromLocator(page, captchaImgSel, ctx);
+      } catch (solveErr) {
+        const msg = solveErr instanceof Error ? solveErr.message : String(solveErr);
+        // 「這一張沒讀出來」是機率性失敗(零視覺模型時本機 OCR 單張可能失手)——換一張新驗證碼
+        // 繼續用同一個重試預算，不把整個節點判死。其他錯誤(選擇器找不到圖等)照樣往外拋。
+        if (msg.includes("換一張驗證碼再試") && attempt < CAPTCHA_ATTEMPT_HARD_CAP && Date.now() < captchaDeadline) {
+          ctx.log(`這一張驗證碼沒讀出來，換一張再試(第 ${attempt} 次)`);
+          continue;
+        }
+        throw solveErr;
+      }
       ctx.log(`驗證碼判讀：${captcha}`);
       await page.fill(captchaInputSel, captcha);
 

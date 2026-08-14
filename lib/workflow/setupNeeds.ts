@@ -50,14 +50,15 @@ export function setupNeedsFor(nodes: WorkflowNode[]): SetupNeed[] {
     });
   }
 
+  // 「複製簡報頁面」跟換圖共用同一支腳本部署，缺網址時走同一張設定卡
   const slidesImageLabels = nodes
-    .filter((node) => node.type === "google-slides-replace-image" && isBlank(node.config?.scriptUrl))
+    .filter((node) => (node.type === "google-slides-replace-image" || node.type === "google-slides-copy-page") && isBlank(node.config?.scriptUrl))
     .map(labelOf);
   if (slidesImageLabels.length > 0) {
     needs.push({
       kind: "slides-image-script",
       nodeLabels: slidesImageLabels,
-      reason: "這步要把圖片換到你的 Google 簡報上，需要先在你的帳號下建立一小段腳本（做一次就好）。",
+      reason: "這步要更新你的 Google 簡報(換圖/複製頁面)，需要先在你的帳號下建立一小段腳本（做一次就好）。",
       actionLabel: "去設定換簡報圖片",
     });
   }

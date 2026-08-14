@@ -7,7 +7,7 @@ import { getWorkflowModel } from "@/lib/settingsStore";
 import { aiRepairGraph, applyNodeConfigEdits, type RepairAttempt, type NodeEdit } from "@/lib/workflow/graphRepair";
 import { applyGraphStructureEdits, type GraphStructureEdits } from "@/lib/workflow/graphStructure";
 import { checkOscillation, computeEditFingerprint } from "@/lib/workflow/oscillationGuard";
-import { runWorkflowAndWait, classifyFailure, getMissingWorkflowSettings, isUserCancelled, getVarWarnings } from "@/lib/workflow/engine";
+import { runWorkflowAndWait, resumeRunAndWait, classifyFailure, getMissingWorkflowSettings, isUserCancelled, getVarWarnings } from "@/lib/workflow/engine";
 import { autorunActive, loopCancelRequested, loopAbortControllers } from "@/lib/workflow/busyLocks";
 import { beginRepairSession, endRepairSession, hasActiveRepairSession } from "@/lib/workflow/repairSessions";
 import { recordFix } from "@/lib/workflow/learnedFixes";
@@ -21,6 +21,7 @@ import { sampleMailForTest } from "@/lib/mailWatcher";
 import { getWorkflowCoverage } from "@/lib/workflow/coverage";
 import { recordEvidencePassport } from "@/lib/workflow/evidencePassport";
 import { hasExecutableSteps } from "@/lib/workflow/graphLint";
+import { appendServerAutorunSummary } from "@/lib/workflow/chatStateStore";
 import type { WorkflowNode } from "@/lib/workflow/types";
 
 // 一輪自動測試最多修幾次(跨節點總和)，以及同一個節點最多連續修幾次就放棄
@@ -118,7 +119,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ error: err instanceof Error ? err.message : "無法開始自動測試" }, { status: 409 });
   }
   try {
-    return await runAutoTestLoop(req, id, wf, loopAbort.signal);
+    const response = await runAutoTestLoop(req, id, wf, loopAbort.signal);
+    // 發起的分頁在迴圈進行中被關掉/重整的話，回應沒有地方落地——把步驟摘要補寫進伺服器端
+    // 對話備份，重開頁面由 recoverChatRuntime 撈回，不讓自動測試「無聲失蹤」(跟 /build 同一套思路)。
+    try {
+      if (req.signal.aborted) {
+        const payload = await response.clone().json() as { ok?: boolean; steps?: { title?: string; detail?: string }[] };
+        if (Array.isArray(payload.steps)) appendServerAutorunSummary(id, payload);
+      }
+    } catch { /* 補寫是加分機制，失敗不影響主回應 */ }
+    return response;
   } finally {
     autorunActive.delete(id);
     loopCancelRequested.delete(id);
@@ -289,8 +299,8 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
 
   // 讀 runs 表拿到錯誤原文(用來細分類) + 給使用者看的原因
   const readOutcome = (runId: string) =>
-    db.prepare(`SELECT error, reason FROM runs WHERE id = ?`).get(runId) as
-      | { error: string | null; reason: string | null }
+    db.prepare(`SELECT error, reason, resolution FROM runs WHERE id = ?`).get(runId) as
+      | { error: string | null; reason: string | null; resolution: string | null }
       | undefined;
 
   // 一律背景執行(headless)。以前草稿開有頭瀏覽器「讓人看得到」，但修復迴圈一輪一輪跑,
@@ -437,6 +447,18 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
         return failResponse();
       }
       const outcome = readOutcome(result.runId);
+      // ── 只讀演練的可驗證邊界(引擎已判定)：下游拿不到「被安全攔下的寫入步驟」的輸出而失敗。
+      // 這不是 bug，AI 沒有東西可修——以前這種失敗被當一般失敗餵給修復迴圈，AI 對著不存在的
+      // 問題一輪一輪燒算力(實測踩過)。到這裡=演練能驗的都驗過了，老實收工並講清楚下一步。
+      if (outcome?.resolution === "dry-run-boundary") {
+        steps.push({
+          kind: "done",
+          title: "已測到只讀演練的可驗證邊界——能驗的步驟全部通過",
+          detail: (outcome.reason ?? "").slice(0, 300) || "後面的步驟依賴被安全攔下的寫入動作，要等正式執行才會真的跑。",
+          runId: result.runId,
+        });
+        return NextResponse.json({ ok: true, steps, boundary: true });
+      }
       errBeforeFix = outcome?.error ?? result.error ?? "";
       category = classifyFailure(errBeforeFix).category;
 
@@ -547,8 +569,33 @@ async function runAutoTestLoop(req: Request, id: string, wf: NonNullable<ReturnT
       detail: explanation,
     });
 
-    // 重跑驗證(帶剩餘時間預算)
-    result = await runWorkflowAndWait(id, triggerParams, { headed, timeoutMs: Math.max(remainingMs(), 10_000), dryRun });
+    // ── 重跑驗證(帶剩餘時間預算) ──
+    // 修復只動了「失敗的那一步或它的下游」時，從失敗點續跑剛才那個 run：沿用前面已經通過的
+    // 登入/找信/下載/計算結果，不再整條從頭重跑——實測每一輪修復都在重新登入信箱、重抓同一封
+    // 附件，一輪多花好幾分鐘。動到上游節點或改了流程結構時，上游行為已變、舊輸出不可信，
+    // 照舊整條重跑；續跑起不來(run 被清掉等)也安全退回整條重跑，絕不因此漏驗證。
+    const graphNow = getWorkflow(id);
+    const downstreamOfFailure = new Set<string>([failedNode]);
+    if (graphNow) {
+      const queue = [failedNode];
+      while (queue.length) {
+        const cur = queue.pop()!;
+        for (const e of graphNow.edges) {
+          if (e.from === cur && !downstreamOfFailure.has(e.to)) { downstreamOfFailure.add(e.to); queue.push(e.to); }
+        }
+      }
+    }
+    const canResume = !structure && graphNow && edits.every((e) => downstreamOfFailure.has(e.nodeId));
+    let reran = false;
+    if (canResume) {
+      const resumed = await resumeRunAndWait(result.runId, { headed, timeoutMs: Math.max(remainingMs(), 10_000) });
+      if (resumed.resumed) {
+        steps.push({ kind: "run", title: "從失敗的那一步續跑(前面已通過的步驟直接沿用，不重跑)", runId: result.runId });
+        result = resumed;
+        reran = true;
+      }
+    }
+    if (!reran) result = await runWorkflowAndWait(id, triggerParams, { headed, timeoutMs: Math.max(remainingMs(), 10_000), dryRun });
     // 修好上游後這輪跑到了「等人簽核」＝簽核之前全通過，收工(不能把等簽核當失敗繼續修)
     if (result.status === "waiting") {
       for (const e of edits) verifiedFixes.set(e.nodeId, { config: e.after, label: e.nodeLabel }); // 這批修改被驗證有效(跑到簽核了)，不能回滾
