@@ -15,7 +15,7 @@ interface FakeImage {
 }
 interface FakeSlide { shapes: string[]; images: FakeImage[] }
 
-function loadScript(token: string, slides: FakeSlide[]) {
+function loadScript(token: string, slides: FakeSlide[], extra?: { sourceDeck?: FakeSlide[]; insertFails?: boolean }) {
   const calls: { saved: number } = { saved: 0 };
   const SHAPE = "SHAPE", GROUP = "GROUP", IMAGE = "IMAGE";
 
@@ -50,9 +50,14 @@ function loadScript(token: string, slides: FakeSlide[]) {
   // selfTest 會自己 create 一份新簡報；假環境要把它記下來，才驗得出「碰的是新的那份，不是正式那份」
   const created: { id: string; slides: FakeSlide[] }[] = [];
   const decks = new Map<string, FakeSlide[]>([["EXISTING", slides]]);
+  if (extra?.sourceDeck) decks.set("SOURCE", extra.sourceDeck);
   const wrap = (deck: FakeSlide[]) => ({
     getSlides: () => deck.map((s) => ({
       getObjectId: () => "page0",
+      // 跨簡報複製會握著這個物件在「插入之後」才刪——remove 必須用底層資料的「身分」找位置，
+      // 不能用產生當下的索引(插入讓所有頁碼位移，用舊索引刪會刪錯頁，跟真的 Apps Script 行為一致)。
+      __fake: s,
+      remove: () => { const at = deck.indexOf(s); if (at >= 0) deck.splice(at, 1); },
       getPageElements: () => s.shapes.map((text, i) => ({
         ...makeShape(text),
         remove: () => { s.shapes.splice(i, 1); },
@@ -61,6 +66,13 @@ function loadScript(token: string, slides: FakeSlide[]) {
       insertTextBox: (text: string) => { s.shapes.push(text); return {}; },
       insertImage: () => { s.images.push({ left: 20, top: 70, width: 600, height: 236 }); return {}; },
     })),
+    // 真的 Apps Script 的 insertSlide 接受另一份簡報的頁面並「複製」它——假環境也要複製，
+    // 不能共用參照，才驗得出「改目的簡報不會動到來源」。
+    insertSlide: (index: number, slideObj: { __fake: FakeSlide }) => {
+      if (extra?.insertFails) throw new Error("插入失敗(測試模擬)");
+      deck.splice(index, 0, JSON.parse(JSON.stringify(slideObj.__fake)) as FakeSlide);
+      return {};
+    },
     saveAndClose: () => { calls.saved++; },
     getId: () => [...decks.entries()].find(([, d]) => d === deck)?.[0] ?? "?",
     getUrl: () => "https://docs.google.com/presentation/d/NEWDECK/edit",
@@ -257,4 +269,82 @@ test("換圖腳本：傳既有測試簡報 id 進來就沿用同一份，不要�
   const r2 = second.post({ token: "tok123", action: "selfTest", imageBase64: PNG, beforeImageBase64: PNG, reusePresentationId: "EXISTING" });
   assert.equal(r2.ok, true);
   assert.equal(second.created.length, 0, "有可沿用的就不能再建新的");
+});
+
+test("跨簡報複製：來源那一頁原封不動搬進目的簡報同一個位置，舊頁換掉、頁數不變", () => {
+  const source: FakeSlide[] = [
+    { shapes: ["封面\n"], images: [] },
+    { shapes: ["月報表\n", "本週：18,338\n"], images: [] },
+  ];
+  const target = loadScript("tok123", [
+    { shapes: ["目錄\n"], images: [] },
+    { shapes: ["月報表\n", "上週的舊數字：18,344\n"], images: [] },
+    { shapes: ["下一頁\n"], images: [] },
+  ], { sourceDeck: source });
+  const reply = target.post({
+    token: "tok123", action: "copySlideByTitle",
+    sourcePresentationId: "SOURCE", targetPresentationId: "EXISTING",
+    sourceSlideTitle: "月報表", targetSlideTitle: "月報表",
+  });
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  assert.equal(reply.sourcePage, 2);
+  assert.equal(reply.targetPage, 2);
+  assert.equal(target.slides.length, 3, "換頁不是加頁,總頁數不能變");
+  assert.deepEqual(target.slides[1].shapes, ["月報表\n", "本週：18,338\n"], "第 2 頁要變成來源的內容");
+  assert.deepEqual(target.slides[2].shapes, ["下一頁\n"], "後面的頁不能被動到");
+  assert.deepEqual(source[1].shapes, ["月報表\n", "本週：18,338\n"], "來源簡報本身一個字都不能動");
+  assert.equal(target.calls.saved, 1, "目的簡報要存檔");
+});
+
+test("跨簡報複製：先插入後刪除——插入失敗時舊頁必須還在,不能兩頭空", () => {
+  const source: FakeSlide[] = [{ shapes: ["月報表\n"], images: [] }];
+  const target = loadScript("tok123", [
+    { shapes: ["月報表\n", "舊數字\n"], images: [] },
+  ], { sourceDeck: source, insertFails: true });
+  const reply = target.post({
+    token: "tok123", action: "copySlideByTitle",
+    sourcePresentationId: "SOURCE", targetPresentationId: "EXISTING", sourceSlideTitle: "月報表",
+  });
+  assert.equal(reply.ok, false);
+  assert.equal(target.slides.length, 1, "舊頁必須還在");
+  assert.deepEqual(target.slides[0].shapes, ["月報表\n", "舊數字\n"]);
+});
+
+test("跨簡報複製：找不到/不只一頁/來源目的相同都要講清楚並且什麼都不改", () => {
+  const source: FakeSlide[] = [{ shapes: ["別的標題\n"], images: [] }];
+  const a = loadScript("tok123", [{ shapes: ["月報表\n"], images: [] }], { sourceDeck: source });
+  const r1 = a.post({ token: "tok123", action: "copySlideByTitle", sourcePresentationId: "SOURCE", targetPresentationId: "EXISTING", sourceSlideTitle: "月報表" });
+  assert.equal(r1.ok, false);
+  assert.match(r1.error, /來源簡報.*找不到/);
+  assert.equal(a.slides.length, 1);
+
+  const b = loadScript("tok123", [
+    { shapes: ["A 月報表 明細\n"], images: [] },
+    { shapes: ["B 月報表 統計\n"], images: [] },
+  ], { sourceDeck: [{ shapes: ["月報表\n"], images: [] }] });
+  const r2 = b.post({ token: "tok123", action: "copySlideByTitle", sourcePresentationId: "SOURCE", targetPresentationId: "EXISTING", sourceSlideTitle: "月報表" });
+  assert.equal(r2.ok, false);
+  assert.match(r2.error, /目的簡報.*不只一頁/);
+
+  const c = loadScript("tok123", [{ shapes: ["月報表\n"], images: [] }]);
+  const r3 = c.post({ token: "tok123", action: "copySlideByTitle", sourcePresentationId: "EXISTING", targetPresentationId: "EXISTING", sourceSlideTitle: "月報表" });
+  assert.equal(r3.ok, false);
+  assert.match(r3.error, /同一份/);
+});
+
+test("跨簡報複製：目的標題沒另外給就沿用來源標題;缺必要參數要指名", () => {
+  const source: FakeSlide[] = [{ shapes: ["月報表\n"], images: [] }];
+  const a = loadScript("tok123", [{ shapes: ["月報表\n", "舊\n"], images: [] }], { sourceDeck: source });
+  const r = a.post({ token: "tok123", action: "copySlideByTitle", sourcePresentationId: "SOURCE", targetPresentationId: "EXISTING", sourceSlideTitle: "月報表" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.match(a.post({ token: "tok123", action: "copySlideByTitle", targetPresentationId: "EXISTING", sourceSlideTitle: "x" }).error, /sourcePresentationId/);
+  assert.match(a.post({ token: "tok123", action: "copySlideByTitle", sourcePresentationId: "SOURCE", sourceSlideTitle: "x" }).error, /targetPresentationId/);
+  assert.match(a.post({ token: "tok123", action: "copySlideByTitle", sourcePresentationId: "SOURCE", targetPresentationId: "EXISTING" }).error, /sourceSlideTitle/);
+});
+
+test("跨簡報複製：capabilities 要回報這個新動作(流程執行前檢查部署版本靠這個)", () => {
+  const { post } = loadScript("tok123", deck());
+  const reply = post({ token: "tok123", action: "capabilities" });
+  assert.equal(reply.ok, true);
+  assert.ok(reply.actions.includes("copySlideByTitle"), "部署舊版腳本時,流程要能檢查出來並指路重新部署");
 });

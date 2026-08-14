@@ -53,10 +53,11 @@ function doPost(e) {
       return out({ ok: false, error: "驗證碼不對——請確認 Agent Hub 設定裡的驗證碼跟腳本裡的 AGENT_HUB_TOKEN 一致" });
     }
     if (body.action === "capabilities") {
-      return out({ ok: true, agentHubVersion: 2, actions: ["replaceSlideImage", "selfTest"] });
+      return out({ ok: true, agentHubVersion: 3, actions: ["replaceSlideImage", "selfTest", "copySlideByTitle"] });
     }
     if (body.action === "replaceSlideImage") return replaceSlideImage(body);
     if (body.action === "selfTest") return selfTest(body);
+    if (body.action === "copySlideByTitle") return copySlideByTitle(body);
     return out({ ok: false, error: "不認得的動作: " + body.action });
   } catch (err) {
     return out({ ok: false, error: String(err && err.message ? err.message : err) });
@@ -206,6 +207,75 @@ function selfTest(body) {
     width: result.width,
     height: result.height,
   });
+}
+
+/**
+ * 跨簡報複製一整頁(2026-08)：把「來源簡報裡標題是Ｘ的那一頁」原封不動複製到
+ * 「目的簡報裡標題是Ｙ的那一頁」的位置，並把目的簡報原本那一頁換掉。
+ *
+ * 為什麼只有 Apps Script 做得到：Slides REST API 沒有「跨簡報複製頁面」——用 API 就得逐一
+ * 重建每個元素(表格、合併儲存格、字體、色塊)，永遠做不到「一模一樣」。Apps Script 的
+ * insertSlide(index, slide) 接受另一份簡報的頁面，連版面配置和母片都會一起帶過來。
+ *
+ * 順序鐵則：**先插入新頁、確認成功，才刪舊頁**。反過來的話，插入若失敗，舊頁已經沒了。
+ */
+function copySlideByTitle(body) {
+  return out(copySlideByTitleResult(body));
+}
+
+function copySlideByTitleResult(body) {
+  if (!body.sourcePresentationId) return { ok: false, error: "沒有指定來源簡報(sourcePresentationId)" };
+  if (!body.targetPresentationId) return { ok: false, error: "沒有指定目的簡報(targetPresentationId)" };
+  if (!body.sourceSlideTitle) return { ok: false, error: "沒有指定用哪個標題找來源頁(sourceSlideTitle)" };
+  if (String(body.sourcePresentationId) === String(body.targetPresentationId)) {
+    return { ok: false, error: "來源和目的是同一份簡報——請確認上游有抓到正確的來源檔案" };
+  }
+  var targetTitle = String(body.targetSlideTitle || body.sourceSlideTitle);
+
+  var source;
+  try { source = SlidesApp.openById(String(body.sourcePresentationId)); }
+  catch (e) { return { ok: false, error: "打不開來源簡報——請確認這個帳號看得到它，而且它是 Google 簡報(不是 .pptx 上傳檔)" }; }
+  var target;
+  try { target = SlidesApp.openById(String(body.targetPresentationId)); }
+  catch (e) { return { ok: false, error: "打不開目的簡報——請確認這個帳號有編輯權，而且它是 Google 簡報(不是 .pptx 上傳檔)" }; }
+
+  var src = findSlideByTitle(source, String(body.sourceSlideTitle));
+  if (src.error) return { ok: false, error: "來源簡報:" + src.error };
+  var dst = findSlideByTitle(target, targetTitle);
+  if (dst.error) return { ok: false, error: "目的簡報:" + dst.error };
+
+  target.insertSlide(dst.index, src.slide);
+  // 用握著的物件刪，不用「重算的頁碼」刪——插入後全部頁碼都位移了，用頁碼刪很容易刪錯頁。
+  dst.slide.remove();
+  target.saveAndClose();
+  return { ok: true, sourcePage: src.index + 1, targetPage: dst.index + 1 };
+}
+
+// 跟 replaceSlideImage 同一套找頁規則：先找「有一個文字方塊剛好等於標題」的頁(標題方塊)，
+// 找不到才退回「頁面上任何地方含這段字」；不只一頁一律報錯，絕不猜。
+function findSlideByTitle(presentation, needle) {
+  var slides = presentation.getSlides();
+  var exact = [];
+  var loose = [];
+  for (var i = 0; i < slides.length; i++) {
+    var texts = pageTexts(slides[i]);
+    var hitExact = false;
+    var hitLoose = false;
+    for (var t = 0; t < texts.length; t++) {
+      if (trim(texts[t]) === needle) hitExact = true;
+      if (texts[t].indexOf(needle) >= 0) hitLoose = true;
+    }
+    if (hitExact) exact.push({ index: i, slide: slides[i] });
+    if (hitLoose) loose.push({ index: i, slide: slides[i] });
+  }
+  var matched = exact.length > 0 ? exact : loose;
+  var how = exact.length > 0 ? "標題剛好是" : "頁面上含有";
+  if (matched.length === 0) return { error: "找不到標題是「" + needle + "」的頁面" };
+  if (matched.length > 1) {
+    var pages = matched.map(function (m) { return m.index + 1; }).join("、");
+    return { error: how + "「" + needle + "」的頁面不只一頁(第 " + pages + " 頁)——請改用只有目標那一頁才有的標題文字" };
+  }
+  return matched[0];
 }
 
 // 「替換前」的佔位圖由 agent-hub 產好送過來，這裡刻意不內嵌任何二進位——
