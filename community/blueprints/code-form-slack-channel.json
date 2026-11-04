@@ -1,0 +1,109 @@
+{
+  "id": "code-form-slack-channel",
+  "category": "整合串接",
+  "icon": "📮",
+  "name": "表單進來,自動發到同名 Slack 頻道(沒有就先開一個)",
+  "description": "網站表單(Webflow/Typeform 等)把提交內容 POST 進來 → 組成通知訊息 → 查 Slack 有沒有跟表單同名的頻道 → 有就直接發進去;沒有就先開頻道再發——每張表單的討論自動各歸各的頻道。表單名稱請用英文小寫(Slack 頻道命名限制)。Bot token 在 api.slack.com 建立 App 後於 OAuth & Permissions 頁取得(xoxb- 開頭,需 channels:read、channels:manage、chat:write 權限)。(改編自 n8n 社群範本庫 1958_Code_Slack_Send_Triggered.json)",
+  "triggerParams": [
+    { "key": "formName", "label": "表單名稱(英文小寫,將對應 Slack 頻道名)", "type": "text", "default": "contact-form" },
+    { "key": "name", "label": "填表人姓名", "type": "text", "default": "" },
+    { "key": "email", "label": "填表人 Email", "type": "text", "default": "" },
+    { "key": "message", "label": "表單內容", "type": "textarea", "default": "" }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(表單 Webhook)",
+      "config": {},
+      "position": { "x": 0, "y": 130 }
+    },
+    {
+      "id": "compose",
+      "type": "template-text",
+      "label": "組通知訊息",
+      "config": {
+        "template": "📮 表單「{{formName}}」有新提交\n姓名:{{name}}\nEmail:{{email}}\n內容:{{message}}",
+        "outputKey": "msg"
+      },
+      "position": { "x": 260, "y": 130 }
+    },
+    {
+      "id": "list",
+      "type": "http-request",
+      "label": "查現有頻道清單",
+      "config": {
+        "method": "GET",
+        "url": "https://slack.com/api/conversations.list?limit=1000&types=public_channel",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的Slack Bot token(xoxb-開頭)\"}",
+        "body": ""
+      },
+      "position": { "x": 520, "y": 130 }
+    },
+    {
+      "id": "exists",
+      "type": "if-condition",
+      "label": "同名頻道已存在?",
+      "config": {
+        "left": "{{body}}",
+        "op": "contains",
+        "right": "\"name\":\"{{formName}}\""
+      },
+      "position": { "x": 780, "y": 130 }
+    },
+    {
+      "id": "send",
+      "type": "http-request",
+      "label": "發到既有頻道",
+      "config": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的Slack Bot token(xoxb-開頭)\", \"Content-Type\": \"application/json\"}",
+        "body": "{\"channel\": \"{{formName}}\", \"text\": \"{{msg}}\"}"
+      },
+      "position": { "x": 1040, "y": 60 }
+    },
+    {
+      "id": "create",
+      "type": "http-request",
+      "label": "先開新頻道",
+      "config": {
+        "method": "POST",
+        "url": "https://slack.com/api/conversations.create",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的Slack Bot token(xoxb-開頭)\", \"Content-Type\": \"application/json\"}",
+        "body": "{\"name\": \"{{formName}}\"}"
+      },
+      "position": { "x": 1040, "y": 220 }
+    },
+    {
+      "id": "send2",
+      "type": "http-request",
+      "label": "發到新頻道",
+      "config": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的Slack Bot token(xoxb-開頭)\", \"Content-Type\": \"application/json\"}",
+        "body": "{\"channel\": \"{{formName}}\", \"text\": \"🆕 已為這張表單開了新頻道。\\n{{msg}}\"}"
+      },
+      "position": { "x": 1300, "y": 220 }
+    },
+    {
+      "id": "err",
+      "type": "telegram-notify",
+      "label": "查頻道失敗告警",
+      "config": {
+        "message": "🆘 表單通知發不出去:查 Slack 頻道清單失敗({{error}})。請檢查 Bot token 與權限。"
+      },
+      "position": { "x": 520, "y": 320 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "compose" },
+    { "from": "compose", "to": "list" },
+    { "from": "list", "to": "exists" },
+    { "from": "exists", "to": "send", "fromPort": "true" },
+    { "from": "exists", "to": "create", "fromPort": "false" },
+    { "from": "create", "to": "send2" },
+    { "from": "list", "to": "err", "fromPort": "error" }
+  ]
+}

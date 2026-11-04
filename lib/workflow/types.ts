@@ -1,0 +1,247 @@
+import type { Page, Browser } from "playwright";
+
+/** 節點/觸發參數欄位定義，供產生設定表單 + 給 AI 知道有哪些參數 */
+export interface ParamField {
+  key: string;
+  label: string;
+  type: "text" | "number" | "date-or-token" | "select" | "boolean" | "secret" | "code" | "textarea";
+  default?: string;
+  help?: string;
+  /** select 的選項；可用 "value=顯示文字" 指定顯示名 */
+  options?: string[];
+  /** 衍生欄位：由其他參數(如期間)自動算出，執行表單不顯示，但仍會參與解析 */
+  derived?: boolean;
+  /** 「留空」對這個欄位是有意義的設定(如找信節點的日期格式:留空=改用純標題搜尋)。
+   * 沒標的欄位空值會被引擎自動補回預設值(防 AI 把選擇器清壞)——代價是永遠無法刻意清空;
+   * 標了 allowEmpty 的欄位,明確存成空字串("")就真的是空,不會被補回預設(undefined/null 仍補)。 */
+  allowEmpty?: boolean;
+  /** 網頁技術碼(CSS 選擇器、內部系統代號)這類一般使用者看不懂、也幾乎不用手動改的欄位——
+   * 「直接改設定」快速編輯區把它收進預設收合的「進階設定」，不要跟「標題關鍵字」這種
+   * 一看就懂的欄位混在一起。壞了的話本來就該用「讓 AI 修」讀真實畫面調整，不是要人手動改。 */
+  advanced?: boolean;
+}
+
+/** 一個節點在 workflow 圖裡的定義（存進 workflow json） */
+export interface WorkflowNode {
+  id: string;
+  type: string;
+  label: string;
+  config: Record<string, unknown>;
+  position: { x: number; y: number };
+}
+
+export interface WorkflowEdge {
+  from: string;
+  to: string;
+  /** 分支節點(if/switch)用來標示走哪個 port，例如 "true"/"false"/"case-1" */
+  fromPort?: string;
+}
+
+export type N8nMigrationFindingStatus = "mapped" | "review" | "unsupported";
+
+/**
+ * n8n 匯入後的安全遷移護照。只存可核對的摘要，不存原始 JSON、網址 query、憑證或程式碼。
+ */
+export interface N8nMigrationSummary {
+  sourceName: string;
+  sourceFingerprint: string;
+  sourceNodeCount: number;
+  sourceEdgeCount: number;
+  /** n8n 匯出中存在、但目前沒有安全一對一轉換的連線數；有值時必須人工重接/確認。 */
+  unmappedConnectionCount?: number;
+  mappedCount: number;
+  reviewCount: number;
+  unsupportedCount: number;
+  clearedCodeCount: number;
+  clearedCredentialCount: number;
+  importedAt: string;
+  originalNodes: {
+    agentHubNodeId: string;
+    label: string;
+    n8nType: string;
+    status: N8nMigrationFindingStatus;
+    suggestedType: string | null;
+  }[];
+}
+
+export interface Workflow {
+  id: string;
+  name: string;
+  status: "draft" | "official";
+  builtin: boolean;
+  description?: string;
+  longDescription?: string;
+  defaultModel: string;
+  requiresSecrets?: { key: string; label: string; type: "text" | "password" }[];
+  triggerParams?: ParamField[];
+  /** 這條流程失敗時要自動執行的備援流程(名稱或 id)。匯入時會被清空(不能讓外來檔案指揮本機流程)。 */
+  onFailureWorkflow?: string;
+  /** 群組(工作/私人…)——首頁按群組分區顯示。空/未設定=未分組。 */
+  group?: string;
+  /**
+   * 這條流程產出的檔案要另外存去哪個資料夾。
+   * 未設定 = 用「設定」頁的全域資料夾；`"none"` = 不另外存，只留在平台的「產出檔案」裡。
+   * (使用者原話：「我每個要放的資料夾不一定一樣，也有可能不用放資料夾直接放在『產出檔案』裡面就好」)
+   */
+  outputFolder?: string;
+  /** 外部檔案匯入後，第一次執行前必須由使用者明確確認其本機讀檔／外送能力。 */
+  importedUntrusted?: boolean;
+  n8nMigration?: N8nMigrationSummary;
+  n8nMigrationAcknowledgedAt?: string;
+  n8nMigrationReviews?: Record<string, { decision: "acknowledged"; note?: string; reviewedAt: string }>;
+  /**
+   * 複製流程時保留的白話交接。不複製冗長聊天、帳密或瀏覽器登入；但使用者明確拿來定義
+   * 流程的檔案／圖片會複製成副本自己的私有附件，讓副本的 AI 能接著理解而非叫人重傳。
+   */
+  copyHandoff?: {
+    sourceName: string;
+    summary: string;
+    copiedAt: string;
+    attachments?: { assetId: string; name: string; kind: "file" | "image" }[];
+    /** 對話或附件超過交接上限而被截斷早期內容時=true——複製當下要據此警告使用者，
+     * 不能默默截斷卻讓人以為 AI 完整承接了原流程的脈絡。 */
+    truncatedChat?: boolean;
+    truncatedAttachments?: boolean;
+  };
+  /**
+   * 使用者在對話裡用「記住／規則是／以後都要」這類明確收尾語要求持久保存的規則(見
+   * chatCommand.ts 的 extractRememberedRule)——跟 copyHandoff.summary 這種自由文字摘要不同，
+   * 這裡只收「使用者親口明確要求記住」的句子，觸發條件刻意保守，避免把一般閒聊誤存成規則。
+   * 建圖/改圖時以「優先於背景脈絡」的措辭餵給模型(見 builder.ts 的 inheritedContextSection)。
+   * 這是 2026-07 第三輪外部審查「沒有穩定的工作流需求規格」這個 P1 的縮小範圍版本——完整版
+   * (允許修改欄位白名單、正式驗收條件)是更大的架構專案，這裡先解決「使用者明確確認的決定
+   * 沒有持久化位置、只能靠模型重讀聊天猜」這個最具體的痛點。
+   */
+  confirmedRules?: { text: string; confirmedAt: string }[];
+  /** 使用者親自提供的已知正確結果；綁定圖版本，圖改動後不得默默沿用。 */
+  acceptanceSpec?: { expectedAnswer: string; graphFingerprint: string; savedAt: string };
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+}
+
+/** 貫穿整張圖的長生資源（瀏覽器等），讓瀏覽器類節點共用同一分頁 */
+export interface RunSession {
+  getPage(): Promise<Page>;
+  getBrowser(): Promise<Browser>;
+  /** 回傳「已經開著的」分頁,沒有就回 null——不像 getPage 會 lazy 新開一個。
+   * 節點失敗時引擎用它把當下真實頁面截圖+存 HTML,不會平白開一個空白頁污染除錯現場。 */
+  currentPage(): Page | null;
+  close(): Promise<void>;
+  /** 節點逾時後呼叫：強制關掉當下分頁(讓卡住的操作立刻拋錯中止)，下一步會拿到全新分頁，不會跟逾時的殭屍操作搶同一頁 */
+  resetPage(): Promise<void>;
+  /** 登入成功後把 cookie/localStorage 原子保存到本機私有檔；下次同 workflow 可直接沿用，避免每次重解 CAPTCHA。 */
+  saveState(): Promise<void>;
+}
+
+/** 傳給每個節點 execute 的內容 */
+export interface NodeContext {
+  runId: string;
+  workflowId: string;
+  nodeId: string;
+  input: Record<string, unknown>;
+  /**
+   * 「分開層」：每個上游節點**自己產出**的欄位(不含沿路繼承的)，key 是節點代號。
+   * input 是攤平合併(同名後蓋前，可能丟資訊)；同名欄位有多個來源時，用這裡才能精準拿到
+   * 「某一步的值」——範本寫 {{節點代號.欄位}}、custom-code 寫 ctx.outputs["節點代號"].欄位。
+   * (真實踩過:兩次下載都輸出 attachmentPath,後者蓋掉前者,下游讀錯檔。)
+   * optional 是為了讓測試/重播的假 ctx 不用每處都補；引擎正常執行一定會給。
+   */
+  outputs?: Record<string, Record<string, unknown>>;
+  /**
+   * 「直屬分支鏈」：每一條**直接接進這個節點**的線各一個陣列，內容是那條線往上游走的節點代號
+   * (自己排第一，再由近到遠)。要分辨「這份資料是哪一條分支給的」只能看這裡——`outputs` 是整個
+   * 祖先集合，分不出直屬分支與中間步驟(真實踩過:合併資料節點把未篩選的原始清單也一起合進去)。
+   * optional 同 outputs：假 ctx 不用補，引擎正常執行一定會給。
+   */
+  upstreamChains?: string[][];
+  config: Record<string, unknown>;
+  secrets: Record<string, string>;
+  vars: Record<string, unknown>;
+  model: string;
+  baseUrl: string;
+  /** 這條流程設定的產出資料夾(未設定=用全域設定；"none"=不另外存，只留在平台的產出檔案裡) */
+  workflowOutputFolder?: string;
+  apiKey: string;
+  headed: boolean;
+  outputDir: string;
+  debugDir: string;
+  session: RunSession;
+  /** 只讀驗證模式:節點若會寫出/發送，看到這個是 true 就別真的做(引擎已在外層略過已知的寫出型節點；
+   * custom-code 另會在受限 VM 執行，並以唯讀能力包住瀏覽器與檔案介面)。 */
+  dryRun?: boolean;
+  /** 使用者這次執行勾了「通知/寄信先都寄給我自己」時填的信箱。webmail-send/send-email 節點看到
+   * 這個就把收件人改成它(不動存檔的節點設定)，讓使用者能真的跑到底、看到算出來的內容，又不會
+   * 誤觸正式收件人。只在真的要送出時才有意義；dryRun 本來就不會真的送。 */
+  testSendOverride?: string;
+  log: (msg: string) => void;
+  /** 登記一個產出檔，讓它出現在 dashboard 的檔案清單/可下載 */
+  // kind 省略 = 'output'(交付產出,會列在「產出檔案」頁)；'intermediate' = 抓進來給下游/AI 對話
+  // 讀的中間檔(信件附件、解壓出的檔案)——照樣登記讓生命週期跟著 run,只是不列在產出清單。
+  registerFile: (filename: string, filePath: string, mime: string, kind?: "output" | "intermediate") => void;
+  /** 使用者按「⏹ 停止執行」時會 abort。cancelRequested 只在節點「之間」被檢查，對正在跑的 fetch/AI
+   * 呼叫沒有效果——按停止後畫面卡在同一個節點好幾十秒是這個原因。會等待外部呼叫的節點(http-request/
+   * llm-decide/custom-code 產碼)請把它接進 fetch 的 signal 或 callAIWithRetry 的 opts.signal，
+   * 停止才能立刻中斷正在進行的呼叫，而不是等它自然跑完才發現要停。 */
+  cancelSignal: AbortSignal;
+  /** 情境安全重播可指定 wait-approval 要模擬哪個出口；只由伺服器在 dry-run 注入。 */
+  scenarioApprovalDecisions?: Record<string, "approved" | "rejected">;
+  /** 目前身處第幾層 repeat-steps 迴圈內：引擎直接執行的節點不帶(=0)，repeat-steps 執行內嵌步驟時
+   * 傳 +1 給那一步。repeat-steps 用它擋住超過 MAX_REPEAT_STEPS_NESTING 的巢狀——lintGraph 已經在
+   * 執行入口擋過一次，這裡是「舊資料/繞過建圖流程/未來新增執行入口」時的最後一道，在任何副作用之前。 */
+  repeatDepth?: number;
+}
+
+/** 節點輸出的 port（分支節點會回傳多個；一般節點回一個 "out"） */
+export interface NodeResult {
+  /** 這個節點產生的資料，會傳給下游 */
+  output: Record<string, unknown>;
+  /** 分支節點指定接下來只走哪些 port；不指定=全部下游都走 */
+  activePorts?: string[];
+}
+
+export interface NodeDefinition {
+  type: string;
+  category: "trigger" | "browser" | "data" | "file" | "integration" | "logic" | "ai" | "custom";
+  label: string;
+  description: string;
+  icon: string;
+  configSchema: ParamField[];
+  /** 這個節點會輸出哪些欄位(給下游用 {{欄位}} 引用)，讓 AI 建圖時正確接線 */
+  outputs?: string;
+  /**
+   * 這個節點執行時會用到哪些帳密欄位(依當下 config 回答，例如 browser-login 的帳密欄位名可設定)。
+   * 有宣告的話，saveWorkflow 會自動把它們併進 workflow.requiresSecrets——設定頁的帳密欄位就是從
+   * requiresSecrets 來的；AI 從零建的圖沒有人手動宣告，不自動推導的話使用者根本沒有地方填帳密。
+   */
+  secretFields?(config: Record<string, unknown>): { key: string; label: string; type: "text" | "password" }[];
+  retryable: boolean;
+  /** 整個節點最多嘗試次數。不設時 retryable 節點預設 3 次；自己內建重試迴圈的節點要設 1，避免內外層重試相乘。 */
+  maxAttempts?: number;
+  /** 單次執行的逾時上限(毫秒)。不設就用引擎預設(3分鐘)。repeat-steps 這種「一個節點做 N 輪工作」
+   * 的容器型節點必須放寬——N 輪瀏覽器操作+第一次執行可能要產程式碼,3 分鐘必然不夠,逾時重試又整包重來。 */
+  timeoutMs?: number;
+  execute(ctx: NodeContext): Promise<NodeResult>;
+  /**
+   * 寫入回讀驗證(2026-08,使用者拍板的平台級制度):寫入類節點執行成功後,引擎自動回頭「讀一次
+   * 剛剛寫的東西」核對真的落地了——每一筆寫入都要有回讀證據,不做 fire-and-forget。
+   * ok=核對通過(紀錄標「✓ 已核對」);沒過=標警告但**不讓節點失敗**(寫入已經發生,回讀失敗
+   * 可能只是暫時的,硬失敗會觸發重試把同一筆再寫一次)。只在正式執行呼叫,dry-run 不會。
+   */
+  verifyWrite?(ctx: NodeContext, output: Record<string, unknown>): Promise<{ ok: boolean; evidence: string }>;
+}
+
+/** 重跑也沒用的錯誤 → 不重試 */
+export class PermanentError extends Error {}
+/** 暫時性錯誤(網路/timeout) → 可重試 */
+export class RetryableError extends Error {}
+/** 等人簽核節點拋出：不是失敗，是「流程暫停等真人決定」。引擎收到會把 run 標成 waiting，
+ * 簽核人按核准/拒絕後由 approvals 模組用續跑機制讓流程從簽核節點接著跑。 */
+export class WaitingForHuman extends Error {
+  approvalId: string;
+  approvalMessage: string;
+  constructor(approvalId: string, approvalMessage: string) {
+    super(`等待簽核中：${approvalMessage.slice(0, 80)}`);
+    this.approvalId = approvalId;
+    this.approvalMessage = approvalMessage;
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "id": "hook-csv-batch-import",
+  "category": "檔案自動化",
+  "icon": "🗂️",
+  "name": "舊平台會員名單批次轉格式匯入試算表",
+  "description": "換平台搬家最煩的就是名單格式對不上——把舊平台匯出的 CSV 內容(整段文字)POST 進來 → 自動解析並把欄位轉成新格式(姓+名合併、Email 空白的壞資料直接剔除) → 一筆一筆寫進 Google 試算表 → 完成回報匯入了幾筆。解析失敗會告警而不是塞一堆亂欄位進表。(改編自 n8n 社群範本庫 1132_Webhook_Extractfromfile_Process_Webhook.json)",
+  "triggerParams": [
+    { "key": "csvText", "label": "CSV 內容(整段貼上或由外部工具 POST)", "type": "textarea", "default": "First Name,Last Name,Email,Phone\n小明,王,ming@example.com,0912345678" }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(Webhook 收 CSV)",
+      "config": {},
+      "position": { "x": 0, "y": 130 }
+    },
+    {
+      "id": "parse",
+      "type": "custom-code",
+      "label": "解析並轉成新格式",
+      "config": {
+        "intent": "把上游傳進來的 csvText 當 CSV 解析:第一列是欄位名(如 First Name, Last Name, Email, Phone),要支援欄位值被雙引號包住、裡面含逗號的情況。每一列轉成新格式:First Name 和 Last Name 用一個空格串成 fullName、Email 轉小寫放 email、Phone 原樣放 phone;Email 是空白或不含 @ 的列直接略過不要。輸出 rows(陣列,每筆是 {fullName, email, phone})、rowCount(保留的筆數)、skippedCount(被剔除的筆數)。",
+        "code": ""
+      },
+      "position": { "x": 260, "y": 130 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "有資料可匯入?",
+      "config": {
+        "left": "{{rowCount}}",
+        "op": ">",
+        "right": "0"
+      },
+      "position": { "x": 520, "y": 130 }
+    },
+    {
+      "id": "each",
+      "type": "repeat-steps",
+      "label": "逐筆寫進試算表",
+      "config": {
+        "items": "{{rows}}",
+        "itemVar": "item",
+        "steps": "[{\"type\": \"google-sheet-append\", \"label\": \"寫入一筆會員\", \"config\": {\"cells\": \"{{item.fullName}}\\n{{item.email}}\\n{{item.phone}}\\n{{today}}\", \"sheetName\": \"\"}}]",
+        "outputKey": "imported"
+      },
+      "position": { "x": 780, "y": 60 }
+    },
+    {
+      "id": "done",
+      "type": "telegram-notify",
+      "label": "回報匯入結果",
+      "config": {
+        "message": "🗂️ 名單匯入完成:成功 {{rowCount}} 筆,剔除壞資料 {{skippedCount}} 筆。"
+      },
+      "position": { "x": 1040, "y": 60 }
+    },
+    {
+      "id": "empty",
+      "type": "telegram-notify",
+      "label": "整份都是壞資料告警",
+      "config": {
+        "message": "⚠️ 這次 POST 進來的名單一筆都沒匯入(剔除 {{skippedCount}} 筆)——請確認匯出的 CSV 有 Email 欄且欄位名在第一列。"
+      },
+      "position": { "x": 780, "y": 220 }
+    },
+    {
+      "id": "err",
+      "type": "telegram-notify",
+      "label": "解析失敗告警",
+      "config": {
+        "message": "🆘 名單解析失敗({{error}})——內容可能不是 CSV,已停止匯入,試算表沒有被寫入任何東西。"
+      },
+      "position": { "x": 260, "y": 320 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "parse" },
+    { "from": "parse", "to": "gate" },
+    { "from": "gate", "to": "each", "fromPort": "true" },
+    { "from": "each", "to": "done" },
+    { "from": "gate", "to": "empty", "fromPort": "false" },
+    { "from": "parse", "to": "err", "fromPort": "error" }
+  ]
+}

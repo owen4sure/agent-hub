@@ -1,0 +1,131 @@
+{
+  "id": "int-lead-capture",
+  "category": "行銷業務",
+  "icon": "🎯",
+  "name": "表單收名單,AI 先擋假信箱再入庫通知",
+  "description": "給表單一個 Webhook 網址,有人留資料(name、email、message)進來 → AI 先判斷 email 像不像真的 → 是真的才寫進 Google 試算表、並發 Discord 通知團隊;疑似假信箱就發桌面提醒你人工看一眼。避免業務名單被灌一堆亂填的假資料。Discord 通知走 Webhook 網址(見下方設定)。(改編自 n8n 社群範本庫 2028_Discord_Hunter_Automate_Triggered.json)",
+  "triggerParams": [
+    {
+      "key": "name",
+      "label": "姓名",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "email",
+      "label": "Email",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "message",
+      "label": "需求/留言",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(Webhook 收表單)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 150
+      }
+    },
+    {
+      "id": "valid",
+      "type": "llm-decide",
+      "label": "AI 判斷信箱真假",
+      "config": {
+        "prompt": "判斷這個 email 看起來像不像真實可用的信箱(格式正確、網域正常、不是明顯亂填或測試用的如 a@a.com、test@test):{{email}}",
+        "outputKey": "emailValid",
+        "choices": "有效,無效"
+      },
+      "position": {
+        "x": 240,
+        "y": 150
+      }
+    },
+    {
+      "id": "chk",
+      "type": "if-condition",
+      "label": "信箱有效嗎?",
+      "config": {
+        "left": "{{emailValid}}",
+        "op": "==",
+        "right": "有效"
+      },
+      "position": {
+        "x": 480,
+        "y": 150
+      }
+    },
+    {
+      "id": "save",
+      "type": "google-sheet-append",
+      "label": "寫進名單試算表",
+      "config": {
+        "cells": "{{today}}\n{{name}}\n{{email}}\n{{message}}"
+      },
+      "position": {
+        "x": 720,
+        "y": 80
+      }
+    },
+    {
+      "id": "ping",
+      "type": "http-request",
+      "label": "發 Discord 通知",
+      "config": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/請換成你的WebhookID/請換成你的Token",
+        "headers": "{\"Content-Type\":\"application/json\"}",
+        "body": "{\"content\":\"🎯 新名單:{{name}} <{{email}}>\\n需求:{{message}}\"}"
+      },
+      "position": {
+        "x": 960,
+        "y": 80
+      }
+    },
+    {
+      "id": "bad",
+      "type": "desktop-notify",
+      "label": "疑似假信箱提醒",
+      "config": {
+        "title": "名單待人工確認",
+        "message": "⚠️ 這筆的信箱疑似無效,請人工看一下:{{name}} / {{email}}"
+      },
+      "position": {
+        "x": 720,
+        "y": 300
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "valid"
+    },
+    {
+      "from": "valid",
+      "to": "chk"
+    },
+    {
+      "from": "chk",
+      "to": "save",
+      "fromPort": "true"
+    },
+    {
+      "from": "save",
+      "to": "ping"
+    },
+    {
+      "from": "chk",
+      "to": "bad",
+      "fromPort": "false"
+    }
+  ]
+}

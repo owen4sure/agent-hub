@@ -1,0 +1,69 @@
+{
+  "id": "tg-sale-pipeline",
+  "category": "整合串接",
+  "icon": "🛒",
+  "name": "商品售出自動記名單、加電子報、發通知",
+  "description": "賣場(Gumroad、簡單商店這類)的售出 Webhook 打進來 → 買家資料先記進 Google 試算表名單 → 打電子報平台的 API 幫買家完成訂閱 → Telegram 通知你有新訂單;中途任何一步出錯都走失敗分支告警並附上買家資料,不會默默漏掉一筆。電子報那步把 example.com 換成你用的平台(Beehiiv、ConvertKit 等),API Key 在平台後台的 API/Integrations 頁產生後換掉 header 裡的占位字串。(改編自 n8n 社群範本庫 1741_Telegram_Gumroad_Create_Webhook.json)",
+  "triggerParams": [
+    { "key": "email", "label": "買家信箱", "type": "text", "default": "" },
+    { "key": "productName", "label": "商品名稱", "type": "text", "default": "" },
+    { "key": "amount", "label": "金額", "type": "text", "default": "" },
+    { "key": "country", "label": "買家國家", "type": "text", "default": "" }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(Webhook:售出事件)",
+      "config": {},
+      "position": { "x": 0, "y": 130 }
+    },
+    {
+      "id": "crm",
+      "type": "google-sheet-append",
+      "label": "買家記進名單試算表",
+      "config": {
+        "cells": "{{today}}\n{{email}}\n{{productName}}\n{{amount}}\n{{country}}",
+        "sheetName": ""
+      },
+      "position": { "x": 260, "y": 130 }
+    },
+    {
+      "id": "sub",
+      "type": "http-request",
+      "label": "幫買家訂閱電子報",
+      "config": {
+        "method": "POST",
+        "url": "https://example.com/api/newsletter/subscriptions",
+        "headers": "{\"Content-Type\": \"application/json\", \"Authorization\": \"Bearer 請換成你的電子報平台APIKey\"}",
+        "body": "{\"email\": \"{{email}}\", \"source\": \"purchase\"}"
+      },
+      "position": { "x": 520, "y": 130 }
+    },
+    {
+      "id": "tg",
+      "type": "telegram-notify",
+      "label": "新訂單通知",
+      "config": {
+        "message": "🛒 新訂單!\n商品:{{productName}}\n買家:{{email}}({{country}})\n金額:{{amount}}\n已記進名單並加入電子報 ✅"
+      },
+      "position": { "x": 780, "y": 130 }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "哪步出錯都告警",
+      "config": {
+        "message": "🆘 售出後續處理出錯:{{error}}(卡在步驟 {{errorStep}})\n請手動補這筆:{{email}}/{{productName}}/{{amount}}"
+      },
+      "position": { "x": 390, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "crm" },
+    { "from": "crm", "to": "sub" },
+    { "from": "sub", "to": "tg" },
+    { "from": "crm", "to": "alert", "fromPort": "error" },
+    { "from": "sub", "to": "alert", "fromPort": "error" }
+  ]
+}

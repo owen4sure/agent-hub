@@ -1,0 +1,110 @@
+{
+  "id": "poll-and-notify",
+  "category": "監控告警",
+  "icon": "⏳",
+  "name": "送出請求,等處理完查結果再通知",
+  "description": "對系統送出一個請求 → 等 30 秒讓它處理 → 再查一次結果 → 狀態符合才通知。「觸發慢工作+輪詢結果」的標準做法。(改編自 n8n 社群範本庫)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "kick",
+      "type": "http-request",
+      "label": "送出請求",
+      "config": {
+        "method": "POST",
+        "url": "https://example.com/api/jobs",
+        "headers": "{}",
+        "body": "{\"task\":\"daily\"}"
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "hold",
+      "type": "wait",
+      "label": "等它處理 30 秒",
+      "config": {
+        "seconds": "30"
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    },
+    {
+      "id": "poll",
+      "type": "http-request",
+      "label": "查結果",
+      "config": {
+        "method": "GET",
+        "url": "https://example.com/api/jobs/latest",
+        "headers": "{}",
+        "body": ""
+      },
+      "position": {
+        "x": 780,
+        "y": 120
+      }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "完成了嗎?",
+      "config": {
+        "left": "{{status}}",
+        "op": "==",
+        "right": "200"
+      },
+      "position": {
+        "x": 1040,
+        "y": 120
+      }
+    },
+    {
+      "id": "ping",
+      "type": "telegram-notify",
+      "label": "通知結果",
+      "config": {
+        "message": "⏳ 工作完成:{{body}}"
+      },
+      "position": {
+        "x": 1300,
+        "y": 60
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "kick"
+    },
+    {
+      "from": "kick",
+      "to": "hold"
+    },
+    {
+      "from": "hold",
+      "to": "poll"
+    },
+    {
+      "from": "poll",
+      "to": "gate"
+    },
+    {
+      "from": "gate",
+      "to": "ping",
+      "fromPort": "true"
+    }
+  ]
+}

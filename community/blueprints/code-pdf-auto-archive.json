@@ -1,0 +1,97 @@
+{
+  "id": "code-pdf-auto-archive",
+  "category": "檔案自動化",
+  "icon": "📁",
+  "name": "新 PDF 掉進資料夾,AI 辨識類型自動歸檔",
+  "description": "監聽一個資料夾(例如掃描器或下載的輸出位置),有新 PDF 就讀出文字 → AI 判斷是不是合約類文件 → 是就自動複製到歸檔資料夾並通知你;不是就通知你略過了。讀不了的檔案走失敗分支告警,不會無聲吞掉。(改編自 n8n 社群範本庫 0298_Code_Readpdf_Send_Triggered.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "監聽資料夾(新 PDF)",
+      "config": {
+        "watchPath": "",
+        "watchPattern": ".pdf"
+      },
+      "position": { "x": 0, "y": 130 }
+    },
+    {
+      "id": "read",
+      "type": "read-file",
+      "label": "讀出 PDF 文字",
+      "config": {
+        "path": "{{filePath}}",
+        "maxChars": "12000"
+      },
+      "position": { "x": 260, "y": 130 }
+    },
+    {
+      "id": "gate",
+      "type": "llm-decide",
+      "label": "AI 判斷文件類型",
+      "config": {
+        "prompt": "以下是一份 PDF 文件的文字內容:\n{{fileText}}\n\n判斷它是「合約類」還是「一般文件」。判斷標準:出現雙方當事人名稱、逐條的條款編號(第一條/第二條…)、簽署或用印欄位,就是合約類;像宣傳單、操作說明、簡報講義、活動通知這種沒有約定雙方權利義務的,就是一般文件。",
+        "outputKey": "docType",
+        "choices": "合約類,一般文件"
+      },
+      "position": { "x": 520, "y": 130 }
+    },
+    {
+      "id": "route",
+      "type": "if-condition",
+      "label": "是合約類?",
+      "config": {
+        "left": "{{docType}}",
+        "op": "==",
+        "right": "合約類"
+      },
+      "position": { "x": 780, "y": 130 }
+    },
+    {
+      "id": "move",
+      "type": "custom-code",
+      "label": "複製到歸檔資料夾",
+      "config": {
+        "intent": "把上游傳進來的 filePath 指向的檔案複製一份到本次執行的產出資料夾(檔名維持原樣,若同名檔已存在就在檔名後加時間戳避免覆蓋)。輸出 archivedPath(複製後的完整路徑)與 archivedName(存檔後的檔名)。",
+        "code": ""
+      },
+      "position": { "x": 1040, "y": 60 }
+    },
+    {
+      "id": "ping",
+      "type": "telegram-notify",
+      "label": "通知已歸檔",
+      "config": {
+        "message": "📁 已歸檔合約文件:{{archivedName}}\n存放位置:{{archivedPath}}"
+      },
+      "position": { "x": 1300, "y": 60 }
+    },
+    {
+      "id": "skip",
+      "type": "telegram-notify",
+      "label": "通知略過",
+      "config": {
+        "message": "⏭️ {{fileName}} 經 AI 判斷是「{{docType}}」,不歸檔、原地保留。"
+      },
+      "position": { "x": 1040, "y": 220 }
+    },
+    {
+      "id": "err",
+      "type": "telegram-notify",
+      "label": "讀檔失敗告警",
+      "config": {
+        "message": "🆘 有新檔案但讀不出內容:{{fileName}}({{error}})。請確認它是正常的 PDF。"
+      },
+      "position": { "x": 260, "y": 320 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "read" },
+    { "from": "read", "to": "gate" },
+    { "from": "gate", "to": "route" },
+    { "from": "route", "to": "move", "fromPort": "true" },
+    { "from": "move", "to": "ping" },
+    { "from": "route", "to": "skip", "fromPort": "false" },
+    { "from": "read", "to": "err", "fromPort": "error" }
+  ]
+}

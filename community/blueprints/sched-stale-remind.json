@@ -1,0 +1,73 @@
+{
+  "id": "sched-stale-remind",
+  "category": "監控告警",
+  "icon": "⏰",
+  "name": "追蹤表逾期未回覆自動提醒",
+  "description": "客戶詢問都記在一份共編試算表(客戶名/主題/最後回覆日/狀態)。排程每天讀表 → AI 找出「超過 3 天沒回覆且還沒結案」的項目 → 有才發 Slack 點名提醒,沒有就安靜;讀不到表走告警分支。試算表開「知道連結的任何人可檢視」即可,免授權。(改編自 n8n 社群範本庫 1738_Schedule_Comparedatasets_Automation_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程,每天早上)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "read",
+      "type": "google-sheet-read",
+      "label": "讀詢問追蹤表",
+      "config": {
+        "sheetUrl": "https://docs.google.com/spreadsheets/d/請換成你的試算表ID/edit",
+        "maxRows": "500"
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "find",
+      "type": "llm-decide",
+      "label": "AI 找逾期未回覆",
+      "config": {
+        "prompt": "今天是 {{today}}。下面是客戶詢問追蹤表(欄位:客戶名/主題/最後回覆日/狀態):\n{{sheetText}}\n\n列出「最後回覆日」距今超過 3 天、且「狀態」不是「已結案」的項目,每筆一行,格式「客戶名|主題|最後回覆日」。例如最後回覆日是 5 天前且狀態是「處理中」就要列;最後回覆日是昨天的不列;狀態「已結案」的即使很久也不列。一筆都沒有就只回「無」,不要任何其他文字。",
+        "outputKey": "overdue",
+        "choices": ""
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "有逾期的嗎?",
+      "config": {
+        "left": "{{overdue}}",
+        "op": "!=",
+        "right": "無"
+      },
+      "position": { "x": 780, "y": 120 }
+    },
+    {
+      "id": "remind",
+      "type": "slack-notify",
+      "label": "點名提醒",
+      "config": {
+        "message": "⏰ 這些客戶詢問超過 3 天沒回覆了,今天記得跟進:\n{{overdue}}"
+      },
+      "position": { "x": 1040, "y": 60 }
+    },
+    {
+      "id": "alert",
+      "type": "slack-notify",
+      "label": "讀表失敗告警",
+      "config": {
+        "message": "🆘 逾期提醒流程讀不到追蹤表:{{error}}(請確認試算表分享設定還是「知道連結的任何人可檢視」)"
+      },
+      "position": { "x": 520, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "read" },
+    { "from": "read", "to": "find" },
+    { "from": "find", "to": "gate" },
+    { "from": "gate", "to": "remind", "fromPort": "true" },
+    { "from": "read", "to": "alert", "fromPort": "error" }
+  ]
+}

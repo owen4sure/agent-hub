@@ -1,0 +1,96 @@
+{
+  "id": "tg-daily-agenda",
+  "category": "資訊摘要",
+  "icon": "🗓️",
+  "name": "每天早上 AI 秘書把今日行程整理進 Telegram",
+  "description": "排程每天早上抓你行事曆的 iCal 訂閱網址 → AI 先判斷今天有沒有行程 → 有就用秘書口吻整理成一則按時間排序的提醒發 Telegram,沒有也回報一聲讓你安心;抓不到行事曆會走失敗分支告警。iCal 網址這樣拿:Google 日曆 → 設定 → 選你的行事曆 → 「整合行事曆」→ 複製「iCal 格式的秘密地址」,貼進「抓行事曆」節點的網址欄。(改編自 n8n 社群範本庫 1679_Telegram_GoogleCalendar_Automation_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程:每天 07:30)",
+      "config": {},
+      "position": { "x": 0, "y": 130 }
+    },
+    {
+      "id": "fetch",
+      "type": "http-request",
+      "label": "抓行事曆(iCal)",
+      "config": {
+        "method": "GET",
+        "url": "https://example.com/calendar.ics",
+        "headers": "{}",
+        "body": ""
+      },
+      "position": { "x": 260, "y": 130 }
+    },
+    {
+      "id": "judge",
+      "type": "llm-decide",
+      "label": "今天有行程嗎?",
+      "config": {
+        "prompt": "下面是 iCal 行事曆的原始內容。判斷「今天({{today}})」有沒有任何行程(有 VEVENT 的日期落在今天就算有)。\n例:今天是 2026-07-13,內容有一筆 DTSTART:20260713T090000 → 有行程;內容只有下週的 VEVENT → 沒行程;內容完全沒有 VEVENT → 沒行程。\n\n行事曆內容:\n{{body}}",
+        "outputKey": "hasEvent",
+        "choices": "有行程,沒行程"
+      },
+      "position": { "x": 520, "y": 130 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "有行程才整理",
+      "config": {
+        "left": "{{hasEvent}}",
+        "op": "==",
+        "right": "有行程"
+      },
+      "position": { "x": 780, "y": 130 }
+    },
+    {
+      "id": "compose",
+      "type": "llm-decide",
+      "label": "AI 秘書整理今日行程",
+      "config": {
+        "prompt": "你是貼心又簡潔的行事曆秘書。從下面 iCal 內容挑出「今天({{today}})」的行程,每筆整理成「HH:MM 標題(地點,沒有就省略)」一行,按時間由早到晚排序,最後加一句簡短提醒(例如第一個行程要不要提早出門)。只回整理好的訊息本文,不要任何開場白。\n\n行事曆內容:\n{{body}}",
+        "outputKey": "agenda"
+      },
+      "position": { "x": 1040, "y": 60 }
+    },
+    {
+      "id": "notify",
+      "type": "telegram-notify",
+      "label": "發今日行程提醒",
+      "config": {
+        "message": "🗓️ 早安!今天({{today}})的行程:\n{{agenda}}"
+      },
+      "position": { "x": 1300, "y": 60 }
+    },
+    {
+      "id": "quiet",
+      "type": "telegram-notify",
+      "label": "沒行程也報一聲",
+      "config": {
+        "message": "🗓️ 今天({{today}})沒有排任何行程,時間都是你的!"
+      },
+      "position": { "x": 1040, "y": 240 }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "抓不到行事曆告警",
+      "config": {
+        "message": "🆘 抓不到行事曆({{error}}),今天的行程提醒先跳過,記得自己看一眼"
+      },
+      "position": { "x": 260, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "fetch" },
+    { "from": "fetch", "to": "judge" },
+    { "from": "judge", "to": "gate" },
+    { "from": "gate", "to": "compose", "fromPort": "true" },
+    { "from": "compose", "to": "notify" },
+    { "from": "gate", "to": "quiet", "fromPort": "false" },
+    { "from": "fetch", "to": "alert", "fromPort": "error" }
+  ]
+}

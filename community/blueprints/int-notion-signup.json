@@ -1,0 +1,143 @@
+{
+  "id": "int-notion-signup",
+  "category": "整合串接",
+  "icon": "📗",
+  "name": "報名資料進 Notion,重複的不再建一次",
+  "description": "給表單/網站一個 Webhook 網址,有人報名 POST 進來(name、email)→ 先查 Notion 資料庫有沒有這個 email → 沒有才建立新頁面、已存在就不重複建 → 完成後發 Telegram。避免同一個人重複開卡的標準做法。Notion 寫入走 API,需要在 Notion 建整合並拿 Token(見下方設定)。(改編自 n8n 社群範本庫 0141_Notion_Webhook_Create_Webhook.json)",
+  "triggerParams": [
+    {
+      "key": "name",
+      "label": "姓名",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "email",
+      "label": "Email",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(Webhook 收報名)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 150
+      }
+    },
+    {
+      "id": "query",
+      "type": "http-request",
+      "label": "查 Notion 有沒有這個人",
+      "config": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/databases/請換成你的資料庫ID/query",
+        "headers": "{\"Authorization\":\"Bearer 請換成你的Notion整合Token\",\"Notion-Version\":\"2022-06-28\",\"Content-Type\":\"application/json\"}",
+        "body": "{\"filter\":{\"property\":\"Email\",\"email\":{\"equals\":\"{{email}}\"}}}"
+      },
+      "position": {
+        "x": 240,
+        "y": 150
+      }
+    },
+    {
+      "id": "parse",
+      "type": "custom-code",
+      "label": "判斷是否已存在",
+      "config": {
+        "intent": "上游 http-request 的 json 是 Notion 查詢結果,裡面有 results 陣列。若 results 至少有一筆(代表這個 email 已經在資料庫裡),輸出 exists 為字串 yes;否則輸出 exists 為字串 no。",
+        "code": ""
+      },
+      "position": {
+        "x": 480,
+        "y": 150
+      }
+    },
+    {
+      "id": "chk",
+      "type": "if-condition",
+      "label": "是新報名嗎?",
+      "config": {
+        "left": "{{exists}}",
+        "op": "==",
+        "right": "no"
+      },
+      "position": {
+        "x": 720,
+        "y": 150
+      }
+    },
+    {
+      "id": "create",
+      "type": "http-request",
+      "label": "在 Notion 建立頁面",
+      "config": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/pages",
+        "headers": "{\"Authorization\":\"Bearer 請換成你的Notion整合Token\",\"Notion-Version\":\"2022-06-28\",\"Content-Type\":\"application/json\"}",
+        "body": "{\"parent\":{\"database_id\":\"請換成你的資料庫ID\"},\"properties\":{\"Name\":{\"title\":[{\"text\":{\"content\":\"{{name}}\"}}]},\"Email\":{\"email\":\"{{email}}\"}}}"
+      },
+      "position": {
+        "x": 960,
+        "y": 80
+      }
+    },
+    {
+      "id": "done",
+      "type": "telegram-notify",
+      "label": "通知已收錄",
+      "config": {
+        "message": "📗 新報名已寫進 Notion:{{name}}({{email}})"
+      },
+      "position": {
+        "x": 1200,
+        "y": 80
+      }
+    },
+    {
+      "id": "dup",
+      "type": "desktop-notify",
+      "label": "重複的略過",
+      "config": {
+        "title": "報名重複",
+        "message": "這個 email 已經在 Notion 裡了,略過:{{email}}"
+      },
+      "position": {
+        "x": 960,
+        "y": 260
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "query"
+    },
+    {
+      "from": "query",
+      "to": "parse"
+    },
+    {
+      "from": "parse",
+      "to": "chk"
+    },
+    {
+      "from": "chk",
+      "to": "create",
+      "fromPort": "true"
+    },
+    {
+      "from": "create",
+      "to": "done"
+    },
+    {
+      "from": "chk",
+      "to": "dup",
+      "fromPort": "false"
+    }
+  ]
+}

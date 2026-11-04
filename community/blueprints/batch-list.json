@@ -1,0 +1,93 @@
+{
+  "id": "batch-list",
+  "category": "檔案自動化",
+  "icon": "🔁",
+  "name": "清單逐項查資料彙整",
+  "description": "丟一份清單檔(一行一項) → 自動逐項讓 AI 處理 → 彙整成一份結果檔——「同一組步驟跑清單每一項」的標準做法。",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "監聽資料夾(丟清單檔)",
+      "config": {
+        "watchPath": ""
+      },
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "read",
+      "type": "read-file",
+      "label": "讀清單",
+      "config": {
+        "path": "{{filePath}}",
+        "maxChars": "5000"
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "parse",
+      "type": "custom-code",
+      "label": "切成清單",
+      "config": {
+        "intent": "把 fileText 依換行切成陣列,去掉空行與前後空白,輸出欄位 items(字串陣列)與 itemCount(數量)。",
+        "code": ""
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    },
+    {
+      "id": "each",
+      "type": "repeat-steps",
+      "label": "逐項處理",
+      "config": {
+        "items": "{{items}}",
+        "itemVar": "item",
+        "steps": "[{\"type\": \"llm-decide\", \"label\": \"AI 處理這一項\", \"config\": {\"prompt\": \"用一句繁中介紹「{{item}}」是什麼。\", \"outputKey\": \"answer\"}}]",
+        "outputKey": "results"
+      },
+      "position": {
+        "x": 780,
+        "y": 120
+      }
+    },
+    {
+      "id": "save",
+      "type": "write-file",
+      "label": "彙整存檔",
+      "config": {
+        "fileName": "逐項結果_{{today}}.txt",
+        "content": "{{results}}"
+      },
+      "position": {
+        "x": 1040,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "read"
+    },
+    {
+      "from": "read",
+      "to": "parse"
+    },
+    {
+      "from": "parse",
+      "to": "each"
+    },
+    {
+      "from": "each",
+      "to": "save"
+    }
+  ]
+}

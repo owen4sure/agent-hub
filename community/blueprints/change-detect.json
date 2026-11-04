@@ -1,0 +1,90 @@
+{
+  "id": "change-detect",
+  "category": "監控告警",
+  "icon": "👀",
+  "name": "網頁內容變了通知我",
+  "description": "排程抓一個網頁,跟上次存的內容比對,有變化就通知並講出變在哪——盯公告頁/價目表/對手網站的標準做法。",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 130
+      }
+    },
+    {
+      "id": "fetch",
+      "type": "web-page",
+      "label": "抓網頁",
+      "config": {
+        "url": "https://example.com/announcements",
+        "maxChars": "10000"
+      },
+      "position": {
+        "x": 260,
+        "y": 130
+      }
+    },
+    {
+      "id": "diff",
+      "type": "custom-code",
+      "label": "跟上次比對",
+      "config": {
+        "intent": "把 pageText 跟上次執行存的快照檔(用固定路徑存在輸出資料夾外的 data 目錄,例如以網址雜湊命名)比對:第一次執行就存檔並輸出 changed=false;之後每次比對,不同就更新快照並輸出 changed=true 與 diffNote(一句話描述哪裡變了,例如新增/移除了哪些行的摘要),相同輸出 changed=false。輸出欄位:changed(布林)、diffNote(字串)。",
+        "code": ""
+      },
+      "position": {
+        "x": 520,
+        "y": 130
+      }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "有變化?",
+      "config": {
+        "left": "{{changed}}",
+        "op": "==",
+        "right": "true"
+      },
+      "position": {
+        "x": 780,
+        "y": 130
+      }
+    },
+    {
+      "id": "ping",
+      "type": "telegram-notify",
+      "label": "通知我",
+      "config": {
+        "message": "👀 網頁有更新:\n{{diffNote}}"
+      },
+      "position": {
+        "x": 1040,
+        "y": 60
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "fetch"
+    },
+    {
+      "from": "fetch",
+      "to": "diff"
+    },
+    {
+      "from": "diff",
+      "to": "gate"
+    },
+    {
+      "from": "gate",
+      "to": "ping",
+      "fromPort": "true"
+    }
+  ]
+}

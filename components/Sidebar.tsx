@@ -1,0 +1,111 @@
+"use client";
+
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
+import HelpGuide from "./HelpGuide";
+
+// 側欄名稱要跟點進去那一頁的 H1 一字不差——以前「Workflows」點進去卻是「我的流程」、
+// 「可靠性」點進去卻是「可靠性總覽」，使用者會愣一下「這是同一頁嗎」(2026-08 UI/UX 審計 IA-5)。
+const NAV = [
+  { href: "/", label: "我的流程", icon: "◈" },
+  { href: "/drafts", label: "草稿", icon: "✎" },
+  { href: "/schedules", label: "排程 & 執行", icon: "⏰" },
+  { href: "/runs", label: "執行紀錄", icon: "☰" },
+  { href: "/files", label: "產出檔案", icon: "▤" },
+  { href: "/reliability", label: "平台健康度", icon: "◉" },
+  { href: "/settings", label: "設定", icon: "⚙" },
+];
+
+export default function Sidebar() {
+  const pathname = usePathname();
+  // SSR 一律渲染 "dark"，首次 client render 也是 "dark"，兩邊一致 → 不會有 hydration mismatch(React #418)。
+  // 真實主題由 layout 的 pre-hydration inline script 先寫進 data-theme(顏色第一幀就正確)，
+  // 這裡只在掛載後把「按鈕的圖示/文字」校正成真實主題,不再從 localStorage 初始化 state。
+  const [theme, setTheme] = useState<"light" | "dark">("dark");
+  useEffect(() => {
+    const current = document.documentElement.getAttribute("data-theme");
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (current === "light" || current === "dark") setTheme(current);
+    else setTheme(window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  }, []);
+
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    localStorage.setItem("theme", next);
+    setTheme(next);
+  }
+
+  function isActive(href: string) {
+    if (href === "/") return pathname === "/" || pathname.startsWith("/workflows");
+    return pathname.startsWith(href);
+  }
+
+  return <>
+    <aside
+      className="w-60 shrink-0 hidden md:flex flex-col border-r h-screen sticky top-0"
+      style={{ background: "var(--sidebar-bg)" }}
+    >
+      <div className="px-5 h-14 flex items-center gap-2 border-b">
+        <span className="grid place-items-center w-7 h-7 rounded-lg text-white text-sm font-bold" style={{ background: "var(--accent)" }}>
+          A
+        </span>
+        <span className="font-semibold tracking-tight">Agent Hub</span>
+      </div>
+
+      <nav className="flex-1 px-3 py-4 space-y-1">
+        {NAV.map((item) => {
+          const active = isActive(item.href);
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors"
+              style={{
+                background: active ? "var(--accent-soft)" : "transparent",
+                color: active ? "var(--accent)" : "var(--text-muted)",
+                fontWeight: active ? 600 : 500,
+              }}
+            >
+              <span className="w-4 text-center">{item.icon}</span>
+              {item.label}
+            </Link>
+          );
+        })}
+      </nav>
+
+      <div className="p-3 border-t space-y-2">
+        <HelpGuide />
+        {/* 文字要講「按下去會變成什麼」，不是「現在是什麼」——顯示目前狀態時使用者會愣一下
+            「這是說現在是深色、還是按下去會變深色？」，講清楚要切去哪一個才不會猜。 */}
+        <button onClick={toggleTheme} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm muted hover:bg-[var(--surface-2)] transition-colors">
+          <span className="w-4 text-center">{theme === "dark" ? "☀" : "☾"}</span>
+          {theme === "dark" ? "切成淺色模式" : "切成深色模式"}
+        </button>
+        <p className="text-xs faint px-3">本機自架 · localhost</p>
+      </div>
+    </aside>
+    <nav
+      aria-label="主要導覽"
+      className="md:hidden fixed inset-x-0 bottom-0 z-50 h-16 border-t flex items-center justify-around px-1"
+      style={{ background: "var(--menu-bg)", backdropFilter: "blur(18px)" }}
+    >
+      {NAV.map((item) => {
+        const active = isActive(item.href);
+        return (
+          <Link
+            key={item.href}
+            href={item.href}
+            aria-current={active ? "page" : undefined}
+            className="min-w-0 flex-1 h-full flex flex-col items-center justify-center gap-0.5 text-[10px]"
+            style={{ color: active ? "var(--accent)" : "var(--text-muted)", fontWeight: active ? 650 : 500 }}
+          >
+            <span aria-hidden="true" className="text-base leading-none">{item.icon}</span>
+            <span className="truncate max-w-full px-1">{item.label.replace(" & ", "/")}</span>
+          </Link>
+        );
+      })}
+    </nav>
+  </>;
+}

@@ -1,0 +1,110 @@
+{
+  "id": "int-daily-collect",
+  "category": "整合串接",
+  "icon": "🗞️",
+  "name": "每天抓熱門文章存進 Airtable",
+  "description": "排程每天打 Hacker News 熱門文章 API → AI 挑 3 則最有價值的、寫成繁中一句話重點 → 寫進 Airtable 建檔留存 → 發 Telegram 給你當日報。把「每天逛新聞挑重點記下來」變全自動。Airtable 寫入走 API,需要 Base ID 與 Token(見下方設定)。抓不到來源會走失敗分支發桌面通知。(改編自 n8n 社群範本庫 1138_Airtable_Vonage_Automation_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程,每天一次)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 150
+      }
+    },
+    {
+      "id": "fetch",
+      "type": "http-request",
+      "label": "抓熱門文章",
+      "config": {
+        "method": "GET",
+        "url": "https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=10",
+        "headers": "{}",
+        "body": ""
+      },
+      "position": {
+        "x": 240,
+        "y": 150
+      }
+    },
+    {
+      "id": "distill",
+      "type": "llm-decide",
+      "label": "AI 挑 3 則寫重點",
+      "config": {
+        "prompt": "下面是 Hacker News 熱門文章的 JSON。挑出 3 則最有價值的,每則寫一行:繁體中文標題 + 一句話重點。只輸出這三行,不要多餘文字:\n\n{{body}}",
+        "outputKey": "digest"
+      },
+      "position": {
+        "x": 480,
+        "y": 150
+      }
+    },
+    {
+      "id": "save",
+      "type": "http-request",
+      "label": "寫進 Airtable",
+      "config": {
+        "method": "POST",
+        "url": "https://api.airtable.com/v0/請換成你的BaseID/請換成你的表格名",
+        "headers": "{\"Authorization\":\"Bearer 請換成你的Airtable_Token\",\"Content-Type\":\"application/json\"}",
+        "body": "{\"fields\":{\"日期\":\"{{today}}\",\"每日重點\":\"{{digest}}\"}}"
+      },
+      "position": {
+        "x": 720,
+        "y": 150
+      }
+    },
+    {
+      "id": "notify",
+      "type": "telegram-notify",
+      "label": "推當日重點",
+      "config": {
+        "message": "🗞️ 今日 3 則重點({{today}}):\n{{digest}}"
+      },
+      "position": {
+        "x": 960,
+        "y": 150
+      }
+    },
+    {
+      "id": "alert",
+      "type": "desktop-notify",
+      "label": "抓不到來源告警",
+      "config": {
+        "title": "每日彙整失敗",
+        "message": "🆘 抓不到熱門文章:{{error}}"
+      },
+      "position": {
+        "x": 240,
+        "y": 330
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "fetch"
+    },
+    {
+      "from": "fetch",
+      "to": "distill"
+    },
+    {
+      "from": "distill",
+      "to": "save"
+    },
+    {
+      "from": "save",
+      "to": "notify"
+    },
+    {
+      "from": "fetch",
+      "to": "alert",
+      "fromPort": "error"
+    }
+  ]
+}

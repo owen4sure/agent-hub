@@ -1,0 +1,92 @@
+{
+  "id": "tg-lead-score-alert",
+  "category": "行銷業務",
+  "icon": "🎯",
+  "name": "進線名單先驗信箱再 AI 評分,熱門線索馬上通知",
+  "description": "官網表單的新名單打進 Webhook → 先檢查信箱格式 → 打 Hunter 信箱驗證 API 確認收得到信 → AI 依公司與需求評 0-100 意向分 → 超過 60 分立刻發 Telegram 提醒你優先跟進。Hunter 的免費 API Key 到 hunter.io 註冊後在 API 頁取得,把網址裡的 YOUR_HUNTER_KEY 換掉即可。(改編自 n8n 社群範本庫 0425_Telegram_Hunter_Send_Webhook.json)",
+  "triggerParams": [
+    { "key": "name", "label": "姓名", "type": "text", "default": "" },
+    { "key": "email", "label": "信箱", "type": "text", "default": "" },
+    { "key": "company", "label": "公司", "type": "text", "default": "" },
+    { "key": "need", "label": "需求說明", "type": "textarea", "default": "" }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(Webhook:表單進線)",
+      "config": {},
+      "position": { "x": 0, "y": 130 }
+    },
+    {
+      "id": "fmt",
+      "type": "if-condition",
+      "label": "信箱格式對嗎?",
+      "config": {
+        "left": "{{email}}",
+        "op": "contains",
+        "right": "@"
+      },
+      "position": { "x": 260, "y": 130 }
+    },
+    {
+      "id": "verify",
+      "type": "http-request",
+      "label": "Hunter 驗證信箱收不收得到",
+      "config": {
+        "method": "GET",
+        "url": "https://api.hunter.io/v2/email-verifier?email={{email}}&api_key=YOUR_HUNTER_KEY",
+        "headers": "{}",
+        "body": ""
+      },
+      "position": { "x": 520, "y": 130 }
+    },
+    {
+      "id": "score",
+      "type": "llm-decide",
+      "label": "AI 評意向分",
+      "config": {
+        "prompt": "你是業務助理,幫這筆進線名單評 0 到 100 的意向分,只回數字(不要任何其他文字)。評分依據:需求描述越具體、越像有預算的公司,分數越高;像亂填、廣告、純好奇的給低分;信箱驗證結果顯示收不到信(result 是 undeliverable)直接給 0。\n例:「50 人公司,下一季要導入自動化」→ 85;「隨便看看」→ 15;信箱驗證 result=undeliverable → 0。\n\n姓名:{{name}}\n公司:{{company}}\n需求:{{need}}\n信箱驗證結果(Hunter 回應 JSON):{{body}}",
+        "outputKey": "score"
+      },
+      "position": { "x": 780, "y": 130 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "超過 60 分?",
+      "config": {
+        "left": "{{score}}",
+        "op": ">",
+        "right": "60"
+      },
+      "position": { "x": 1040, "y": 130 }
+    },
+    {
+      "id": "hot",
+      "type": "telegram-notify",
+      "label": "通知優先跟進",
+      "config": {
+        "message": "🎯 熱門線索!{{name}}({{company}})意向分 {{score}}\n信箱:{{email}}\n需求:{{need}}"
+      },
+      "position": { "x": 1300, "y": 60 }
+    },
+    {
+      "id": "bad",
+      "type": "telegram-notify",
+      "label": "驗證服務出錯告警",
+      "config": {
+        "message": "🆘 信箱驗證服務出錯:{{error}}(這筆名單:{{email}},先手動看一下)"
+      },
+      "position": { "x": 520, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "fmt" },
+    { "from": "fmt", "to": "verify", "fromPort": "true" },
+    { "from": "verify", "to": "score" },
+    { "from": "score", "to": "gate" },
+    { "from": "gate", "to": "hot", "fromPort": "true" },
+    { "from": "verify", "to": "bad", "fromPort": "error" }
+  ]
+}

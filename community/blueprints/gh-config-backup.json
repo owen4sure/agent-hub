@@ -1,0 +1,114 @@
+{
+  "id": "gh-config-backup",
+  "category": "開發者工具",
+  "icon": "🗄️",
+  "name": "每天把系統設定備份到 GitHub(有變才提交)",
+  "description": "排程抓你系統匯出設定的 API → 讀 GitHub 上既有的備份檔 → 比對後走三路分流:內容相同就安靜結束、有變化就提交新版、檔案還不存在就建第一版,完成後 Telegram 回報。把兩個網址換成你的設定 API 與備份 repo 即可;token 到 GitHub Settings → Developer settings → Personal access tokens 產生(勾 repo 權限)。(改編自 n8n 社群範本庫 1149_GitHub_Manual_Create_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程,每天)",
+      "config": {},
+      "position": { "x": 0, "y": 160 }
+    },
+    {
+      "id": "cur",
+      "type": "http-request",
+      "label": "抓目前的設定",
+      "config": {
+        "method": "GET",
+        "url": "https://example.com/api/config",
+        "headers": "{}",
+        "body": ""
+      },
+      "position": { "x": 260, "y": 160 }
+    },
+    {
+      "id": "keep",
+      "type": "set-variable",
+      "label": "先存下目前設定",
+      "config": {
+        "name": "currentConfig",
+        "value": "{{body}}"
+      },
+      "position": { "x": 520, "y": 160 }
+    },
+    {
+      "id": "old",
+      "type": "http-request",
+      "label": "讀 GitHub 上的備份檔",
+      "config": {
+        "method": "GET",
+        "url": "https://api.github.com/repos/你的帳號/你的備份repo/contents/backup/config.json",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的GitHub token\", \"Accept\": \"application/vnd.github+json\", \"User-Agent\": \"agent-hub\"}",
+        "body": ""
+      },
+      "position": { "x": 780, "y": 160 }
+    },
+    {
+      "id": "cmp",
+      "type": "custom-code",
+      "label": "比對新舊版本",
+      "config": {
+        "intent": "輸入欄位有 currentConfig(目前設定的 JSON 文字)、status 與 body(GitHub contents API 的回應:status 200 時 body 是 JSON,其中 content 欄位是 base64 編碼的舊備份內容、sha 欄位是檔案版本;status 404 表示備份檔還不存在)。把舊備份 base64 解碼後與 currentConfig 比對(兩邊都先 JSON.parse 再以排序後的鍵值比,避免鍵順序不同誤判)。回傳具名欄位:backupState(只能是「相同」「不同」「新檔案」三者之一;404 就是「新檔案」)、encodedContent(currentConfig 的 base64 字串,提交備份用)、sha(GitHub 回應裡的 sha,404 時給空字串)。",
+        "code": ""
+      },
+      "position": { "x": 1040, "y": 160 }
+    },
+    {
+      "id": "route",
+      "type": "switch",
+      "label": "相同/不同/新檔案?",
+      "config": {
+        "value": "{{backupState}}",
+        "cases": "相同\n不同\n新檔案"
+      },
+      "position": { "x": 1300, "y": 160 }
+    },
+    {
+      "id": "update",
+      "type": "http-request",
+      "label": "提交新版備份",
+      "config": {
+        "method": "PUT",
+        "url": "https://api.github.com/repos/你的帳號/你的備份repo/contents/backup/config.json",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的GitHub token\", \"Accept\": \"application/vnd.github+json\", \"User-Agent\": \"agent-hub\"}",
+        "body": "{\"message\": \"自動備份更新 {{today}}\", \"content\": \"{{encodedContent}}\", \"sha\": \"{{sha}}\"}"
+      },
+      "position": { "x": 1560, "y": 60 }
+    },
+    {
+      "id": "create",
+      "type": "http-request",
+      "label": "建立第一版備份",
+      "config": {
+        "method": "PUT",
+        "url": "https://api.github.com/repos/你的帳號/你的備份repo/contents/backup/config.json",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的GitHub token\", \"Accept\": \"application/vnd.github+json\", \"User-Agent\": \"agent-hub\"}",
+        "body": "{\"message\": \"首次自動備份 {{today}}\", \"content\": \"{{encodedContent}}\"}"
+      },
+      "position": { "x": 1560, "y": 260 }
+    },
+    {
+      "id": "ping",
+      "type": "telegram-notify",
+      "label": "回報備份結果",
+      "config": {
+        "message": "🗄️ 設定備份完成(狀態:{{backupState}},GitHub 回 {{status}})"
+      },
+      "position": { "x": 1820, "y": 160 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "cur" },
+    { "from": "cur", "to": "keep" },
+    { "from": "keep", "to": "old" },
+    { "from": "old", "to": "cmp" },
+    { "from": "cmp", "to": "route" },
+    { "from": "route", "to": "update", "fromPort": "不同" },
+    { "from": "route", "to": "create", "fromPort": "新檔案" },
+    { "from": "update", "to": "ping" },
+    { "from": "create", "to": "ping" }
+  ]
+}

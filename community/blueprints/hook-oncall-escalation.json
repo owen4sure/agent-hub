@@ -1,0 +1,114 @@
+{
+  "id": "hook-oncall-escalation",
+  "category": "監控告警",
+  "icon": "🚨",
+  "name": "監控事件分級:嚴重才呼叫值班,解除自動銷警",
+  "description": "把監控/資安系統的事件 Webhook 指過來:新事件先看嚴重度——達門檻(≥3)才打值班呼叫服務(範例用 SIGNL4,團隊密鑰在其 App 的 Team 頁取得)真的把人叫起來,輕微的只登記進試算表不吵人;事件解除時自動通知值班服務銷警,不會留下一堆已解決卻還在響的告警。(改編自 n8n 社群範本庫 0942_Webhook_Signl4_Automation_Webhook.json)",
+  "triggerParams": [
+    { "key": "status", "label": "事件狀態(new=新事件/resolved=已解除)", "type": "text", "default": "new" },
+    { "key": "severity", "label": "嚴重度(1-4)", "type": "text", "default": "1" },
+    { "key": "title", "label": "事件標題", "type": "text", "default": "" },
+    { "key": "caseId", "label": "事件編號", "type": "text", "default": "" }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(監控系統 Webhook)",
+      "config": {},
+      "position": { "x": 0, "y": 160 }
+    },
+    {
+      "id": "route",
+      "type": "switch",
+      "label": "新事件還是解除?",
+      "config": {
+        "value": "{{status}}",
+        "cases": "new\nresolved"
+      },
+      "position": { "x": 260, "y": 160 }
+    },
+    {
+      "id": "sev",
+      "type": "if-condition",
+      "label": "嚴重度達門檻?",
+      "config": {
+        "left": "{{severity}}",
+        "op": ">=",
+        "right": "3"
+      },
+      "position": { "x": 540, "y": 60 }
+    },
+    {
+      "id": "page",
+      "type": "http-request",
+      "label": "呼叫值班人員",
+      "config": {
+        "method": "POST",
+        "url": "https://connect.signl4.com/webhook/請換成你的團隊密鑰",
+        "headers": "{\"Content-Type\": \"application/json\"}",
+        "body": "{\"Title\": \"{{title}}\", \"X-S4-ExternalID\": \"{{caseId}}\", \"X-S4-Status\": \"new\"}"
+      },
+      "position": { "x": 820, "y": 0 }
+    },
+    {
+      "id": "ping",
+      "type": "telegram-notify",
+      "label": "同步敲你一聲",
+      "config": {
+        "message": "🚨 嚴重事件 {{caseId}}:{{title}}(嚴重度 {{severity}})\n已呼叫值班人員。"
+      },
+      "position": { "x": 1080, "y": 0 }
+    },
+    {
+      "id": "low",
+      "type": "google-sheet-append",
+      "label": "輕微事件只登記",
+      "config": {
+        "cells": "{{today}}\n{{caseId}}\n{{title}}\n{{severity}}",
+        "sheetName": ""
+      },
+      "position": { "x": 820, "y": 130 }
+    },
+    {
+      "id": "resolve",
+      "type": "http-request",
+      "label": "通知值班服務銷警",
+      "config": {
+        "method": "POST",
+        "url": "https://connect.signl4.com/webhook/請換成你的團隊密鑰",
+        "headers": "{\"Content-Type\": \"application/json\"}",
+        "body": "{\"X-S4-ExternalID\": \"{{caseId}}\", \"X-S4-Status\": \"resolved\"}"
+      },
+      "position": { "x": 540, "y": 270 }
+    },
+    {
+      "id": "done",
+      "type": "telegram-notify",
+      "label": "通知已解除",
+      "config": {
+        "message": "✅ 事件 {{caseId}} 已解除,值班告警已自動銷掉。"
+      },
+      "position": { "x": 820, "y": 270 }
+    },
+    {
+      "id": "err",
+      "type": "telegram-notify",
+      "label": "呼叫不到值班服務",
+      "config": {
+        "message": "🆘 嚴重事件 {{caseId}} 呼叫值班服務失敗({{error}})!請立刻手動聯絡值班人員:{{title}}"
+      },
+      "position": { "x": 820, "y": 400 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "route" },
+    { "from": "route", "to": "sev", "fromPort": "new" },
+    { "from": "route", "to": "resolve", "fromPort": "resolved" },
+    { "from": "sev", "to": "page", "fromPort": "true" },
+    { "from": "page", "to": "ping" },
+    { "from": "sev", "to": "low", "fromPort": "false" },
+    { "from": "resolve", "to": "done" },
+    { "from": "page", "to": "err", "fromPort": "error" }
+  ]
+}

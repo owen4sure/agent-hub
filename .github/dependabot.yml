@@ -1,0 +1,23 @@
+version: 2
+updates:
+  # 相依漏洞的修補窗口不能靠人記得去看 npm audit(真實狀況：21 個 high 默默存在到有人專門稽核
+  # 才被發現)。scripts/audit-gate.mjs 負責「有漏洞就卡住 CI」，Dependabot 負責「主動送修補 PR」，
+  # 兩個一起才閉環：一邊擋、一邊給修法。
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # 補丁版一次一個 PR 就好，不然每週會被 10 個 PR 淹掉。
+      patch-and-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    # 大版本升級單獨開 PR，因為一定要人看回歸(next/react/playwright 這種尤其)。
+    labels: ["dependencies"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly

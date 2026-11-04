@@ -1,0 +1,75 @@
+{
+  "id": "http-hn-digest",
+  "category": "資訊摘要",
+  "icon": "🗞️",
+  "name": "每天把 Show HN 熱門新品寄給我",
+  "description": "排程抓 Hacker News 的「Show HN」頁(大家展示自己新做的產品) → AI 抽出前 10 則整理成條列 → 有內容才寄成一封 email;抓不到頁面走失敗分支發 Telegram 告警。想盯別的榜單(首頁/Ask HN)改網址就好。(改編自 n8n 社群範本庫 0494_HTTP_Htmlextract_Send_Webhook.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程,每天下午)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "fetch",
+      "type": "web-page",
+      "label": "抓 Show HN 頁面",
+      "config": {
+        "url": "https://news.ycombinator.com/show",
+        "maxChars": "12000"
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "digest",
+      "type": "llm-decide",
+      "label": "AI 整理前 10 則",
+      "config": {
+        "prompt": "這是 Hacker News「Show HN」頁面的文字。抽出排名前 10 的項目,每則一行,格式「序號. 標題(分數)」;如果頁面裡找不到任何項目,只回「無」:\n{{pageText}}",
+        "outputKey": "showList"
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "有抽到內容?",
+      "config": {
+        "left": "{{showList}}",
+        "op": "!=",
+        "right": "無"
+      },
+      "position": { "x": 780, "y": 120 }
+    },
+    {
+      "id": "mail",
+      "type": "send-email",
+      "label": "寄每日摘要給自己",
+      "config": {
+        "to": "",
+        "subject": "今日 Show HN 熱門新品 {{today}}",
+        "body": "Hacker News 今天的 Show HN 精選:\n\n{{showList}}\n\n來源:{{finalUrl}}",
+        "attachPath": ""
+      },
+      "position": { "x": 1040, "y": 60 }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "抓不到頁面告警",
+      "config": {
+        "message": "⚠️ Show HN 每日摘要抓不到頁面:{{error}}"
+      },
+      "position": { "x": 520, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "fetch" },
+    { "from": "fetch", "to": "digest" },
+    { "from": "digest", "to": "gate" },
+    { "from": "gate", "to": "mail", "fromPort": "true" },
+    { "from": "fetch", "to": "alert", "fromPort": "error" }
+  ]
+}

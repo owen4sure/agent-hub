@@ -1,0 +1,408 @@
+import OpenAI from "openai";
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import type { Page } from "playwright";
+import { callAIWithRetry } from "../aiRetry";
+import { getClient } from "../modelClient";
+import { PermanentError, type NodeContext } from "./types";
+import { getWorkflowModelPolicy } from "../settingsStore";
+import {
+  describeModelPick,
+  planModelChain,
+  type ModelNeed,
+  type ModelPick,
+  type ModelPlan,
+} from "../modelPolicy";
+
+/**
+ * 通知/寄信類節點缺帳密時的統一指引措辭——以前 sendEmail.ts 跟 notify.ts 的 telegram/slack/line
+ * 各自手寫了大同小異的句子(有的說「最下面的」、有的沒有；標點與斷句也不完全一樣)，只改其中一處
+ * 容易讓其他幾個地方顯得不一致。統一成一個地方維護，往後只需要改一次；cardName 是設定頁上那張
+ * 卡片的名稱(例如「Email」「Telegram」「Slack」「LINE」)。
+ */
+export function needsSetupHint(cardName: string): string {
+  return `請到「設定」頁「連線與帳號」區的「通知串接」，找到「${cardName}」卡片照教學一步一步填好(有「測試發送」可以先驗證)`;
+}
+
+/**
+ * 找出「原始設定字串」裡真的沒解析到的 {{token}}(只看原始設定,不是解析後的值)。
+ * 回傳第一個沒對應到 input/vars/secrets 的 token 名稱，都有對應就回 null。
+ * 跟 cfgStr 共用同一份判準：只掃「原始設定」裡的 {{}}，不能對「解析完的值」再掃一次——
+ * 上游資料本身若剛好含有字面 "{{...}}" 文字(例如信件主旨、網頁擷取內容)，那不是模板 token，
+ * 對解析後的值重新掃描會把這種巧合誤判成「沒解析到」。
+ */
+function findUnresolvedToken(rawText: string, ctx: NodeContext): string | null {
+  const leftover = [...rawText.matchAll(/\{\{\s*([^}]+)\s*\}\}/g)].find((m) =>
+    /^\{\{\s*[^}]+\s*\}\}$/.test(resolveTemplate(m[0], ctx)),
+  );
+  return leftover ? leftover[1].trim() : null;
+}
+
+/**
+ * 分流/條件這類「值決定走哪條路」的欄位,拿到字面 {{欄位}} 必須老實失敗——默默比對失敗會走錯
+ * 分支還全綠,把「上游沒提供資料」偽裝成別的結論(踩過:部分執行沒框到生產 fileType 的上游,
+ * switch 收到字面 {{fileType}} 落到「其他」分支發「檔案格式不支援」通知,使用者以為檔案有問題、
+ * 對話 AI 也查不出原因)。錯誤訊息要直接講清楚下一步怎麼做。
+ * 注意:一定要用 ctx.config 的原始設定字串查(不能拿 cfgStr 解析完的值再掃一次)——上游資料本身
+ * 剛好含有字面 "{{...}}" 文字(例如信件主旨、網頁擷取內容)時，解析完的值會「巧合地」符合
+ * {{...}} 的樣子，但那並不是沒解析到，對解析後的值重新掃描會把這種巧合誤判成上游沒給資料。
+ */
+export function assertNoUnresolvedVars(ctx: NodeContext, key: string, what: string): void {
+  const rawText = String(ctx.config[key] ?? "");
+  const token = findUnresolvedToken(rawText, ctx);
+  if (!token) return;
+  throw new PermanentError(
+    `${what}拿到的不是實際資料,而是字面文字「${rawText.slice(0, 80)}」——上游沒有提供「${token}」這個欄位。` +
+    `常見原因:①這次是部分執行(只測選取的幾步/從某步開始測),沒把「產出 ${token} 的那一步」一起執行——請把它一起框選,或直接對它按「從這一步開始測」;` +
+    `②產出它的上游步驟失敗了、或從未成功執行過。問題不在這個節點的設定,請先讓上游真的跑出這個欄位。`,
+  );
+}
+
+/** 模板值轉字串：物件/陣列用 JSON 呈現——String() 對物件會輸出無意義的 [object Object] */
+function stringify(v: unknown): string {
+  if (v !== null && typeof v === "object") {
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return String(v);
+    }
+  }
+  return String(v);
+}
+
+/** {{token}} 的查值邏輯，resolveTemplate 與 resolveJsonSafeTemplate 共用：找不到回 undefined(呼叫端決定怎麼呈現原文)。 */
+function lookupTemplateValue(key: string, ctx: NodeContext): string | undefined {
+  // 先找 input（上游資料，支援 nodeId.field 或直接 field）
+  if (key.includes(".")) {
+    const [head, ...rest] = key.split(".");
+    const source =
+      (ctx.input[head] as Record<string, unknown> | undefined) ??
+      (ctx.vars[head] as Record<string, unknown> | undefined);
+    if (source && typeof source === "object") {
+      const v = rest.reduce<unknown>((acc, k) => (acc as Record<string, unknown>)?.[k], source);
+      if (v !== undefined) return stringify(v);
+    }
+  }
+  if (key in ctx.input) return stringify(ctx.input[key]);
+  if (key in ctx.vars) return stringify(ctx.vars[key]);
+  if (key in ctx.secrets) return ctx.secrets[key];
+  // 分開層：{{節點代號.欄位}} 直接取「那一步自己產出」的值。放在最後(攤平鍵優先)是刻意的——
+  // 既有流程的所有引用行為一個都不能變,這條只解析「以前本來就解不開」的 token。
+  // 同名欄位被後面步驟蓋掉時,這是唯一能精準拿到「較早那一步的值」的寫法。
+  if (key.includes(".") && ctx.outputs) {
+    const [head, ...rest] = key.split(".");
+    const own = ctx.outputs[head];
+    if (own && typeof own === "object") {
+      const v = rest.reduce<unknown>((acc, k) => (acc as Record<string, unknown>)?.[k], own);
+      if (v !== undefined) return stringify(v);
+    }
+  }
+  return undefined;
+}
+
+/** 解析 config 值裡的 {{...}}：{{secretKey}} / {{nodeId.field}} / {{var}} / 相對日期已在引擎層先處理過 */
+export function resolveTemplate(value: string, ctx: NodeContext): string {
+  return value.replace(/\{\{\s*([^}]+)\s*\}\}/g, (_, expr: string) => {
+    const key = expr.trim();
+    const found = lookupTemplateValue(key, ctx);
+    // 找不到就把原本的 {{...}} 留著(不要默默清成空字串，免得變成空選擇器之類的怪錯誤)
+    return found ?? `{{${key}}}`;
+  });
+}
+
+/**
+ * 給「值本身就是 JSON 文字」的欄位用(目前只有子流程呼叫的 paramsJson)。跟 resolveTemplate 的差異：
+ * resolveTemplate 是給網址/檔名/prompt 這類純文字欄位設計的，直接把 {{token}} 換成原始文字；但
+ * paramsJson 這欄位的值本身要被 JSON.parse()，若替換進去的上游資料剛好含換行/引號/反斜線這些
+ * JSON 特殊字元，沒跳脫就會讓整個 JSON 壞掉，拋出使用者看不懂的底層錯誤(真實踩過：子流程間傳遞
+ * 一段多行報表內容，收到「不是合法 JSON 物件：Bad control character in string literal」，使用者
+ * 完全不知道問題出在自己的資料裡有換行——這是子流程間傳遞多行文字內容的常見情境，不是使用者填錯)。
+ * 用 JSON.stringify(...).slice(1,-1) 取跳脫後、不含外層引號的內容再替換，讓 {{token}} 出現在
+ * JSON 字串值內部時，換行/引號/反斜線都會被正確跳脫成合法的 JSON 字串片段。
+ */
+export function resolveJsonSafeTemplate(value: string, ctx: NodeContext): string {
+  return value.replace(/\{\{\s*([^}]+)\s*\}\}/g, (whole, expr: string) => {
+    const key = expr.trim();
+    const found = lookupTemplateValue(key, ctx);
+    if (found === undefined) return whole;
+    return JSON.stringify(found).slice(1, -1);
+  });
+}
+
+export function cfgStr(ctx: NodeContext, key: string, fallback = ""): string {
+  const raw = ctx.config[key];
+  if (raw === undefined || raw === null) return fallback;
+  const rawText = String(raw);
+  const resolved = resolveTemplate(rawText, ctx);
+  // 解析完還留著 {{...}}，代表這個變數在 input/vars/secrets 裡都找不到——多半是上游沒輸出這個欄位、
+  // 或欄位名稱兜錯了。過去這種情況會把字面上的 "{{變數名}}" 原封不動送進網頁/檔名/程式碼裡，
+  // 表面上「執行成功」實際上整步都是垃圾(踩過的真實 bug：算好的日期送不到找信節點，
+  // 搜尋框收到的是原字串 "{{month1SearchDate}}"，怎麼查都查不到信)。
+  //
+  // 但這裡不能一律拋錯：cfgStr 被所有字串型 config 共用，其中 llm-decide 的 prompt、
+  // template-text 的 template 這類欄位「合法地會出現字面 {{}}」——例如使用者本來就要 AI「用
+  // {{姓名}} 當佔位符」。一律拋錯會讓這些節點永久失敗。所以改成只 log 一次警告(debug 資訊還在、
+  // 讓「讓 AI 修」有線索)，然後正常回傳、保留字面的 {{X}}——若那真的是要輸出的字面文字就無妨。
+  // 只檢查原始設定裡的 token。若 {{error}} 被替換成一段剛好提到 {{filePath}} 的上游資料，
+  // 後者不是這個 config 的模板，不能對替換後全文再掃一次製造假警告。
+  const leftoverToken = findUnresolvedToken(rawText, ctx);
+  if (leftoverToken) {
+    ctx.log(
+      `設定「${key}」裡的 {{${leftoverToken}}} 沒對應到上游資料(input/vars/secrets 都找不到)。若這是要輸出的字面文字可忽略；若是想引用上游欄位，請確認上游有輸出這個欄位、或欄位名稱是否兜對。`,
+    );
+  }
+  return resolved;
+}
+
+export function cfgNum(ctx: NodeContext, key: string, fallback = 0): number {
+  const s = cfgStr(ctx, key, String(fallback));
+  const n = Number(s);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/** boolean 型 config：checkbox 存的是真的 boolean，withSchemaDefaults 補的預設值是字串，兩種都要認得 */
+export function cfgBool(ctx: NodeContext, key: string, fallback = false): boolean {
+  const raw = ctx.config[key];
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  return raw === true || raw === "true";
+}
+
+export function makeClient(ctx: NodeContext, timeoutMs = 25_000): OpenAI {
+  // 同 lib/modelClient.ts 的理由：關掉 SDK 內建重試、設合理逾時，統一交給 callAIWithRetry 那層重試，
+  // 不然逾時+重試會疊兩層，最壞情況等待時間完全沒有上限。
+  return new OpenAI({ baseURL: ctx.baseUrl, apiKey: ctx.apiKey, timeout: timeoutMs, maxRetries: 0 });
+}
+
+const CAPTCHA_MODEL_TIMEOUT_MS = 12_000;
+const execFileAsync = promisify(execFile);
+
+export function normalizeCaptchaOcr(raw: string): string {
+  const candidates = raw
+    .split(/\r?\n/)
+    // Vision/包裝腳本若附帶「® 1.0」或空白分隔的信心值，只拿前面的候選字；不能直接刪除
+    // 所有非英數後把信心值黏到答案上。沒有分隔的尾端數字則可能本來就是 CAPTCHA，必須保留。
+    .map((line) => line.split(/[\u00ae©]/, 1)[0].replace(/\s+\d+(?:\.\d+)?\s*$/, "").replace(/[^a-zA-Z0-9]/g, ""))
+    .filter((line) => line.length >= 4 && line.length <= 6);
+  return candidates[0] ?? "";
+}
+
+/**
+ * 這台機器到底有沒有本機 OCR 這條路。
+ * 「沒有視覺模型時換一張驗證碼再試」只有在本機 OCR 真的跑得動時才有意義——辨識是機率性的，
+ * 換一張有機會讀對；但在沒有本機 OCR 的平台上，換幾張都不會有人去讀它，那個重試等於空轉
+ * (還會反覆重填帳密)，必須維持「立刻停下來、告訴使用者接視覺模型或手動登入」的原行為。
+ */
+export function localCaptchaOcrAvailable(): boolean {
+  return process.platform === "darwin"
+    && fs.existsSync("/usr/bin/swift")
+    && fs.existsSync(path.join(process.cwd(), "scripts", "captcha-ocr.swift"));
+}
+
+/** macOS 內建 Vision OCR：本機處理、不把驗證碼送出去；其他平台直接回空字串走遠端視覺模型。 */
+async function tryLocalCaptchaOcr(buffer: Buffer, ctx: NodeContext): Promise<string> {
+  if (!localCaptchaOcrAvailable()) return "";
+  const swift = "/usr/bin/swift";
+  const script = path.join(process.cwd(), "scripts", "captcha-ocr.swift");
+  const dir = path.join(ctx.debugDir, ctx.nodeId);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const imagePath = path.join(dir, `.captcha-ocr-${process.pid}-${randomUUID().slice(0, 8)}.png`);
+  try {
+    fs.writeFileSync(imagePath, buffer, { mode: 0o600 });
+    const { stdout } = await execFileAsync(swift, [script, imagePath], {
+      timeout: 12_000,
+      maxBuffer: 4096,
+      signal: ctx.cancelSignal,
+    });
+    return normalizeCaptchaOcr(stdout);
+  } catch {
+    return ""; // 本機 OCR 是加速／離線備援；不可用時仍走既有視覺模型，不讓平台差異害整步失敗。
+  } finally {
+    fs.rmSync(imagePath, { force: true });
+  }
+}
+
+/**
+ * 這一步該用哪顆模型——節點層唯一入口。
+ *
+ * 順序是「這一步指定的 → 這條流程指定的執行模型 → 使用者排的偏好順序 → 自動」，
+ * 全部在 `lib/modelPolicy.ts` 決定。節點檔案不再自己挑模型、也不再有任何寫死的備援名字。
+ */
+export async function planNodeModel(ctx: NodeContext, need: ModelNeed, nodeOverride?: string): Promise<ModelPlan> {
+  const policy = getWorkflowModelPolicy(ctx.workflowId);
+  return planModelChain({
+    need,
+    nodeOverride,
+    workflowRunModel: policy.runModel,
+    workflowStrict: policy.strict,
+    fallbackModel: ctx.model,
+  });
+}
+
+/**
+ * 照著模型鏈依序試，並且**每一次都把「用了誰、為什麼換」寫進執行紀錄**。
+ *
+ * 這個「寫出來」不是錦上添花，是使用者明確要求的功能：他要拿執行紀錄去給公司審查看
+ * 「業務資料到底有沒有離開這台機器」。靜默換模型 = 審查交不出東西，也等於前面所有
+ * 「指定用地端模型」的設定形同虛設。
+ *
+ * `rejected` 用來表達「模型有回應，但那個回應代表它辦不到」(例如回『我看不到圖片』)——
+ * 這跟拋錯是兩件事，但一樣要換下一顆。
+ */
+export async function runWithModelChain<T>(
+  ctx: NodeContext,
+  plan: ModelPlan,
+  opts: {
+    /** 這件事的白話名字，例如「看圖」「辨識驗證碼」 */
+    label: string;
+    attempt: (pick: ModelPick) => Promise<T>;
+    rejected?: (result: T) => boolean;
+    describeResult?: (result: T) => string;
+  },
+): Promise<{ result: T; used: ModelPick }> {
+  if (plan.chain.length === 0) throw new PermanentError(plan.reason ?? `挑不到可以${opts.label}的模型`);
+
+  let lastError: unknown = null;
+  let sawRejection = false;
+  for (let i = 0; i < plan.chain.length; i++) {
+    const pick = plan.chain[i];
+    ctx.log(i === 0 ? `${opts.label}使用 ${describeModelPick(pick)}` : `改用 ${describeModelPick(pick)} 重新${opts.label}`);
+    try {
+      const result = await opts.attempt(pick);
+      if (opts.rejected?.(result)) {
+        sawRejection = true;
+        const detail = opts.describeResult ? `（回應：「${opts.describeResult(result).slice(0, 60)}」）` : "";
+        ctx.log(`${describeModelPick(pick)} 沒辦法${opts.label}${detail}`);
+        continue;
+      }
+      return { result, used: pick };
+    } catch (error) {
+      lastError = error;
+      ctx.log(`${describeModelPick(pick)} ${opts.label}時失敗：${(error instanceof Error ? error.message : String(error)).slice(0, 140)}`);
+    }
+  }
+
+  const tried = plan.chain.map((p) => p.ref).join("、");
+  if (plan.strict) {
+    throw new PermanentError(
+      `這條流程設定成「執行時只能用指定的模型，不自動換」，而「${tried}」這次沒能${opts.label}。` +
+      `為了不把資料送去別的模型，這一步直接停下來。` +
+      (lastError instanceof Error ? `原始訊息：${lastError.message.slice(0, 180)}` : ""),
+    );
+  }
+  if (sawRejection && !lastError) {
+    throw new PermanentError(`已經試過的模型（${tried}）都沒辦法${opts.label}。請到「設定 → 模型來源」接一顆做得到的模型，或調整主力/救援順序。`);
+  }
+  throw lastError instanceof Error ? lastError : new Error(`所有模型都無法${opts.label}（${tried}）`);
+}
+
+/** 用 vision 模型讀圖片驗證碼 */
+export async function solveCaptchaFromLocator(
+  page: Page,
+  imgSelector: string,
+  ctx: NodeContext,
+): Promise<string> {
+  const imgLoc = page.locator(imgSelector).first();
+  await imgLoc.waitFor({ state: "visible", timeout: 10000 });
+  // 驗證碼圖是伺服器動態產生的資源，<img> 出現在 DOM 不代表圖片資料已經下載完——若在還沒真的載完時就截圖，
+  // 截到的是空白/半載入的畫面，任何模型看了都只會說「這是空的」，會被誤以為是「模型不會辨識」。
+  // 用 naturalWidth 判斷圖片是否真的載入完成，最多等 8 秒(保底逾時，圖片本身載入失敗也不至於卡死整條流程)。
+  await imgLoc
+    .evaluate((el) => {
+      const img = el as HTMLImageElement;
+      if (img.complete && img.naturalWidth > 0) return;
+      return new Promise<void>((resolve) => {
+        img.addEventListener("load", () => resolve(), { once: true });
+        img.addEventListener("error", () => resolve(), { once: true });
+        setTimeout(resolve, 8000);
+      });
+    })
+    .catch(() => {});
+  const buffer = await imgLoc.screenshot();
+  const prompt = "這是一張登入用的圖片驗證碼，內容是 4-6 個英數字元。請只回答那幾個字元本身，不要加任何說明、標點或空白。";
+
+  // 本機優先：免費 gateway 今天曾連續讓兩個視覺模型逾時，舊版內外重試相乘後第一步白等 4 分鐘。
+  // macOS Vision 對實際 Mail2000 歷史驗證碼回歸 3/3；即使某張判錯，browser-login 也會換新圖重試。
+  const local = await tryLocalCaptchaOcr(buffer, ctx);
+  if (local) {
+    ctx.log("已用本機文字辨識讀取驗證碼（沒有呼叫外部模型）");
+    return local;
+  }
+
+  // 「這回應看起來不是在讀驗證碼」的判斷，涵蓋兩種情況：
+  // ①純文字模型會直接說「看不到圖片/我是文字模型」，或推理模型把 token 全拿去思考、答案是空字串——
+  //   這是模型從頭就不具備看圖能力，重試同一個模型沒有意義。
+  // ②有些模型(實測過 Claude)基於安全政策「主動拒絕」解驗證碼(即使技術上看得懂圖)，這個回應會是
+  //   is_error:false 的「成功」回應，內容卻是拒絕文字——這種拒絕是政策立場，不是機率性判讀錯，
+  //   重試/换一次都不會變好，一樣要當成「這模型辦不到」處理、換別的模型，而不是傻傻重試。
+  const looksLikeNoVision = (text: string) =>
+    text.trim() === "" ||
+    /看不到|無法看|沒有.*視覺|純文字|text-only|text-based|cannot see|can't see|no.*image/i.test(text) ||
+    /can'?t help|cannot help|can'?t assist|cannot assist|i can'?t solve|won'?t (solve|help)|無法協助|不能協助|拒絕/i.test(text);
+
+  const askVision = async (pick: ModelPick): Promise<string> => {
+    // CAPTCHA 是極短回應，超過 12 秒仍沒答案就應換備援／失敗收斂；沿用一般 AI 的 25 秒×4 重試
+    // 會跟外層節點重試相乘，單一登入步驟最壞可白等數分鐘。
+    // client 一定要依「這顆模型屬於哪個來源」建立(getClient)，不能用流程層的 ctx.baseUrl——
+    // 挑到的可能是使用者自己接的地端模型，用流程層的網址等於把圖送去完全不相干的端點。
+    const client = getClient(pick.ref, CAPTCHA_MODEL_TIMEOUT_MS);
+    const b64 = buffer.toString("base64");
+    return client.chat.completions
+      .create(
+        {
+          model: pick.model,
+          messages: [{ role: "user", content: [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } }] }],
+          max_tokens: 20,
+        },
+        { signal: ctx.cancelSignal }, // 讓「停止執行」能中斷正在進行的驗證碼辨識呼叫
+      )
+      .then((res) => res.choices[0]?.message?.content?.trim() ?? "");
+  };
+
+  // 用哪顆模型由 modelPolicy 決定(這一步指定的 → 流程指定的執行模型 → 使用者排的順序 → 自動)。
+  // 這裡刻意**只取前兩顆**：驗證碼每顆最多等 12 秒，把使用者排的整串試完會讓單一登入步驟
+  // 白等好幾分鐘(這是原本「主力+唯一備援」設計的理由，換成使用者自訂順序之後仍然成立)。
+  // Claude Code 不會出現在鏈裡——它看得懂圖，但實測會基於安全政策主動拒絕解驗證碼，而那個
+  // 拒絕是 is_error:false 的「成功」回應，重試幾次都一樣(AGENTS.md 鐵則)。
+  const fullPlan = await planNodeModel(ctx, "captcha", cfgStr(ctx, "captchaModel", "").trim() || undefined);
+  const plan: ModelPlan = { ...fullPlan, chain: fullPlan.chain.slice(0, 2) };
+
+  // 零視覺模型 ≠ 死路：本機 OCR 是機率性的，這一張沒讀出來不代表下一張也讀不出來(實測 Mail2000
+  // 歷史驗證碼 3/3，但單張仍可能失手)。以前這裡直接讓空模型鏈變成 PermanentError 把整個登入節點
+  // 判死——連 OCR 有機會讀對的新驗證碼都不給試。改丟「換一張再試」的可重試錯誤，登入迴圈會
+  // 換一張新驗證碼再讓 OCR 讀；連續多張都讀不出來才會用盡額度、帶著接視覺模型的指引收場。
+  // **但這只在本機 OCR 真的跑得動的平台成立**：沒有 OCR 又沒有視覺模型時，換幾張都不會有人讀，
+  // 重試只是反覆重填帳密後給一句指錯方向的「多半是驗證碼判讀錯」——維持原本的立即停止+指路。
+  if (plan.chain.length === 0) {
+    if (!localCaptchaOcrAvailable()) {
+      throw new PermanentError(plan.reason ?? "這一步需要辨識圖片驗證碼，但目前沒有可用的視覺模型。可到「設定 → 模型來源」接一顆看得懂圖的模型，或改用流程頁「⋯ → 🔐 手動登入一次」避開驗證碼。");
+    }
+    throw new Error(`本機文字辨識沒讀出這一張驗證碼，需要換一張驗證碼再試。若每一張都讀不出來：${plan.reason ?? "可到「設定 → 模型來源」接一顆看得懂圖的模型，或改用「⋯ → 🔐 手動登入一次」。"}`);
+  }
+
+  let raw: string;
+  try {
+    raw = (
+      await runWithModelChain(ctx, plan, {
+        label: "辨識驗證碼",
+        attempt: (pick) => callAIWithRetry(() => askVision(pick), { label: `辨識驗證碼(${pick.ref})`, signal: ctx.cancelSignal, maxAttempts: 1 }),
+        rejected: (text) => looksLikeNoVision(text),
+        describeResult: (text) => text,
+      })
+    ).result;
+  } catch (error) {
+    if (error instanceof PermanentError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    // 這是外部視覺服務當下整體不可用，同一個節點再跑一次仍會重複等主力+備援。
+    // 用 PermanentError 阻止引擎外層的第二、三次重試，避免 24 秒又被放大成一分多鐘。
+    throw new PermanentError(`驗證碼視覺模型目前沒有回應，已在短時間內停止等待，沒有繼續空轉數分鐘。${message.slice(0, 240)}`);
+  }
+
+  const answer = raw.replace(/[^a-zA-Z0-9]/g, "");
+  if (!answer || answer.length > 8) {
+    throw new Error(`模型未能讀出有效的驗證碼(原始回應：「${raw}」)`);
+  }
+  return answer;
+}

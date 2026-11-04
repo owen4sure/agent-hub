@@ -1,0 +1,427 @@
+import type { NodeDefinition } from "../types";
+import { PermanentError, RetryableError } from "../types";
+import { assertNoUnresolvedVars, cfgStr, planNodeModel, resolveTemplate, runWithModelChain } from "../nodeHelpers";
+import { callClaudeCode, isClaudeCodeModel } from "../../claudeCodeClient";
+import { callAIWithRetry } from "../../aiRetry";
+import { fetchWithUrlGuard } from "../../urlGuard";
+import { urlSourceEvidence } from "../runtimeEvidence";
+import { parseResponseContract, parseStatusSpec, statusMatches, validateResponseContract } from "../httpContract";
+import { getClient } from "../../modelClient";
+
+export const httpRequestNode: NodeDefinition = {
+  type: "http-request",
+  category: "integration",
+  label: "打 API",
+  description: "對任意網址發 HTTP 請求(GET/POST 等)，取得或送出資料。輸出回應內容給下游。",
+  icon: "🌐",
+  outputs: "status(HTTP狀態碼), body(回應文字), json(回應JSON物件), items(開自動分頁時所有頁合併的清單), itemCount(合併筆數), pages(抓了幾頁)",
+  configSchema: [
+    { key: "method", label: "方法", type: "select", options: ["GET", "POST", "PUT", "DELETE", "PATCH"], default: "GET" },
+    { key: "url", label: "網址", type: "text", default: "" },
+    { key: "headers", label: "Headers(JSON)", type: "textarea", default: "{}" },
+    { key: "body", label: "Body(JSON 或文字)", type: "textarea", default: "" },
+    { key: "successStatus", label: "哪些 HTTP 狀態算成功", type: "text", default: "200-299", help: "例如 200-299，或 200,201。非成功狀態會讓這一步明確失敗。" },
+    { key: "responseSchema", label: "回應欄位合約(JSON，可留空)", type: "textarea", default: "", allowEmpty: true, help: "例如 {\"id\":\"string\",\"data.items\":\"array\"}；不符合就停止，不把錯誤資料傳給下游。" },
+    // 讀取用的 POST 是真實存在的(平台自己的建圖配方就教 AI 用 POST .../databases/{id}/query 讀 Notion)，
+    // 但**不能靠猜**：/v1/pages(建立)跟 /v1/databases/{id}/query(查詢)只差在路徑，用網址 regex 猜錯
+    // 一次就是真的送出資料。所以做成明確、預設關閉的宣告：勾了才會在只讀試跑時真的執行，也才不會被
+    // 「只讀取／不要修改」的需求驗收攔下。沒勾 = 一律當成會寫入(既有行為)。
+    { key: "readOnly", label: "這個呼叫只是查詢，不會改動對方的資料", type: "boolean", default: "false" },
+    // ── 驗證(2026-08,n8n 差距補齊 P3):OAuth2/Bearer。帳密值放設定頁(secrets),這裡只選方式 ──
+    { key: "authType", label: "驗證方式", type: "select", default: "none", options: ["none=不用", "bearer=Bearer Token", "oauth2-client=OAuth2(用戶端憑證)", "oauth2-refresh=OAuth2(更新權杖)"], advanced: true },
+    { key: "tokenUrl", label: "OAuth2 權杖網址(選 OAuth2 才要填)", type: "text", default: "", allowEmpty: true, advanced: true },
+    { key: "authSecretPrefix", label: "帳密欄位字首(同流程多組 API 憑證時才需要改)", type: "text", default: "http", advanced: true },
+    // ── 自動分頁:一直抓到沒有下一頁,各頁資料合併進 items ──
+    { key: "paginate", label: "自動分頁", type: "select", default: "none", options: ["none=不分頁", "cursor=游標(回應告訴你下一頁)", "page=頁碼遞增"], advanced: true },
+    { key: "itemsField", label: "每頁資料清單在回應哪個欄位(如 data.items)", type: "text", default: "", allowEmpty: true, advanced: true },
+    { key: "cursorField", label: "下一頁游標在回應哪個欄位(如 next_cursor)", type: "text", default: "", allowEmpty: true, advanced: true },
+    { key: "cursorParam", label: "游標要用什麼參數名送出(如 cursor)", type: "text", default: "cursor", advanced: true },
+    { key: "pageParam", label: "頁碼參數名(頁碼模式用)", type: "text", default: "page", advanced: true },
+    { key: "maxPages", label: "最多抓幾頁(保護上限)", type: "number", default: "10", advanced: true },
+  ],
+  // 驗證方式決定需要哪些帳密欄位——宣告了設定頁才會長出輸入框(平台鐵則 16)
+  secretFields(config) {
+    const prefix = String(config.authSecretPrefix ?? "http").trim() || "http";
+    const t = String(config.authType ?? "none");
+    if (t === "bearer") return [{ key: `${prefix}BearerToken`, label: `${prefix} API Token`, type: "password" as const }];
+    if (t === "oauth2-client") return [
+      { key: `${prefix}ClientId`, label: `${prefix} Client ID`, type: "text" as const },
+      { key: `${prefix}ClientSecret`, label: `${prefix} Client Secret`, type: "password" as const },
+    ];
+    if (t === "oauth2-refresh") return [
+      { key: `${prefix}ClientId`, label: `${prefix} Client ID`, type: "text" as const },
+      { key: `${prefix}ClientSecret`, label: `${prefix} Client Secret`, type: "password" as const },
+      { key: `${prefix}RefreshToken`, label: `${prefix} Refresh Token`, type: "password" as const },
+    ];
+    return [];
+  },
+  retryable: true,
+  async execute(ctx) {
+    const method = cfgStr(ctx, "method", "GET");
+    const url = cfgStr(ctx, "url");
+    if (!url) throw new PermanentError("沒有設定網址");
+    let headers: Record<string, string> = {};
+    const headersCfg = ctx.config.headers;
+    if (headersCfg && typeof headersCfg === "object") {
+      headers = headersCfg as Record<string, string>;
+    } else {
+      const headersRaw = cfgStr(ctx, "headers", "").trim();
+      if (headersRaw) {
+        try {
+          headers = JSON.parse(headersRaw);
+        } catch {
+          throw new PermanentError("Headers 不是合法 JSON");
+        }
+      }
+    }
+    // ── 驗證:依 authType 取得權杖並掛上 Authorization(使用者已自填 Authorization 就不動) ──
+    const authType = cfgStr(ctx, "authType", "none");
+    if (authType !== "none" && !Object.keys(headers).some((h) => h.toLowerCase() === "authorization")) {
+      const prefix = cfgStr(ctx, "authSecretPrefix", "http").trim() || "http";
+      const need = (key: string) => {
+        const v = ctx.secrets[key];
+        if (!v) throw new PermanentError(`這個 API 的驗證需要「${key}」——請到設定頁的帳密區塊填入(存一次即可)`);
+        return v;
+      };
+      if (authType === "bearer") {
+        headers = { ...headers, Authorization: `Bearer ${need(`${prefix}BearerToken`)}` };
+      } else {
+        const tokenUrl = cfgStr(ctx, "tokenUrl", "").trim();
+        if (!tokenUrl) throw new PermanentError("選了 OAuth2 卻沒填「權杖網址」(tokenUrl)——通常在對方 API 文件的 OAuth/Token 章節");
+        const form = new URLSearchParams(
+          authType === "oauth2-refresh"
+            ? { grant_type: "refresh_token", refresh_token: need(`${prefix}RefreshToken`), client_id: need(`${prefix}ClientId`), client_secret: need(`${prefix}ClientSecret`) }
+            : { grant_type: "client_credentials", client_id: need(`${prefix}ClientId`), client_secret: need(`${prefix}ClientSecret`) },
+        );
+        const tokenRes = await fetchWithUrlGuard(tokenUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: form.toString(),
+          signal: AbortSignal.any([ctx.cancelSignal, AbortSignal.timeout(30_000)]),
+        });
+        const tokenJson = (await tokenRes.json().catch(() => null)) as { access_token?: string; error?: string; error_description?: string } | null;
+        if (!tokenRes.ok || !tokenJson?.access_token) {
+          throw new PermanentError(`OAuth2 換權杖失敗(HTTP ${tokenRes.status}${tokenJson?.error ? `,${tokenJson.error}${tokenJson.error_description ? ":" + tokenJson.error_description : ""}` : ""})——請確認權杖網址與帳密欄位是否正確`);
+        }
+        headers = { ...headers, Authorization: `Bearer ${tokenJson.access_token}` };
+        ctx.log(`OAuth2 權杖已取得(${authType === "oauth2-refresh" ? "更新權杖" : "用戶端憑證"}模式)`);
+      }
+    }
+    const bodyStr = cfgStr(ctx, "body");
+    let statusSpec: ReturnType<typeof parseStatusSpec>;
+    try { statusSpec = parseStatusSpec(cfgStr(ctx, "successStatus", "200-299")); } catch (error) { throw new PermanentError(error instanceof Error ? error.message : "成功狀態碼格式不正確"); }
+    let responseContract: ReturnType<typeof parseResponseContract>;
+    try { responseContract = parseResponseContract(cfgStr(ctx, "responseSchema", "")); } catch (error) { throw new PermanentError(error instanceof Error ? error.message : "回應欄位合約格式不正確"); }
+    // 加上逾時與大小上限，避免卡死或把巨大回應塞爆記憶體。同時接上 ctx.cancelSignal——
+    // 不接的話使用者按「停止執行」對這個節點完全沒作用，要等 30 秒逾時自然到才會真的停下來
+    // (這是「按停止不會停」的其中一個根因：這是一個 fetch，跟瀏覽器頁面無關，resetPage() 救不到它)。
+    const doOnce = async (reqUrl: string) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30_000);
+      // 取消可能發生在上一輪重試的退避期間；這時 signal 已經 aborted，單純加 listener 不會補發事件。
+      if (ctx.cancelSignal.aborted) controller.abort();
+      const onCancel = () => controller.abort();
+      ctx.cancelSignal.addEventListener("abort", onCancel, { once: true });
+      let res: Response;
+      try {
+        res = await fetchWithUrlGuard(reqUrl, {
+          method,
+          headers,
+          body: method === "GET" || method === "DELETE" || !bodyStr ? undefined : bodyStr,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+        ctx.cancelSignal.removeEventListener("abort", onCancel);
+      }
+      const MAX = 5 * 1024 * 1024;
+      const reader = res.body?.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      let truncated = false;
+      if (reader) {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const remaining = MAX - total;
+          if (value.byteLength > remaining) {
+            if (remaining > 0) chunks.push(value.subarray(0, remaining));
+            truncated = true;
+            await reader.cancel();
+            break;
+          }
+          chunks.push(value);
+          total += value.byteLength;
+        }
+      }
+      const text = Buffer.concat(chunks).toString("utf-8");
+      if (truncated) ctx.log(`回應超過 5MB，已在讀取時停止，避免塞爆記憶體`);
+      let json: unknown = null;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        // 非 JSON 回應
+      }
+      ctx.log(`${method} ${reqUrl} → ${res.status}`);
+      if (!statusMatches(res.status, statusSpec)) {
+        throw new PermanentError(`${method} ${reqUrl} 回傳 HTTP ${res.status}，不在允許的成功狀態 ${cfgStr(ctx, "successStatus", "200-299")} 內`);
+      }
+      const contractErrors = validateResponseContract(json, responseContract);
+      if (contractErrors.length > 0) throw new PermanentError(`API 回應不符合欄位合約：${contractErrors.slice(0, 8).join("；")}`);
+      return { status: res.status, text, json };
+    };
+
+    const paginate = cfgStr(ctx, "paginate", "none");
+    if (paginate === "none") {
+      const r = await doOnce(url);
+      return { output: { status: r.status, body: r.text, json: r.json, sourceEvidence: urlSourceEvidence(url, { observed: { status: r.status, textChars: r.text.length } }) } };
+    }
+
+    // ── 自動分頁(2026-08):一直抓到沒有下一頁,各頁清單合併進 items。只支援 GET——
+    //    對「寫入型」請求自動重發多次是危險動作,想都不用想直接擋。 ──
+    if (method !== "GET") throw new PermanentError("自動分頁只支援 GET(寫入型請求不能自動重發多次)");
+    const getPath = (obj: unknown, dotted: string): unknown =>
+      dotted.split(".").reduce<unknown>((acc, k) => (acc && typeof acc === "object" ? (acc as Record<string, unknown>)[k] : undefined), obj);
+    const itemsField = cfgStr(ctx, "itemsField", "").trim();
+    const maxPages = Math.max(1, Math.min(50, Number(cfgStr(ctx, "maxPages", "10")) || 10));
+    const withParam = (base: string, key: string, value: string): string => {
+      const u = new URL(base);
+      u.searchParams.set(key, value);
+      return u.toString();
+    };
+    const allItems: unknown[] = [];
+    let pages = 0;
+    let lastStatus = 0;
+    let lastJson: unknown = null;
+    let lastText = "";
+    let nextUrl: string | null = url;
+    let pageNo = 1;
+    while (nextUrl && pages < maxPages) {
+      const r = await doOnce(nextUrl);
+      pages++;
+      lastStatus = r.status; lastJson = r.json; lastText = r.text;
+      const pageItems = itemsField ? getPath(r.json, itemsField) : r.json;
+      if (Array.isArray(pageItems)) allItems.push(...pageItems);
+      else if (pages === 1 && itemsField) throw new PermanentError(`回應的「${itemsField}」不是清單——請確認欄位路徑(收到的頂層欄位:${r.json && typeof r.json === "object" ? Object.keys(r.json as object).slice(0, 10).join("、") : "非 JSON"})`);
+      if (paginate === "cursor") {
+        const cursorField = cfgStr(ctx, "cursorField", "").trim();
+        if (!cursorField) throw new PermanentError("游標分頁要填「下一頁游標在回應哪個欄位」(cursorField)");
+        const cursor = getPath(r.json, cursorField);
+        nextUrl = cursor !== undefined && cursor !== null && String(cursor) !== "" && cursor !== false
+          ? withParam(url, cfgStr(ctx, "cursorParam", "cursor").trim() || "cursor", String(cursor))
+          : null;
+      } else {
+        // 頁碼模式:這一頁拿到空清單就停,否則頁碼+1 繼續
+        nextUrl = Array.isArray(pageItems) && pageItems.length > 0
+          ? withParam(url, cfgStr(ctx, "pageParam", "page").trim() || "page", String(++pageNo))
+          : null;
+      }
+    }
+    if (nextUrl && pages >= maxPages) ctx.log(`⚠️ 到達分頁保護上限(${maxPages} 頁)仍有下一頁——資料可能不完整;確定要更多就調高「最多抓幾頁」`);
+    ctx.log(`分頁完成:抓了 ${pages} 頁,合併 ${allItems.length} 筆`);
+    return { output: { status: lastStatus, body: lastText, json: lastJson, items: allItems, itemCount: allItems.length, pages, sourceEvidence: urlSourceEvidence(url, { observed: { status: lastStatus, textChars: lastText.length } }) } };
+  },
+};
+
+export const templateTextNode: NodeDefinition = {
+  type: "template-text",
+  category: "data",
+  label: "組字串",
+  description: "用上游資料組出一段文字或檔名，例如把日期跟名稱拼成「報表_20260701」。可用 {{欄位}} 引用上游資料。",
+  icon: "📝",
+  outputs: "依「輸出欄位名」設定(預設 text)——組好的文字放在那個欄位",
+  configSchema: [
+    { key: "template", label: "文字範本(可用 {{欄位}})", type: "textarea", default: "" },
+    { key: "outputKey", label: "輸出欄位名", type: "text", default: "text" },
+  ],
+  retryable: false,
+  async execute(ctx) {
+    const template = cfgStr(ctx, "template");
+    const key = cfgStr(ctx, "outputKey", "text");
+    return { output: { [key]: template } };
+  },
+};
+
+export const setVariableNode: NodeDefinition = {
+  type: "set-variable",
+  category: "logic",
+  label: "設定變數",
+  description:
+    "把一個值存進共享變數，後面的節點可以引用。**注意：任何節點(含 custom-code)算出來的欄位，下游本來就能直接用 {{欄位名}} 引用，完全不需要另外接一個 set-variable 節點才能「讓後面看得到」**——上游輸出會自動沿整條鏈往下傳。只有在你要「把某個固定的字面值(不是上游算出來的)存成一個共用變數」這種情境才需要這個節點；把上游已經輸出的欄位重新存一次(value 直接引用同一個 {{欄位名}})是多餘的空節點，不要這樣用。",
+  icon: "🔧",
+  outputs: "依「變數名」設定——值放在那個欄位給下游 {{變數名}} 引用",
+  configSchema: [
+    { key: "name", label: "變數名", type: "text", default: "myVar" },
+    { key: "value", label: "值(可用 {{欄位}})", type: "text", default: "" },
+  ],
+  retryable: false,
+  async execute(ctx) {
+    const name = cfgStr(ctx, "name", "myVar");
+    const value = cfgStr(ctx, "value");
+    ctx.vars[name] = value;
+    return { output: { [name]: value } };
+  },
+};
+
+export const ifConditionNode: NodeDefinition = {
+  type: "if-condition",
+  category: "logic",
+  label: "條件判斷",
+  description: "依條件決定走 true 或 false 分支。例如「如果找到的資料筆數大於 0」。下游連線的「fromPort」標 true/false。",
+  icon: "🔀",
+  outputs: "result(條件是否成立)；成立走「是」的連線,不成立走「否」",
+  configSchema: [
+    { key: "left", label: "左值(可用 {{欄位}})", type: "text", default: "" },
+    { key: "op", label: "比較", type: "select", options: ["==", "!=", ">", "<", ">=", "<=", "contains", "not-empty"], default: "==" },
+    { key: "right", label: "右值", type: "text", default: "" },
+  ],
+  retryable: false,
+  async execute(ctx) {
+    const left = cfgStr(ctx, "left");
+    const op = cfgStr(ctx, "op", "==");
+    const right = cfgStr(ctx, "right");
+    // 比較值沒解析到=必然走錯分支(字面 "{{count}}" 跟任何門檻比都是垃圾結果)，老實失敗(同 switch)。
+    // 查的是「left」/「right」欄位本身的原始字串，不是解析完的值——避免上游資料剛好含字面 {{...}} 的誤判。
+    assertNoUnresolvedVars(ctx, "left", "條件判斷「左值」");
+    assertNoUnresolvedVars(ctx, "right", "條件判斷「右值」");
+    let result = false;
+    // 大小比較的三段規則(迴圈工程：垃圾值要老實失敗，不能靜默走錯分支)：
+    // ①先把「含逗號/貨幣符號的數字」正規化(1,234 / $50 → 1234 / 50)，兩邊都是有限數字→數值比較。
+    // ②只有一邊是數字(如上游解析失敗傳來 "null"/""/一段文字，另一邊是門檻 100000)→這幾乎必然是
+    //   「數值比較的意圖、但上游給了垃圾」，老實拋錯讓修復迴圈修上游——實測踩過：price=null 被
+    //   字串序比較判成 "null">"100000"=true，靜默走錯分支還全綠。
+    // ③兩邊都不是數字(如 2026-07-01 這種日期字串)→字串序比較(localeCompare)，字典序對日期是對的。
+    const toNum = (s: string) => Number(s.replace(/[,$\s]/g, "") || "__nan__");
+    const ln = toNum(left);
+    const rn = toNum(right);
+    const bothNum = Number.isFinite(ln) && Number.isFinite(rn);
+    const isOrderOp = op === ">" || op === "<" || op === ">=" || op === "<=";
+    if (isOrderOp && !bothNum && (Number.isFinite(ln) || Number.isFinite(rn))) {
+      const [badSide, badVal] = Number.isFinite(ln) ? ["右值", right] : ["左值", left];
+      throw new PermanentError(
+        `條件判斷無法比較大小：${badSide}「${badVal.slice(0, 50) || "(空)"}」不是數字——多半是上游節點沒有解析出正確的值，請檢查/修上游`,
+      );
+    }
+    const cmp = left.localeCompare(right); // <0：left 排在前面(較小)；>0：較大；0：相等
+    switch (op) {
+      case "==": result = left === right; break;
+      case "!=": result = left !== right; break;
+      case ">": result = bothNum ? ln > rn : cmp > 0; break;
+      case "<": result = bothNum ? ln < rn : cmp < 0; break;
+      case ">=": result = bothNum ? ln >= rn : cmp >= 0; break;
+      case "<=": result = bothNum ? ln <= rn : cmp <= 0; break;
+      case "contains": result = left.includes(right); break;
+      case "not-empty": result = left.trim().length > 0; break;
+    }
+    ctx.log(`條件 ${left} ${op} ${right} → ${result}`);
+    return { output: { result }, activePorts: [result ? "true" : "false"] };
+  },
+};
+
+export const llmDecideNode: NodeDefinition = {
+  type: "llm-decide",
+  category: "ai",
+  label: "AI 判斷/產生",
+  description:
+    "問 AI 一個問題(可帶上游資料)，用回答來產生文字或做判斷。例如「幫我把這段內容寫成一封通知信」或「判斷這筆資料是否異常」。**判斷型用途(下游要接條件分支比對答案)務必填 choices**，例如「true,false」或「正常,異常」——系統會強制 AI 只回其中之一，比對才不會因為 AI 回了一整段話而永遠不相等。",
+  icon: "🧠",
+  outputs: "answer(或你指定的 outputKey)：AI 的回覆文字",
+  configSchema: [
+    { key: "prompt", label: "要問 AI 的內容(可用 {{欄位}})", type: "textarea", default: "" },
+    { key: "outputKey", label: "輸出欄位名", type: "text", default: "answer" },
+    { key: "choices", label: "限定答案(逗號分隔，選填；判斷型必填)", type: "text", default: "" },
+    // 這一步專屬的模型(2026-08-05)：節點級 AI 以前只能跟著「整條流程的模型」走——使用者的
+    // 地端模型實測「小輸入小輸出的判斷」可以、「建圖/產碼那種大包」不行，但流程模型是同一顆
+    // 開關,想讓地端模型只做判斷就得整條流程(含建圖產碼)一起換過去。這個欄位讓「這一步用哪顆」
+    // 跟「流程用哪顆」分開；留空=維持原本行為(流程模型)。
+    { key: "model", label: "這一步用的模型(選填，留空=用流程的模型；可填自訂來源的模型代號)", type: "text", default: "", allowEmpty: true, advanced: true },
+  ],
+  retryable: true,
+  async execute(ctx) {
+    const prompt = cfgStr(ctx, "prompt");
+    const key = cfgStr(ctx, "outputKey", "answer");
+    // 用哪顆模型由 modelPolicy 統一決定：這一步指定的 → 這條流程指定的執行模型 →
+    // 使用者在設定頁排的順序 → 自動。指定的來源被刪掉/改名時 planModelChain 會回一條空的鏈
+    // (絕不「順手挑一顆同名的」)，runWithModelChain 就會停下來說明——使用者特地把這一步釘在
+    // 某個端點(例如地端模型，資料不出機器)，靜默換端點等於把業務資料送去別的地方而毫無痕跡。
+    const modelOverride = cfgStr(ctx, "model", "").trim();
+    const plan = await planNodeModel(ctx, "text", modelOverride || undefined);
+    // choices = 確定性的輸出約束。沒有它，弱模型對「判斷這筆是否異常」會回一整段分析文字，
+    // 下游 if-condition 比 == "true" 永遠 false、靜默走錯分支還回報成功(表面成功實際走樣)。
+    const choices = cfgStr(ctx, "choices")
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const ask = async (fullPrompt: string): Promise<string> => {
+      // signal 接 ctx.cancelSignal：使用者按「停止執行」時中斷正在進行的模型呼叫本身(不接的話
+      // 停止對這個節點沒有作用，要等模型呼叫自然結束/逾時才會停下來)。
+      const { result } = await runWithModelChain(ctx, plan, {
+        label: "AI 判斷",
+        attempt: (pick) => {
+          if (isClaudeCodeModel(pick.model)) {
+            return callAIWithRetry(() => callClaudeCode({ prompt: fullPrompt, signal: ctx.cancelSignal }), {
+              label: "AI判斷(Claude Code)", signal: ctx.cancelSignal, maxAttempts: 2,
+            });
+          }
+          // client 依「這顆模型屬於哪個來源」建立，不是流程層的 ctx.baseUrl。
+          const client = getClient(pick.ref);
+          return callAIWithRetry(
+            () =>
+              client.chat.completions
+                .create({ model: pick.model, messages: [{ role: "user", content: fullPrompt }], max_tokens: 1000 }, { signal: ctx.cancelSignal })
+                .then((res) => res.choices[0]?.message?.content ?? ""),
+            { label: `AI判斷(${pick.ref})`, signal: ctx.cancelSignal },
+          );
+        },
+      });
+      return result.trim();
+    };
+
+    /** 從回答裡撈出合法選項：完全相等優先；「答案是 X」這種包了幾個字的也救回來(唯一命中才算)。
+     * 包含式救援必須防「否定反轉」：choices=正常,異常 時模型回「不正常」——唯一包含的是「正常」，
+     * 不防的話會回傳跟模型意思完全相反的選項，下游靜默走錯分支還全綠(比答非所問更糟)。
+     * 命中位置前面幾個字有否定詞(不/非/沒/未/無/not)就不算命中，讓它落進「重問一次」的正常流程。 */
+    const matchChoice = (answer: string): string | null => {
+      const exact = choices.find((c) => c.toLowerCase() === answer.toLowerCase());
+      if (exact) return exact;
+      const contained = choices.filter((c) => {
+        const idx = answer.toLowerCase().indexOf(c.toLowerCase());
+        if (idx === -1) return false;
+        // 英數選項要求詞邊界：不然 "not yes" 裡的 "no"(是 "not" 的子字串)會被當成命中 no
+        if (/[a-z0-9]/i.test(c)) {
+          const prev = answer[idx - 1];
+          const next = answer[idx + c.length];
+          if ((prev && /[a-z0-9]/i.test(prev)) || (next && /[a-z0-9]/i.test(next))) return false;
+        }
+        const before = answer.slice(Math.max(0, idx - 4), idx);
+        return !/[不非沒未無没]|not\s*$|n't\s*$/i.test(before);
+      });
+      return contained.length === 1 ? contained[0] : null;
+    };
+
+    const constrained = choices.length > 0 ? `${prompt}\n\n【回答格式】只能回這幾個詞之一(不要任何其他文字/標點/解釋)：${choices.join("、")}` : prompt;
+    let answer = await ask(constrained);
+
+    if (choices.length > 0) {
+      let matched = matchChoice(answer);
+      if (!matched) {
+        // 答非所問——把「你回了什麼、我要什麼」具體餵回去重問一次(弱模型第一次常忍不住解釋一堆)
+        ctx.log(`AI 回了「${answer.slice(0, 60)}」不在限定答案內，帶著具體回饋重問一次`);
+        answer = await ask(`${constrained}\n\n你剛剛回了「${answer.slice(0, 200)}」——這不是合法答案。只回 ${choices.join("、")} 其中一個詞，什麼都不要多。`);
+        matched = matchChoice(answer);
+      }
+      if (!matched) {
+        // 兩次都不合格就老實失敗，讓重試/修復迴圈接手——絕不能把一段廢話當答案往下游送
+        throw new RetryableError(`AI 兩次都沒有回限定答案(${choices.join("/")})之一，最後回的是「${answer.slice(0, 100)}」`);
+      }
+      answer = matched;
+    }
+
+    ctx.log(`AI 回覆：${answer.slice(0, 80)}${answer.length > 80 ? "…" : ""}`);
+    return { output: { [key]: answer } };
+  },
+};
+
+/** resolveTemplate 匯出給 send-email 等節點用 */
+export { resolveTemplate };

@@ -1,0 +1,145 @@
+{
+  "id": "file-doc-audit",
+  "category": "審核把關",
+  "icon": "🧾",
+  "name": "新文件自動稽核,合格與否寄信告訴我",
+  "description": "監聽一個資料夾,有文件(PDF/Word)掉進來就自動讀出內容 → AI 依檢核清單稽核(有沒有缺漏、格式對不對)並判定合格/不合格 → 依結果寄不同的 email 通知。把「每份文件人工逐條檢查」交給 AI 先跑一輪。(改編自 n8n 社群範本庫 0828_Extractfromfile_Gmail_Send_Triggered.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(監聽資料夾)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 150
+      }
+    },
+    {
+      "id": "read",
+      "type": "read-file",
+      "label": "讀取文件內容",
+      "config": {
+        "path": "{{filePath}}",
+        "maxChars": "20000"
+      },
+      "position": {
+        "x": 240,
+        "y": 150
+      }
+    },
+    {
+      "id": "report",
+      "type": "llm-decide",
+      "label": "AI 稽核並寫報告",
+      "config": {
+        "prompt": "你是文件稽核員。依這份檢核清單審這份文件:①有沒有標題與日期 ②內容有沒有明顯缺漏或空白欄位 ③有沒有前後矛盾。逐點寫出檢查結果與建議,條列清楚:\n\n{{fileText}}",
+        "outputKey": "auditReport"
+      },
+      "position": {
+        "x": 480,
+        "y": 150
+      }
+    },
+    {
+      "id": "verdict",
+      "type": "llm-decide",
+      "label": "判定合格與否",
+      "config": {
+        "prompt": "根據下面這份稽核報告,這份文件整體是否合格(沒有重大缺漏就算合格):\n\n{{auditReport}}",
+        "outputKey": "verdict",
+        "choices": "合格,不合格"
+      },
+      "position": {
+        "x": 720,
+        "y": 150
+      }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "合格嗎?",
+      "config": {
+        "left": "{{verdict}}",
+        "op": "==",
+        "right": "合格"
+      },
+      "position": {
+        "x": 960,
+        "y": 150
+      }
+    },
+    {
+      "id": "pass",
+      "type": "send-email",
+      "label": "寄「已通過」",
+      "config": {
+        "subject": "✅ 文件稽核通過:{{fileName}}",
+        "body": "這份文件已通過稽核。\n\n稽核摘要:\n{{auditReport}}"
+      },
+      "position": {
+        "x": 1220,
+        "y": 70
+      }
+    },
+    {
+      "id": "fail",
+      "type": "send-email",
+      "label": "寄「需改善」",
+      "config": {
+        "subject": "⚠️ 文件需要修正:{{fileName}}",
+        "body": "這份文件稽核未通過,請依下列建議修正後重送:\n\n{{auditReport}}"
+      },
+      "position": {
+        "x": 1220,
+        "y": 240
+      }
+    },
+    {
+      "id": "alert",
+      "type": "desktop-notify",
+      "label": "讀不到文件告警",
+      "config": {
+        "title": "文件稽核失敗",
+        "message": "🆘 讀不到這份文件:{{error}}"
+      },
+      "position": {
+        "x": 480,
+        "y": 340
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "read"
+    },
+    {
+      "from": "read",
+      "to": "report"
+    },
+    {
+      "from": "report",
+      "to": "verdict"
+    },
+    {
+      "from": "verdict",
+      "to": "gate"
+    },
+    {
+      "from": "gate",
+      "to": "pass",
+      "fromPort": "true"
+    },
+    {
+      "from": "gate",
+      "to": "fail",
+      "fromPort": "false"
+    },
+    {
+      "from": "read",
+      "to": "alert",
+      "fromPort": "error"
+    }
+  ]
+}

@@ -1,0 +1,215 @@
+import { NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
+import { getWorkflow, listWorkflows, saveWorkflow } from "@/lib/workflow/store";
+import { getWorkflowSecrets } from "@/lib/settingsStore";
+import { createSchedule, updateSchedule, isValidCron } from "@/lib/scheduler";
+import { clearHttpReadOnlyApprovals } from "@/lib/workflow/httpReadOnlyApproval";
+import { clearSafetyContract } from "@/lib/workflow/safetyContract";
+import { defaultModelRef } from "@/lib/modelProviders";
+import { lintGraph } from "@/lib/workflow/graphLint";
+import type { Workflow, WorkflowNode, WorkflowEdge, ParamField } from "@/lib/workflow/types";
+import { importPortableScenarios } from "@/lib/workflow/scenarioTests";
+import { denyIfNotLocal } from "@/lib/requireLocal";
+import { recordAuditFromRequest } from "@/lib/auditLog";
+
+function bad() {
+  return NextResponse.json({ error: "匯入的檔案格式不正確" }, { status: 400 });
+}
+
+/** 欄位缺就給預設空陣列，但「有給卻不是陣列」就是格式錯(不能默默吞掉，會做出打不開的 workflow) */
+function arrayOrDefault(value: unknown): unknown[] | null {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : null;
+}
+
+function isObj(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function strField(o: Record<string, unknown>, k: string): boolean {
+  return typeof o[k] === "string" && (o[k] as string).length > 0;
+}
+
+/**
+ * 把一個節點的 config 裡「所有 custom-code 的 code」清空，包含 repeat-steps 節點內嵌在
+ * config.steps JSON 裡的每一步——這個節點的頂層 type 是 "repeat-steps" 不是 "custom-code"，
+ * 沒有這段遞迴的話，惡意程式碼藏在迴圈節點內嵌步驟裡就能繞過清空、原封不動被匯入(踩過的安全漏洞：
+ * 第一次執行 repeatSteps.ts 判斷內嵌步驟不是空殼，直接用 new AsyncFunction 執行，帶著 ctx.secrets)。
+ */
+/** 匯入時實際清掉了多少內容——用來讓使用者一進來就知道要補什麼，不用等執行失敗才發現。
+ * clearedEmailLabels 記下「哪些步驟」被清空收件人——只講數量不講是哪一步，使用者得自己
+ * 把整張畫布掃過一遍才找得到要補的節點；寄信是「要動手補值」的項目，跟純粹自動重生的
+ * custom-code 不同，必須讓使用者能直接點對地方，不是自己找。 */
+interface SanitizeCounters {
+  clearedCodeCount: number;
+  clearedEmailCount: number;
+  clearedEmailLabels: string[];
+  needsManualLogin: boolean;
+}
+
+function sanitizeConfig(type: string, config: Record<string, unknown>, counters: SanitizeCounters, label: string): Record<string, unknown> {
+  let out = config;
+  if (type === "custom-code" && out.code) {
+    out = { ...out, code: "" };
+    counters.clearedCodeCount++;
+  }
+  // 寄信的「收件人」也是外送通道：惡意流程檔可以組「讀檔(指向敏感檔)→寄Email(收件人=攻擊者)」，
+  // 使用者匯入後一跑,檔案就寄出去了(不用任何 custom-code,清 code 擋不到)。收件人清空=寄給自己
+  // (SMTP 帳號),外洩通道直接失效;真的要寄給別人,匯入的人自己填回去,一眼就會看到填的是誰。
+  if (type === "send-email" && out.to) {
+    out = { ...out, to: "" };
+    counters.clearedEmailCount++;
+    counters.clearedEmailLabels.push(label);
+  }
+  // 用網頁信箱寄信的外洩風險更高：它是用**匯入者本人已登入的公司信箱**寄出去的，
+  // 收件人沒清掉的話，一跑就等於用他的身分把資料寄給流程作者指定的任何人。
+  // 三個收件欄位都要清(密件副本尤其危險——它不會出現在收件人眼中，最不容易被發現)。
+  if (type === "webmail-send" && (out.to || out.cc || out.bcc)) {
+    out = { ...out, to: "", cc: "", bcc: "" };
+    counters.clearedEmailCount++;
+    counters.clearedEmailLabels.push(label);
+  }
+  if (type === "browser-login") counters.needsManualLogin = true;
+  if (type === "repeat-steps" && typeof out.steps === "string") {
+    try {
+      const steps = JSON.parse(out.steps) as { type: string; label?: string; config?: Record<string, unknown> }[];
+      if (Array.isArray(steps)) {
+        const cleaned = steps.map((s) => (s && typeof s === "object" ? { ...s, config: sanitizeConfig(String(s.type), s.config ?? {}, counters, s.label?.trim() || s.type) } : s));
+        out = { ...out, steps: JSON.stringify(cleaned) };
+      }
+    } catch { /* steps 不是合法 JSON，維持原樣(執行期會因為解析失敗而報錯，不會默默跑起來) */ }
+  }
+  return out;
+}
+
+export async function POST(req: Request) {
+  const denied = denyIfNotLocal(req);
+  if (denied) return denied;
+  const body = await req.json().catch(() => null);
+  if (!body || typeof body !== "object" || !Array.isArray(body.nodes)) {
+    return bad();
+  }
+  if (body.nodes.length === 0) return bad();
+  if (body.nodes.length > 1_000) return NextResponse.json({ error: "匯入的流程超過 1,000 個節點" }, { status: 413 });
+
+  // 不整包 spread：外來 JSON 什麼型別都可能塞進來(例如 requiresSecrets 給字串)，
+  // 存進去之後詳情頁一 .map() 就炸掉、永遠打不開。白名單逐欄位取值並驗證型別。
+  const edges = arrayOrDefault(body.edges);
+  const requiresSecrets = arrayOrDefault(body.requiresSecrets);
+  const triggerParams = arrayOrDefault(body.triggerParams);
+  if (!edges || !requiresSecrets || !triggerParams) return bad();
+  if (edges.length > 5_000 || requiresSecrets.length > 100 || triggerParams.length > 100) {
+    return NextResponse.json({ error: "匯入的流程內容數量超過安全上限" }, { status: 413 });
+  }
+
+  // 只驗「是陣列」還不夠——元素型別錯(例如 requiresSecrets 塞字串陣列)會讓詳情頁 .map(f=>[f.key,...])
+  // 讀到 undefined key、整頁打不開。逐元素深驗必要的 string 欄位。
+  // requiresSecrets 每個要有 string key/label；triggerParams 每個要有 string key；edges 每個要有 string from/to。
+  if (!requiresSecrets.every((f) => isObj(f) && strField(f, "key") && strField(f, "label") && (f.type === "text" || f.type === "password"))) return bad();
+  const paramTypes = new Set(["text", "number", "date-or-token", "select", "boolean", "secret", "code", "textarea"]);
+  if (!triggerParams.every((p) => isObj(p) && strField(p, "key") && typeof p.type === "string" && paramTypes.has(p.type))) return bad();
+  if (!edges.every((e) => isObj(e) && strField(e, "from") && strField(e, "to") && (e.fromPort === undefined || typeof e.fromPort === "string"))) return bad();
+
+  const nodes: WorkflowNode[] = [];
+  const counters: SanitizeCounters = { clearedCodeCount: 0, clearedEmailCount: 0, clearedEmailLabels: [], needsManualLogin: false };
+  for (const raw of body.nodes as unknown[]) {
+    if (!raw || typeof raw !== "object") return bad();
+    const n = raw as Record<string, unknown>;
+    if (typeof n.id !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(n.id) || typeof n.type !== "string" || !n.type || n.type.length > 100) return bad();
+    const pos = (n.position ?? {}) as Record<string, unknown>;
+    const label = typeof n.label === "string" && n.label.trim() ? n.label.trim().slice(0, 120) : n.id;
+    let config = n.config && typeof n.config === "object" && !Array.isArray(n.config) ? (n.config as Record<string, unknown>) : {};
+    // 安全關鍵：custom-code 的 code 是「執行時直接在本機以完整權限跑」的程式碼，而且 ctx.secrets
+    // 帶著全域共用的所有帳密——照單全收等於「匯入別人分享的流程 = 在自己電腦上執行別人的任意程式
+    // + 帳密可被整包外送」。匯入時一律把 code 清空(含 repeat-steps 內嵌步驟)，第一次執行會由可信的
+    // codegen 依節點的「意圖」說明重新生成，功能不變、但別人夾帶的程式碼不會被執行。
+    config = sanitizeConfig(n.type, config, counters, label);
+    nodes.push({
+      id: n.id,
+      type: n.type,
+      label,
+      config,
+      position: {
+        x: typeof pos.x === "number" && Number.isFinite(pos.x) && Math.abs(pos.x) <= 1_000_000 ? pos.x : 0,
+        y: typeof pos.y === "number" && Number.isFinite(pos.y) && Math.abs(pos.y) <= 1_000_000 ? pos.y : 0,
+      },
+    });
+  }
+
+  // 匯入跟 AI 建圖走同一套確定性結構驗證：未知節點、缺失連線、環、非法 config
+  // 必須在保存前擋掉，不能顯示「匯入成功」後才讓使用者在畫面或執行期踩雷。
+  const graphErrors = lintGraph(nodes, edges as WorkflowEdge[]);
+  if (graphErrors.length > 0) {
+    return NextResponse.json({ error: "匯入的流程結構有問題", details: graphErrors }, { status: 400 });
+  }
+
+  const existing = new Set(listWorkflows().map((w) => w.id));
+  // 清掉不安全字元(擋路徑穿越)，空的就給預設
+  let newId = String(body.id ?? "imported").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 60) || "imported";
+  if (existing.has(newId)) newId = `${newId}-${randomUUID().slice(0, 6)}`;
+
+  const wf: Workflow = {
+    id: newId,
+    name: String(body.name ?? newId).trim().slice(0, 120) || newId,
+    status: "draft",
+    builtin: false,
+    description: body.description !== undefined ? String(body.description).slice(0, 2_000) : "",
+    longDescription: body.longDescription !== undefined ? String(body.longDescription).slice(0, 20_000) : undefined,
+    defaultModel: typeof body.defaultModel === "string" && body.defaultModel ? body.defaultModel.slice(0, 160) : defaultModelRef(),
+    requiresSecrets: requiresSecrets as Workflow["requiresSecrets"],
+    triggerParams: triggerParams as ParamField[],
+    importedUntrusted: true,
+    // onFailureWorkflow 刻意不從匯入檔帶入：外來檔案不能指定「失敗時自動執行本機的哪條流程」
+    // (惡意檔案可以故意放一個必炸節點，串起本機任意流程)。要用的話匯入後自己到觸發面板設定。
+    nodes,
+    edges: edges as WorkflowEdge[],
+  };
+  saveWorkflow(wf);
+  // 使用者的「這個 POST 只是查詢」確認絕不可以跟著匯入檔跑到這台機器上：那是**這台機器的使用者**
+  // 對某一份精確請求做的安全批准，不是流程定義的一部分。確認存在 DB(不在 workflow JSON 裡)，所以
+  // 匯入檔本來就帶不進來；這裡再明確清一次，避免「新流程沿用到舊 id 的殘留批准」這種邊界情況。
+  clearHttpReadOnlyApprovals(newId);
+  // 只讀保護契約同理：那是**這台機器的使用者**對某一條流程做的授權決定，不是流程定義的一部分，
+  // 不能跟著匯入檔跑過來，也不能讓新流程沿用到舊 id 的殘留契約。
+  clearSafetyContract(newId);
+
+  // 排程不在 workflow JSON 裡(獨立的 schedules 表，見 export/route.ts 的說明)，這裡把匯出檔帶的
+  // schedules 欄位還原成新流程底下的排程。單筆 cron 格式不合法就跳過那一筆、不擋掉整個匯入
+  // (workflow 本身已經存好了，缺一筆排程使用者自己補得回來，但因為一筆壞資料整包失敗會更難排查)。
+  // 匯入的流程一律是草稿(見上面 status: "draft")，scheduler 對非正式流程一律跳過，
+  // 所以就算排程原本是「啟用」，也不會在使用者檢查過內容、設為正式之前偷跑。
+  let importedScheduleCount = 0;
+  let skippedScheduleCount = 0;
+  if (Array.isArray(body.schedules)) {
+    for (const raw of (body.schedules as unknown[]).slice(0, 50)) {
+      if (!isObj(raw) || typeof raw.cron !== "string" || !isValidCron(raw.cron)) { skippedScheduleCount++; continue; }
+      const scheduleParams = isObj(raw.params) ? raw.params : {};
+      const sid = createSchedule(newId, raw.cron, scheduleParams);
+      if (raw.enabled === false) updateSchedule(sid, { enabled: false });
+      importedScheduleCount++;
+    }
+  }
+
+  const passport = isObj(body.verificationPassport) ? body.verificationPassport : null;
+  const passportScenarios = passport && passport.version === 1 ? passport.scenarios : null;
+  const importedPassport = importPortableScenarios(newId, passportScenarios);
+
+  // saveWorkflow 內部會用 deriveRequiresSecrets 依實際節點圖重算 requiresSecrets(比外來檔案
+  // 宣告的更準確)，回應前重讀一次存好的版本才能算出真正還缺哪些帳密——不能直接用上面組的
+  // wf.requiresSecrets，那是匯入檔案宣告的舊值，可能跟實際節點需要的不一致。
+  const saved = getWorkflow(newId);
+  const secretsSet = getWorkflowSecrets(newId);
+  const missingSecrets = (saved?.requiresSecrets ?? []).filter((f) => !secretsSet[f.key]?.length);
+  recordAuditFromRequest(req, "workflow.import", newId, { name: saved?.name ?? null, clearedCodeCount: counters.clearedCodeCount });
+  return NextResponse.json({
+    id: newId,
+    missingSecrets: missingSecrets.map((f) => ({ key: f.key, label: f.label, type: f.type })),
+    clearedCodeCount: counters.clearedCodeCount,
+    clearedEmailCount: counters.clearedEmailCount,
+    clearedEmailLabels: counters.clearedEmailLabels,
+    needsManualLogin: counters.needsManualLogin,
+    importedScheduleCount,
+    skippedScheduleCount,
+    importedScenarioCount: importedPassport.imported,
+    skippedScenarioCount: importedPassport.skipped,
+  });
+}

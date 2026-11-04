@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔐 安全漏洞通報 / Report a security vulnerability
+    url: https://github.com/owen4sure/agent-hub/security/advisories/new
+    about: 安全問題請走這裡，不要開公開 issue（見 SECURITY.md）
+  - name: 💬 使用問題與討論 / Questions
+    url: https://github.com/owen4sure/agent-hub/discussions
+    about: 不確定是不是 bug、想問怎麼做某件事

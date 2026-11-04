@@ -1,0 +1,129 @@
+{
+  "id": "int-report-mail",
+  "category": "報表彙整",
+  "icon": "📊",
+  "name": "每天打 API 撈清單,整理成 CSV 寄出",
+  "description": "排程定時打一個 API 撈一份清單 → 用自訂步驟過濾整理成 CSV → 有資料才存成檔案並用 email 附檔寄給你(沒資料就不寄空信)。把「每天登入某系統匯出、手動整理再寄」變全自動。範例用公開測試 API,換成你自己的資料來源即可。抓不到來源會走失敗分支發桌面通知。(改編自 n8n 社群範本庫 1628_Emailsend_Code_Automation_Webhook.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 150
+      }
+    },
+    {
+      "id": "fetch",
+      "type": "http-request",
+      "label": "打 API 撈清單",
+      "config": {
+        "method": "GET",
+        "url": "https://jsonplaceholder.typicode.com/users",
+        "headers": "{}",
+        "body": ""
+      },
+      "position": {
+        "x": 240,
+        "y": 150
+      }
+    },
+    {
+      "id": "build",
+      "type": "custom-code",
+      "label": "整理成 CSV",
+      "config": {
+        "intent": "上游 http-request 的 json 是一份清單(陣列),每筆有 name、email 與 company.name。整理成 CSV:第一列標題是 姓名,信箱,公司;之後每筆一列。輸出 csvText(整段 CSV 文字)與 rowCount(資料筆數,數字)。",
+        "code": ""
+      },
+      "position": {
+        "x": 480,
+        "y": 150
+      }
+    },
+    {
+      "id": "chk",
+      "type": "if-condition",
+      "label": "有資料嗎?",
+      "config": {
+        "left": "{{rowCount}}",
+        "op": ">",
+        "right": "0"
+      },
+      "position": {
+        "x": 720,
+        "y": 150
+      }
+    },
+    {
+      "id": "save",
+      "type": "write-file",
+      "label": "存成 CSV 檔",
+      "config": {
+        "fileName": "清單_{{today}}.csv",
+        "content": "{{csvText}}"
+      },
+      "position": {
+        "x": 960,
+        "y": 80
+      }
+    },
+    {
+      "id": "mail",
+      "type": "send-email",
+      "label": "附檔寄出",
+      "config": {
+        "subject": "📊 每日清單報表({{today}})",
+        "body": "附上今天整理好的清單,共 {{rowCount}} 筆。",
+        "attachPath": "{{savedPath}}"
+      },
+      "position": {
+        "x": 1200,
+        "y": 80
+      }
+    },
+    {
+      "id": "alert",
+      "type": "desktop-notify",
+      "label": "抓不到來源告警",
+      "config": {
+        "title": "報表產生失敗",
+        "message": "🆘 打 API 撈不到清單:{{error}}"
+      },
+      "position": {
+        "x": 240,
+        "y": 330
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "fetch"
+    },
+    {
+      "from": "fetch",
+      "to": "build"
+    },
+    {
+      "from": "build",
+      "to": "chk"
+    },
+    {
+      "from": "chk",
+      "to": "save",
+      "fromPort": "true"
+    },
+    {
+      "from": "save",
+      "to": "mail"
+    },
+    {
+      "from": "fetch",
+      "to": "alert",
+      "fromPort": "error"
+    }
+  ]
+}

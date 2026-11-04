@@ -1,0 +1,89 @@
+{
+  "id": "sheet-order-intake",
+  "category": "整合串接",
+  "icon": "🧾",
+  "name": "訂單信 AI 抽明細寫進試算表",
+  "description": "客戶訂單都用 email 進來,每次都要人工抄進表格?把信件內容送進來(Webhook 或表單貼上) → AI 先判斷是不是訂單 → 是訂單才抽出客戶/品項/數量/金額 → 自動寫進試算表新列 → Telegram 告訴你進了一筆;不是訂單就安靜略過。(改編自 n8n 社群範本庫 0814_GoogleSheets_Gmail_Send_Triggered.json)",
+  "triggerParams": [
+    {
+      "key": "subject",
+      "label": "信件主旨",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "emailBody",
+      "label": "信件內文",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(Webhook/表單)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "judge",
+      "type": "llm-decide",
+      "label": "AI 判斷是不是訂單",
+      "config": {
+        "prompt": "判斷這封信是不是客戶下訂單。主旨:{{subject}}\n內文:{{emailBody}}\n\n判斷標準:有明確要買什麼、數量或金額的算「訂單」,例如「我要訂 A 商品 3 組」「請幫我出貨上次那款,先來 10 個」;詢價、問規格、售後問題、廣告信都算「其他」,例如「請問 A 商品一組多少錢?」「上週買的東西壞了」。",
+        "outputKey": "kind",
+        "choices": "訂單,其他"
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "是訂單嗎?",
+      "config": {
+        "left": "{{kind}}",
+        "op": "==",
+        "right": "訂單"
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "extract",
+      "type": "llm-decide",
+      "label": "AI 抽訂單明細",
+      "config": {
+        "prompt": "從這封訂單信抽出重點,只回一行,格式「客戶名稱|品項摘要|總數量|總金額」,缺的欄位填「未提供」,不要任何其他文字:\n主旨:{{subject}}\n內文:{{emailBody}}",
+        "outputKey": "orderLine",
+        "choices": ""
+      },
+      "position": { "x": 780, "y": 60 }
+    },
+    {
+      "id": "append",
+      "type": "google-sheet-append",
+      "label": "寫進訂單試算表",
+      "config": {
+        "cells": "{{today}}\n{{subject}}\n{{orderLine}}",
+        "sheetName": ""
+      },
+      "position": { "x": 1040, "y": 60 }
+    },
+    {
+      "id": "notify",
+      "type": "telegram-notify",
+      "label": "通知進了一筆訂單",
+      "config": {
+        "message": "🧾 收到新訂單並已登記:\n{{orderLine}}\n(主旨:{{subject}})"
+      },
+      "position": { "x": 1300, "y": 60 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "judge" },
+    { "from": "judge", "to": "gate" },
+    { "from": "gate", "to": "extract", "fromPort": "true" },
+    { "from": "extract", "to": "append" },
+    { "from": "append", "to": "notify" }
+  ]
+}

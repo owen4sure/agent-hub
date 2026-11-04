@@ -1,0 +1,119 @@
+{
+  "id": "slack-contact-upsert",
+  "category": "行銷業務",
+  "icon": "🗂️",
+  "name": "表單名單自動建檔,舊識回訪特別標記",
+  "description": "官網表單的新名單打進 Webhook → 先到你的聯絡人資料庫查這個 email 建過檔沒 → 沒建過:新增一筆並在 Slack 報「新名單」;建過:更新資料並在 Slack 報「舊識又來了」——回頭客的熱度比新名單高,值得優先跟進;查資料庫失敗走告警分支。把網址換成你家聯絡人系統的 API(Airtable/Notion/自家 CRM 都行,token 在各工具的整合設定頁產生)。(改編自 n8n 社群範本庫 0124_Slack_Typeform_Create_Triggered.json)",
+  "triggerParams": [
+    {
+      "key": "name",
+      "label": "姓名",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "email",
+      "label": "Email",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "company",
+      "label": "公司",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(Webhook:表單名單)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "search",
+      "type": "http-request",
+      "label": "查聯絡人資料庫",
+      "config": {
+        "method": "GET",
+        "url": "https://example.com/api/contacts?email={{email}}",
+        "headers": "{\"Authorization\":\"Bearer 請換成你的聯絡人系統token\"}",
+        "body": ""
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "exists",
+      "type": "if-condition",
+      "label": "已經建過檔嗎?",
+      "config": {
+        "left": "{{body}}",
+        "op": "!=",
+        "right": "[]"
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "update",
+      "type": "http-request",
+      "label": "更新既有聯絡人",
+      "config": {
+        "method": "PATCH",
+        "url": "https://example.com/api/contacts/{{email}}",
+        "headers": "{\"Authorization\":\"Bearer 請換成你的聯絡人系統token\"}",
+        "body": "{\"name\":\"{{name}}\",\"company\":\"{{company}}\",\"lastSeen\":\"{{today}}\"}"
+      },
+      "position": { "x": 780, "y": 40 }
+    },
+    {
+      "id": "back",
+      "type": "slack-notify",
+      "label": "通知:舊識又來了",
+      "config": {
+        "message": "♻️ 舊識回訪:{{name}}({{company}})又填了一次表單,資料已更新——回頭熱度高,值得優先跟進!{{email}}"
+      },
+      "position": { "x": 1040, "y": 40 }
+    },
+    {
+      "id": "create",
+      "type": "http-request",
+      "label": "建立新聯絡人",
+      "config": {
+        "method": "POST",
+        "url": "https://example.com/api/contacts",
+        "headers": "{\"Authorization\":\"Bearer 請換成你的聯絡人系統token\"}",
+        "body": "{\"name\":\"{{name}}\",\"email\":\"{{email}}\",\"company\":\"{{company}}\",\"createdAt\":\"{{today}}\"}"
+      },
+      "position": { "x": 780, "y": 200 }
+    },
+    {
+      "id": "fresh",
+      "type": "slack-notify",
+      "label": "通知:新名單建檔",
+      "config": {
+        "message": "🆕 新名單已建檔:{{name}}/{{company}}/{{email}}"
+      },
+      "position": { "x": 1040, "y": 200 }
+    },
+    {
+      "id": "alert",
+      "type": "slack-notify",
+      "label": "查資料庫失敗告警",
+      "config": {
+        "message": "🆘 名單建檔流程連不上聯絡人資料庫:{{error}}——這筆先人工處理:{{name}}/{{email}}"
+      },
+      "position": { "x": 520, "y": 320 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "search" },
+    { "from": "search", "to": "exists" },
+    { "from": "exists", "to": "update", "fromPort": "true" },
+    { "from": "update", "to": "back" },
+    { "from": "exists", "to": "create", "fromPort": "false" },
+    { "from": "create", "to": "fresh" },
+    { "from": "search", "to": "alert", "fromPort": "error" }
+  ]
+}

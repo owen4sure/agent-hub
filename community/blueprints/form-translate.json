@@ -1,0 +1,63 @@
+{
+  "id": "form-translate",
+  "category": "內容產生",
+  "icon": "🌐",
+  "name": "貼一段文字,AI 翻成三種語言",
+  "description": "開表單貼任何文字 → AI 同時翻成英文/日文/繁中並整理格式 → 存成檔案。表單→AI→產出的最小範例。(改編自 n8n 社群範本庫)",
+  "triggerParams": [
+    {
+      "key": "text",
+      "label": "要翻譯的文字",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(表單)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "tr",
+      "type": "llm-decide",
+      "label": "AI 三語翻譯",
+      "config": {
+        "prompt": "把這段文字分別翻成英文、日文、繁體中文,各一段,用「【英文】【日文】【繁中】」標頭分隔:\n{{text}}",
+        "outputKey": "translated"
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "save",
+      "type": "write-file",
+      "label": "存翻譯結果",
+      "config": {
+        "fileName": "翻譯_{{today}}.txt",
+        "content": "原文:{{text}}\n\n{{translated}}"
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "tr"
+    },
+    {
+      "from": "tr",
+      "to": "save"
+    }
+  ]
+}

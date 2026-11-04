@@ -1,0 +1,89 @@
+{
+  "id": "hook-issue-event-router",
+  "category": "整合串接",
+  "icon": "🎫",
+  "name": "工單系統事件分流,不同事件不同通知",
+  "description": "把工單/專案系統(Jira、Linear 等)的 Webhook 指過來,事件代碼(created/updated/assigned)各走各的通知格式——新工單、內容更新、指派給人講的話本來就不一樣;沒對應到的事件不會消失,自動登記進試算表待查。工單編號是空的(壞資料)就直接擋下,不發垃圾通知。(改編自 n8n 社群範本庫 0683_Webhook_Telegram_Create_Webhook.json)",
+  "triggerParams": [
+    { "key": "event", "label": "事件代碼(created/updated/assigned)", "type": "text", "default": "created" },
+    { "key": "issueKey", "label": "工單編號", "type": "text", "default": "" },
+    { "key": "summary", "label": "工單標題", "type": "text", "default": "" },
+    { "key": "assignee", "label": "被指派人", "type": "text", "default": "" },
+    { "key": "url", "label": "工單連結", "type": "text", "default": "" }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(工單系統 Webhook)",
+      "config": {},
+      "position": { "x": 0, "y": 160 }
+    },
+    {
+      "id": "guard",
+      "type": "if-condition",
+      "label": "有工單編號才處理",
+      "config": {
+        "left": "{{issueKey}}",
+        "op": "not-empty",
+        "right": ""
+      },
+      "position": { "x": 260, "y": 160 }
+    },
+    {
+      "id": "route",
+      "type": "switch",
+      "label": "依事件代碼分流",
+      "config": {
+        "value": "{{event}}",
+        "cases": "created\nupdated\nassigned"
+      },
+      "position": { "x": 520, "y": 160 }
+    },
+    {
+      "id": "tgnew",
+      "type": "telegram-notify",
+      "label": "通知:新工單",
+      "config": {
+        "message": "🎫 新工單 {{issueKey}}:{{summary}}\n{{url}}"
+      },
+      "position": { "x": 800, "y": 0 }
+    },
+    {
+      "id": "tgupd",
+      "type": "telegram-notify",
+      "label": "通知:工單更新",
+      "config": {
+        "message": "✏️ 工單 {{issueKey}} 有更新:{{summary}}\n{{url}}"
+      },
+      "position": { "x": 800, "y": 110 }
+    },
+    {
+      "id": "tgassign",
+      "type": "telegram-notify",
+      "label": "通知:指派給人",
+      "config": {
+        "message": "👤 工單 {{issueKey}} 指派給 {{assignee}}:{{summary}}\n記得跟進 → {{url}}"
+      },
+      "position": { "x": 800, "y": 220 }
+    },
+    {
+      "id": "unknown",
+      "type": "google-sheet-append",
+      "label": "沒對應到的事件登記待查",
+      "config": {
+        "cells": "{{today}}\n{{event}}\n{{issueKey}}\n{{summary}}",
+        "sheetName": ""
+      },
+      "position": { "x": 800, "y": 330 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "guard" },
+    { "from": "guard", "to": "route", "fromPort": "true" },
+    { "from": "route", "to": "tgnew", "fromPort": "created" },
+    { "from": "route", "to": "tgupd", "fromPort": "updated" },
+    { "from": "route", "to": "tgassign", "fromPort": "assigned" },
+    { "from": "route", "to": "unknown", "fromPort": "其他" }
+  ]
+}

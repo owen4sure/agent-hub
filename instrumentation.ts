@@ -1,0 +1,45 @@
+export async function register() {
+  if (process.env.NEXT_RUNTIME !== "nodejs") return;
+  const { markComponentHealth } = await import("./lib/systemHealth");
+  const init = async (name: string, fn: () => Promise<void> | void) => {
+    try {
+      await fn();
+      markComponentHealth(name, true, "已啟動");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      markComponentHealth(name, false, message);
+      console.error(`[instrumentation] ${name} 啟動失敗:`, err);
+    }
+  };
+
+  // 每個背景元件獨立啟動、獨立記錄。以前整串包在同一個 try：前面任何一次清理出錯，排程、
+  // 資料夾、收信、Telegram 後面全部不會啟動，UI 卻完全看不出來。
+  await init("engine", async () => {
+    // 舊版把 Google Sheet 寫入網址放在設定頁。啟動時先搬進各寫入節點，確保使用者升級後
+    // 不必重填，也不會再看到「一般試算表網址 / Apps Script 網址」混在同一區。
+    const { migrateLegacySheetWriteUrl } = await import("./lib/sheetWriteUrlMigration");
+    const migrated = migrateLegacySheetWriteUrl();
+    if (migrated.nodes) console.info(`[migration] 已把舊 Google Sheet 寫入網址搬進 ${migrated.workflows} 條流程的 ${migrated.nodes} 個節點`);
+    const engine = await import("./lib/workflow/engine");
+    engine.recoverCrashedRuns();
+    engine.pruneOrphanOutputs();
+    const { recoverCrashedRepairs } = await import("./lib/workflow/repairSessions");
+    recoverCrashedRepairs();
+    const { cleanupStaleProposals } = await import("./lib/workflow/fixProposals");
+    cleanupStaleProposals();
+    const approvals = await import("./lib/approvals");
+    approvals.pruneOrphanApprovals();
+    // 惰性加密(「下次儲存才加密」)的補課：真實資料裡有明碼帳密躺了很久沒等到那次儲存
+    const { encryptLegacyPlaintextSecrets } = await import("./lib/settingsStore");
+    const sealed = encryptLegacyPlaintextSecrets();
+    if (sealed) console.info(`[migration] 已把 ${sealed} 筆仍是明碼的帳密補加密`);
+  });
+  await init("scheduler", async () => (await import("./lib/scheduler")).startScheduler());
+  await init("folderWatcher", async () => (await import("./lib/watchers")).startWatchers());
+  await init("mailWatcher", async () => (await import("./lib/mailWatcher")).startMailWatcher());
+  await init("telegramPoller", async () => (await import("./lib/telegramPoller")).startTelegramPoller());
+  await init("backup", async () => (await import("./lib/dataBackup")).startDataBackups());
+  // 不列進 app/api/health/route.ts 的 requiredComponents：這是錦上添花的續命，不是核心基礎設施，
+  // 續存失敗不該讓首頁跳紅色警示——失敗時使用者真正會看到的信號是排程執行本身失敗(已有的機制)。
+  await init("webmailKeepAlive", async () => (await import("./lib/webmailKeepAlive")).startWebmailKeepAlive());
+}

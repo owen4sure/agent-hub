@@ -1,0 +1,110 @@
+{
+  "id": "tg-weekly-analytics",
+  "category": "報表彙整",
+  "icon": "📈",
+  "name": "每週流量對比去年同期,寄信+Telegram 雙通知",
+  "description": "每週一早上打你網站統計後台的 API 抓近 7 天數據 → 先存起來,再抓去年同期的數據 → AI 對每個指標算增減百分比寫成完整摘要寄 Email,同時濃縮成幾行重點發 Telegram;統計 API 連不上會走失敗分支告警。把兩個 example.com 網址換成你家統計工具的端點(Umami/Matomo/Plausible 都有現成的 stats API,金鑰做法見各家文件)。(改編自 n8n 社群範本庫 1392_Telegram_Googleanalytics_Automation_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程:每週一 07:00)",
+      "config": {},
+      "position": { "x": 0, "y": 130 }
+    },
+    {
+      "id": "cur",
+      "type": "http-request",
+      "label": "抓近 7 天數據",
+      "config": {
+        "method": "GET",
+        "url": "https://example.com/api/stats?range=last7days",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的統計後台APIKey\"}",
+        "body": ""
+      },
+      "position": { "x": 260, "y": 130 }
+    },
+    {
+      "id": "stash",
+      "type": "set-variable",
+      "label": "先把本週數據存起來",
+      "config": {
+        "name": "thisWeekStats",
+        "value": "{{body}}"
+      },
+      "position": { "x": 520, "y": 130 }
+    },
+    {
+      "id": "prev",
+      "type": "http-request",
+      "label": "抓去年同期數據",
+      "config": {
+        "method": "GET",
+        "url": "https://example.com/api/stats?range=same-week-last-year",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的統計後台APIKey\"}",
+        "body": ""
+      },
+      "position": { "x": 780, "y": 130 }
+    },
+    {
+      "id": "report",
+      "type": "llm-decide",
+      "label": "AI 對比兩期寫摘要",
+      "config": {
+        "prompt": "你是數據分析師。比較同一個網站兩段期間的統計數據,對每個指標(瀏覽量、訪客數、工作階段、平均停留…數據裡有什麼就比什麼)各列一段:本週值、去年同期值、增減百分比(算到小數一位)。用純文字排版(一個指標一段),最後用 2 句話總結最大的亮點與最需要注意的警訊。\n\n本週數據(JSON):{{thisWeekStats}}\n\n去年同期數據(JSON):{{body}}",
+        "outputKey": "report"
+      },
+      "position": { "x": 1040, "y": 130 }
+    },
+    {
+      "id": "mail",
+      "type": "send-email",
+      "label": "完整版寄信給自己",
+      "config": {
+        "to": "",
+        "subject": "每週流量摘要({{today}})",
+        "body": "{{report}}"
+      },
+      "position": { "x": 1300, "y": 40 }
+    },
+    {
+      "id": "brief",
+      "type": "llm-decide",
+      "label": "濃縮成 Telegram 重點",
+      "config": {
+        "prompt": "把下面的流量摘要濃縮成 5 行以內的重點:每行一個指標或結論,保留增減百分比數字,拿掉所有客套與說明。只回重點本文。\n\n{{report}}",
+        "outputKey": "brief"
+      },
+      "position": { "x": 1300, "y": 220 }
+    },
+    {
+      "id": "tg",
+      "type": "telegram-notify",
+      "label": "重點發 Telegram",
+      "config": {
+        "message": "📈 本週流量重點({{today}}):\n{{brief}}"
+      },
+      "position": { "x": 1560, "y": 220 }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "抓不到數據告警",
+      "config": {
+        "message": "🆘 每週流量摘要做不出來:{{error}}(在步驟 {{errorStep}}),請檢查統計 API 的網址與金鑰"
+      },
+      "position": { "x": 520, "y": 320 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "cur" },
+    { "from": "cur", "to": "stash" },
+    { "from": "stash", "to": "prev" },
+    { "from": "prev", "to": "report" },
+    { "from": "report", "to": "mail" },
+    { "from": "report", "to": "brief" },
+    { "from": "brief", "to": "tg" },
+    { "from": "cur", "to": "alert", "fromPort": "error" },
+    { "from": "prev", "to": "alert", "fromPort": "error" }
+  ]
+}

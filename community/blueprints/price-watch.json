@@ -1,0 +1,107 @@
+{
+  "id": "price-watch",
+  "category": "監控告警",
+  "icon": "💹",
+  "name": "盯一個商品價格,低於目標通知我",
+  "description": "排程定時抓商品頁 → AI 抽出目前價格 → 低於你設的目標價就發 Telegram。抓不到頁面也會走失敗分支告警。",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 130
+      }
+    },
+    {
+      "id": "fetch",
+      "type": "web-page",
+      "label": "抓商品頁",
+      "config": {
+        "url": "https://example.com/product",
+        "maxChars": "8000"
+      },
+      "position": {
+        "x": 260,
+        "y": 130
+      }
+    },
+    {
+      "id": "price",
+      "type": "llm-decide",
+      "label": "AI 抽目前價格",
+      "config": {
+        "prompt": "從這頁找出商品目前售價,只回數字(不要幣別/逗號):\n{{pageText}}",
+        "outputKey": "price"
+      },
+      "position": {
+        "x": 520,
+        "y": 130
+      }
+    },
+    {
+      "id": "cmp",
+      "type": "if-condition",
+      "label": "低於目標價?",
+      "config": {
+        "left": "{{price}}",
+        "op": "<",
+        "right": "1000"
+      },
+      "position": {
+        "x": 780,
+        "y": 130
+      }
+    },
+    {
+      "id": "buy",
+      "type": "telegram-notify",
+      "label": "通知我可以買了",
+      "config": {
+        "message": "💹 降價了!目前 {{price}} 元(目標 1000)\n{{finalUrl}}"
+      },
+      "position": {
+        "x": 1040,
+        "y": 60
+      }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "抓不到頁面告警",
+      "config": {
+        "message": "🆘 價格監控抓不到頁面:{{error}}"
+      },
+      "position": {
+        "x": 520,
+        "y": 300
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "fetch"
+    },
+    {
+      "from": "fetch",
+      "to": "price"
+    },
+    {
+      "from": "price",
+      "to": "cmp"
+    },
+    {
+      "from": "cmp",
+      "to": "buy",
+      "fromPort": "true"
+    },
+    {
+      "from": "fetch",
+      "to": "alert",
+      "fromPort": "error"
+    }
+  ]
+}

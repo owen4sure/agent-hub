@@ -1,0 +1,76 @@
+{
+  "id": "sched-outreach-queue",
+  "category": "行銷業務",
+  "icon": "📮",
+  "name": "每天自動寄開發信給待聯絡名單",
+  "description": "排程每天抓 CRM 的「還沒聯絡」名單 → 有名單才逐筆寄開發信、並回寫「已聯絡」狀態避免重複打擾 → 完成後 Telegram 回報;抓名單失敗走告警分支。把網址換成你家 CRM 的 API(token 在 CRM 的開發者/整合設定頁產生)。(改編自 n8n 社群範本庫 0417_Schedule_Gmail_Send_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程,每天早上 9 點)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "fetch",
+      "type": "http-request",
+      "label": "抓還沒聯絡的名單",
+      "config": {
+        "method": "GET",
+        "url": "https://example.com/api/contacts?status=uncontacted",
+        "headers": "{\"Authorization\":\"Bearer 請換成你的CRM token\"}",
+        "body": ""
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "has",
+      "type": "if-condition",
+      "label": "今天有名單嗎?",
+      "config": {
+        "left": "{{body}}",
+        "op": "!=",
+        "right": "[]"
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "loop",
+      "type": "repeat-steps",
+      "label": "逐筆寄信+回寫已聯絡",
+      "config": {
+        "items": "{{json}}",
+        "itemVar": "item",
+        "steps": "[{\"type\":\"send-email\",\"label\":\"寄開發信\",\"config\":{\"to\":\"{{item.email}}\",\"subject\":\"想跟您分享我們的服務\",\"body\":\"{{item.name}} 您好:\\n\\n看到您先前留下聯絡方式,想約 15 分鐘簡單介紹我們的服務,回信告訴我您方便的時間即可。\\n\\n祝 順心\"}},{\"type\":\"http-request\",\"label\":\"回寫已聯絡\",\"config\":{\"method\":\"POST\",\"url\":\"https://example.com/api/contacts/{{item.id}}/contacted\",\"headers\":\"{\\\"Authorization\\\":\\\"Bearer 請換成你的CRM token\\\"}\",\"body\":\"{\\\"status\\\":\\\"contacted\\\"}\"}}]",
+        "outputKey": "results"
+      },
+      "position": { "x": 780, "y": 60 }
+    },
+    {
+      "id": "done",
+      "type": "telegram-notify",
+      "label": "回報寄送完成",
+      "config": {
+        "message": "📮 {{today}} 開發信批次寄送完成,名單都已標記為已聯絡。"
+      },
+      "position": { "x": 1040, "y": 60 }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "抓名單失敗告警",
+      "config": {
+        "message": "🆘 開發信流程抓不到名單:{{error}}(出錯步驟:{{errorStep}})"
+      },
+      "position": { "x": 520, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "fetch" },
+    { "from": "fetch", "to": "has" },
+    { "from": "has", "to": "loop", "fromPort": "true" },
+    { "from": "loop", "to": "done" },
+    { "from": "fetch", "to": "alert", "fromPort": "error" }
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "id": "fx-daily",
+  "category": "資訊摘要",
+  "icon": "💱",
+  "name": "每天早上美元匯率報給我",
+  "description": "打公開匯率 API → AI 讀出美元兌台幣並寫成一句人話 → Telegram 推給你。想盯別的幣種改一句話就好——「定時打 API」的標準做法。",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配每日排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "api",
+      "type": "http-request",
+      "label": "打匯率 API",
+      "config": {
+        "method": "GET",
+        "url": "https://open.er-api.com/v6/latest/USD",
+        "headers": "{}",
+        "body": ""
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "say",
+      "type": "llm-decide",
+      "label": "AI 讀數字寫一句",
+      "config": {
+        "prompt": "這是匯率 API 的回應,找出 1 美元兌台幣(TWD)的匯率,寫成一句繁中(例:今天 1 美元約 31.2 台幣),只回那一句:\n{{body}}",
+        "outputKey": "line"
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    },
+    {
+      "id": "push",
+      "type": "telegram-notify",
+      "label": "推給我",
+      "config": {
+        "message": "💱 {{line}}"
+      },
+      "position": {
+        "x": 780,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "api"
+    },
+    {
+      "from": "api",
+      "to": "say"
+    },
+    {
+      "from": "say",
+      "to": "push"
+    }
+  ]
+}

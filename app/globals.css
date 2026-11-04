@@ -1,0 +1,601 @@
+@import "tailwindcss";
+
+/* ───────────────────────────────────────────────────────────────
+ * Design language: 玻璃光暈(Glass Glow)——2026-07 Owen 拍板的大改版。
+ * 深空底+柔和光暈+毛玻璃面板+漸層描邊節點卡+發光主鍵。
+ * 深色是原生面貌；淺色是同一套語言的「日光版」(白玻璃+淡光暈)，
+ * 兩套都是一等公民(拍板:「兩套都要精緻」)。
+ * 所有顏色/光效走 token——改主題只動 :root 區塊，元件不用各自再改。
+ * ─────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ── light(日光玻璃) ── */
+  --app-bg: #eef0f8;
+  --surface: rgba(255, 255, 255, 0.78);
+  --surface-2: rgba(237, 239, 250, 0.85);
+  --surface-hover: rgba(246, 247, 253, 0.9);
+  --sidebar-bg: rgba(250, 251, 255, 0.72);
+  --border: rgba(84, 92, 220, 0.13);
+  --border-strong: rgba(84, 92, 220, 0.28);
+  --text: #1a1c28;
+  --text-muted: #5f6478;
+  --text-faint: #979cb2;
+
+  --accent: #5e63e8;
+  --accent-hover: #4a4fd8;
+  --accent-soft: rgba(94, 99, 232, 0.12);
+  --green: #1f9d47;
+  --red: #dc2626;
+  --amber: #c77e00;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+
+  /* 節點類別色(深淺共用色相，soft 背景用 color-mix 依主題自動適應) */
+  --cat-trigger: #d97706;
+  --cat-browser: #2563eb;
+  --cat-data: #16a34a;
+  --cat-file: #0d9488;
+  --cat-integration: #0891b2;
+  --cat-logic: #ea580c;
+  --cat-ai: #9333ea;
+  --cat-custom: #64748b;
+
+  --canvas-dot: rgba(70, 76, 160, 0.2);
+  --edge: rgba(70, 76, 180, 0.55);
+  --edge-label: #4a4f70;
+  --edge-label-bg: rgba(255, 255, 255, 0.92);
+
+  --shadow-sm: 0 1px 3px rgba(40, 44, 90, 0.06);
+  --shadow-md: 0 3px 10px rgba(40, 44, 90, 0.08), 0 1px 3px rgba(40, 44, 90, 0.05);
+  --shadow-lg: 0 18px 44px rgba(40, 44, 90, 0.14);
+  --focus: 0 0 0 3px var(--accent-soft);
+
+  /* 玻璃光暈 token */
+  --bg-glow-a: rgba(94, 99, 232, 0.1);   /* 頁面左上光暈 */
+  --bg-glow-b: rgba(45, 170, 255, 0.07); /* 頁面右下光暈 */
+  --canvas-glow-a: rgba(94, 99, 232, 0.12);
+  --canvas-glow-b: rgba(45, 170, 255, 0.08);
+  --canvas-vignette: rgba(60, 64, 120, 0.06);
+  --bar-bg: rgba(252, 252, 255, 0.66);
+  --menu-bg: rgba(255, 255, 255, 0.94);
+  --node-bg: linear-gradient(160deg, rgba(255, 255, 255, 0.97), rgba(246, 247, 255, 0.93));
+  /* 淺色畫布上節點原本太淡糊在底色裡——描邊更實、投影更沉,節點才「立」得起來 */
+  --node-border-grad: linear-gradient(135deg, rgba(94, 99, 232, 0.62), rgba(45, 170, 255, 0.4) 45%, rgba(94, 99, 232, 0.22));
+  --node-shadow: 0 16px 40px rgba(40, 44, 100, 0.16), 0 3px 10px rgba(40, 44, 100, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+  --node-shadow-hover: 0 24px 52px rgba(40, 44, 100, 0.22), 0 5px 14px rgba(40, 44, 100, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+  --glow-accent: 0 4px 20px rgba(94, 99, 232, 0.35);
+  --glow-accent-lg: 0 6px 28px rgba(94, 99, 232, 0.45), 0 0 42px -10px rgba(94, 99, 232, 0.4);
+  --handle-bg: radial-gradient(circle at 35% 35%, #b9beff, #6a70ee);
+  --handle-ring: #ffffff;
+  --handle-glow: 0 0 10px rgba(94, 99, 232, 0.5);
+
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* ── dark(深空玻璃・原生) ── */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --app-bg: #05060e;
+    --surface: rgba(22, 24, 40, 0.62);
+    --surface-2: rgba(36, 39, 62, 0.55);
+    --surface-hover: rgba(46, 49, 74, 0.6);
+    --sidebar-bg: rgba(8, 9, 18, 0.72);
+    --border: rgba(150, 158, 255, 0.15);
+    --border-strong: rgba(150, 158, 255, 0.34);
+    --text: #f0f2ff;
+    --text-muted: #a8adcc;
+    --text-faint: #7a80a4;
+    --accent: #8f97ff;
+    --accent-hover: #aab0ff;
+    --accent-soft: rgba(143, 151, 255, 0.2);
+    --green: #35c46c;
+    --amber: #eab308;
+    --cat-trigger: #f59e0b;
+    --cat-browser: #60a5fa;
+    --cat-data: #4ade80;
+    --cat-file: #2dd4bf;
+    --cat-integration: #22d3ee;
+    --cat-logic: #fb923c;
+    --cat-ai: #c084fc;
+    --cat-custom: #94a3b8;
+    --canvas-dot: rgba(150, 158, 255, 0.16);
+    --edge: rgba(170, 177, 255, 0.5);
+    --edge-label: #d0d4ff;
+    --edge-label-bg: rgba(20, 22, 44, 0.92);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 10, 0.45);
+    --shadow-md: 0 4px 14px rgba(0, 0, 14, 0.5), 0 0 0 1px rgba(150, 158, 255, 0.05);
+    --shadow-lg: 0 22px 56px rgba(0, 0, 16, 0.65);
+    --bg-glow-a: rgba(118, 100, 255, 0.16);
+    --bg-glow-b: rgba(45, 200, 255, 0.08);
+    --canvas-glow-a: rgba(118, 100, 255, 0.3);
+    --canvas-glow-b: rgba(45, 200, 255, 0.16);
+    --canvas-vignette: rgba(0, 0, 6, 0.5);
+    --bar-bg: rgba(13, 14, 30, 0.6);
+    --menu-bg: rgba(19, 21, 40, 0.94);
+    --node-bg: linear-gradient(160deg, rgba(36, 40, 66, 0.88), rgba(17, 19, 36, 0.92));
+    --node-border-grad: linear-gradient(135deg, rgba(168, 158, 255, 0.72), rgba(90, 200, 255, 0.38) 45%, rgba(168, 158, 255, 0.12));
+    --node-shadow: 0 20px 52px rgba(4, 4, 24, 0.65), 0 4px 14px rgba(90, 96, 240, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.11);
+    --node-shadow-hover: 0 28px 64px rgba(4, 4, 26, 0.75), 0 6px 20px rgba(100, 106, 250, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    --glow-accent: 0 4px 22px rgba(122, 108, 255, 0.5);
+    --glow-accent-lg: 0 6px 28px rgba(122, 108, 255, 0.6), 0 0 46px -8px rgba(122, 108, 255, 0.55);
+    --handle-bg: radial-gradient(circle at 35% 35%, #c3c8ff, #7f88ff);
+    --handle-ring: #0c0e22;
+    --handle-glow: 0 0 14px rgba(143, 151, 255, 0.85);
+  }
+}
+
+:root[data-theme="dark"] {
+  --app-bg: #05060e;
+  --surface: rgba(22, 24, 40, 0.62);
+  --surface-2: rgba(36, 39, 62, 0.55);
+  --surface-hover: rgba(46, 49, 74, 0.6);
+  --sidebar-bg: rgba(8, 9, 18, 0.72);
+  --border: rgba(150, 158, 255, 0.15);
+  --border-strong: rgba(150, 158, 255, 0.34);
+  --text: #f0f2ff;
+  --text-muted: #a8adcc;
+  --text-faint: #7a80a4;
+  --accent: #8f97ff;
+  --accent-hover: #aab0ff;
+  --accent-soft: rgba(143, 151, 255, 0.2);
+  --green: #35c46c;
+  --amber: #eab308;
+  --cat-trigger: #f59e0b;
+  --cat-browser: #60a5fa;
+  --cat-data: #4ade80;
+  --cat-file: #2dd4bf;
+  --cat-integration: #22d3ee;
+  --cat-logic: #fb923c;
+  --cat-ai: #c084fc;
+  --cat-custom: #94a3b8;
+  --canvas-dot: rgba(150, 158, 255, 0.16);
+  --edge: rgba(170, 177, 255, 0.5);
+  --edge-label: #d0d4ff;
+  --edge-label-bg: rgba(20, 22, 44, 0.92);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 10, 0.45);
+  --shadow-md: 0 4px 14px rgba(0, 0, 14, 0.5), 0 0 0 1px rgba(150, 158, 255, 0.05);
+  --shadow-lg: 0 22px 56px rgba(0, 0, 16, 0.65);
+  --bg-glow-a: rgba(118, 100, 255, 0.16);
+  --bg-glow-b: rgba(45, 200, 255, 0.08);
+  --canvas-glow-a: rgba(118, 100, 255, 0.3);
+  --canvas-glow-b: rgba(45, 200, 255, 0.16);
+  --canvas-vignette: rgba(0, 0, 6, 0.5);
+  --bar-bg: rgba(13, 14, 30, 0.6);
+  --menu-bg: rgba(19, 21, 40, 0.94);
+  --node-bg: linear-gradient(160deg, rgba(36, 40, 66, 0.88), rgba(17, 19, 36, 0.92));
+  --node-border-grad: linear-gradient(135deg, rgba(168, 158, 255, 0.72), rgba(90, 200, 255, 0.38) 45%, rgba(168, 158, 255, 0.12));
+  --node-shadow: 0 20px 52px rgba(4, 4, 24, 0.65), 0 4px 14px rgba(90, 96, 240, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.11);
+  --node-shadow-hover: 0 28px 64px rgba(4, 4, 26, 0.75), 0 6px 20px rgba(100, 106, 250, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  --glow-accent: 0 4px 22px rgba(122, 108, 255, 0.5);
+  --glow-accent-lg: 0 6px 28px rgba(122, 108, 255, 0.6), 0 0 46px -8px rgba(122, 108, 255, 0.55);
+  --handle-bg: radial-gradient(circle at 35% 35%, #c3c8ff, #7f88ff);
+  --handle-ring: #0c0e22;
+  --handle-glow: 0 0 14px rgba(143, 151, 255, 0.85);
+}
+
+@theme inline {
+  --color-app: var(--app-bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-geist-mono);
+}
+
+* {
+  border-color: var(--border);
+}
+
+:where(a, button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+html {
+  font-feature-settings: "cv01", "ss03";
+}
+
+body {
+  /* 整個 app 都活在同一片光暈裡(不只畫布)——首頁/設定頁的玻璃卡片才有東西可透 */
+  background:
+    radial-gradient(1100px 700px at 6% -8%, var(--bg-glow-a), transparent 55%),
+    radial-gradient(950px 680px at 104% 106%, var(--bg-glow-b), transparent 55%),
+    var(--app-bg);
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-inter), -apple-system, "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: -0.006em;
+}
+
+@media (max-width: 767px) {
+  main > div {
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+  }
+}
+
+h1, h2, h3 { letter-spacing: -0.018em; }
+
+/* ── 玻璃元件 ── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.card-hover { transition: background-color 0.18s var(--ease), border-color 0.18s var(--ease), box-shadow 0.18s var(--ease), transform 0.18s var(--ease); }
+.card-hover:hover { border-color: var(--border-strong); box-shadow: var(--shadow-md); background: var(--surface-hover); transform: translateY(-1px); }
+/* 流程卡片:hover 時多一圈柔和的 accent 光暈,像被輕輕托起來——比單純變邊框色更有質感 */
+.card-glow:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border-strong));
+  box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent), 0 10px 32px -12px color-mix(in srgb, var(--accent) 55%, transparent);
+  transform: translateY(-2px);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 510;
+  border-radius: 10px;
+  padding: 7px 13px;
+  line-height: 1;
+  transition: background 0.13s var(--ease), border-color 0.13s var(--ease), opacity 0.13s var(--ease), box-shadow 0.18s var(--ease), transform 0.13s var(--ease);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-primary {
+  color: #fff;
+  border: none;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 72%, #fff) 0%, var(--accent) 55%, color-mix(in srgb, var(--accent) 78%, #1a1060) 100%);
+  box-shadow: var(--glow-accent), inset 0 1px 0 rgba(255, 255, 255, 0.32);
+  text-shadow: 0 1px 2px rgba(20, 14, 70, 0.35);
+}
+.btn-primary:hover { box-shadow: var(--glow-accent-lg), inset 0 1px 0 rgba(255, 255, 255, 0.32); transform: translateY(-1px); }
+.btn-ghost { background: color-mix(in srgb, var(--accent) 6%, transparent); border: 1px solid var(--border-strong); color: var(--text); }
+.btn-ghost:hover { background: var(--surface-2); }
+.btn:focus-visible { outline: none; box-shadow: var(--focus); }
+.btn:disabled { opacity: 0.45; cursor: default; transform: none; }
+/* 按壓觸感:按下去微微縮一下,滑鼠放開回彈——高級 app 每次點擊都有這個實體回饋 */
+.btn:active:not(:disabled) { transform: scale(0.97); transition-duration: 0.06s; }
+.btn-primary:active:not(:disabled) { transform: scale(0.97); box-shadow: var(--glow-accent), inset 0 1px 0 rgba(255, 255, 255, 0.32); }
+
+.input {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 8px 11px;
+  font-size: 14px;
+  color: var(--text);
+  transition: border-color 0.13s var(--ease), box-shadow 0.13s var(--ease);
+}
+.input::placeholder { color: var(--text-faint); }
+.input:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus); }
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 510;
+  padding: 1px 8px;
+  border-radius: 999px;
+  line-height: 1.7;
+  border: 1px solid var(--border);
+}
+.badge-neutral { background: var(--surface-2); color: var(--text-muted); }
+.badge-amber { background: color-mix(in srgb, var(--amber) 12%, transparent); color: var(--amber); border-color: color-mix(in srgb, var(--amber) 25%, transparent); }
+.badge-green { background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--green); border-color: color-mix(in srgb, var(--green) 25%, transparent); }
+.badge-red { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); border-color: color-mix(in srgb, var(--red) 25%, transparent); }
+.badge-accent { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+
+.muted { color: var(--text-muted); }
+.faint { color: var(--text-faint); }
+
+/* 側欄:毛玻璃(inline 的 --sidebar-bg 半透明,光暈從後面透出來) */
+aside {
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+}
+
+/* 懸浮玻璃工具列(畫布頂欄)與面板玻璃 */
+.bar-float {
+  background: var(--bar-bg);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+  border: 1px solid var(--border);
+  margin: 10px 12px 6px;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+.panel-glass {
+  background: color-mix(in srgb, var(--app-bg) 35%, transparent);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; border: 3px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-faint); background-clip: padding-box; }
+
+/* ── 畫布:深空光暈+景深暗角 ── */
+.react-flow {
+  background:
+    radial-gradient(1300px 850px at 12% -10%, var(--canvas-glow-a), transparent 58%),
+    radial-gradient(1000px 750px at 102% 108%, var(--canvas-glow-b), transparent 55%),
+    radial-gradient(850px 550px at 58% 48%, color-mix(in srgb, var(--canvas-glow-a) 40%, transparent), transparent 62%),
+    radial-gradient(1800px 1200px at 50% 50%, transparent 55%, var(--canvas-vignette) 100%),
+    var(--app-bg) !important;
+}
+
+/* ── 節點卡:漸層描邊玻璃(padding-box/border-box 雙背景) ── */
+/* 左鍵拖曳的框選矩形——預設樣式在深色畫布上幾乎看不見,改成清楚的 accent 虛線框 */
+.react-flow__selection {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1.5px dashed var(--accent);
+  border-radius: 6px;
+}
+
+.wf-node {
+  position: relative;
+  width: 170px;
+  min-width: 170px;
+  max-width: 170px;
+  padding: 12px 13px;
+  border-radius: 15px;
+  border: 1.5px solid transparent;
+  background: var(--node-bg) padding-box, var(--node-border-grad) border-box;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: var(--node-shadow);
+  cursor: pointer;
+  transition: box-shadow 0.18s var(--ease), transform 0.18s var(--ease);
+}
+.wf-node-step {
+  position: absolute;
+  top: -11px;
+  left: -11px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  border: 2px solid var(--app-bg);
+  box-shadow: var(--shadow-sm);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  z-index: 3;
+}
+.wf-chain-nav {
+  background: color-mix(in srgb, var(--menu-bg) 92%, transparent);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  color: var(--text);
+}
+.wf-node:hover { box-shadow: var(--node-shadow-hover); transform: translateY(-2px); }
+.wf-node-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  font-size: 19px;
+  flex-shrink: 0;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22), 0 0 22px -6px color-mix(in srgb, var(--accent) 45%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+/* 卡片下緣的「關鍵設定摘要」——不點開就看得到這步在對什麼東西做事 */
+.wf-node-summary {
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px dashed color-mix(in srgb, var(--border-strong) 70%, transparent);
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-faint);
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* workflow 畫布/對話區：桌面可拖拉分隔線；窄螢幕改成上下排，不把兩邊硬擠爆。 */
+.workflow-panel-resizer {
+  width: 7px;
+  margin-left: -3px;
+  margin-right: -3px;
+  z-index: 35;
+  cursor: col-resize;
+  position: relative;
+  touch-action: none;
+}
+.workflow-panel-resizer::after {
+  content: "";
+  position: absolute;
+  inset: 0 2px;
+  background: transparent;
+  transition: background 0.15s var(--ease);
+}
+.workflow-panel-resizer:hover::after,
+.workflow-panel-resizer:focus-visible::after { background: var(--accent); }
+.workflow-toolbar { scrollbar-width: none; }
+.workflow-toolbar::-webkit-scrollbar { display: none; }
+
+@media (max-width: 900px) {
+  .workflow-shell { flex-direction: column; }
+  .workflow-main { min-height: 52dvh; }
+  /* 窄視窗不要用「藏起來的橫向捲動」塞工具列：沒有 scrollbar 提示時，
+     使用者會以為畫面外的執行／觸發按鈕消失了。名稱與主要動作改為自然換行，
+     360px 手機寬度也不會跑出畫面。 */
+  .workflow-toolbar {
+    height: auto;
+    min-height: 3.5rem;
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+    flex-wrap: wrap;
+    align-content: center;
+    overflow: visible;
+  }
+  .workflow-toolbar-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  .workflow-side-panel {
+    width: 100% !important;
+    height: 42dvh;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+  .workflow-panel-resizer { display: none; }
+}
+
+/* ── React Flow 元件玻璃化 ── */
+.react-flow__controls { box-shadow: var(--shadow-md) !important; border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--border); }
+.react-flow__controls-button { background: var(--menu-bg) !important; border-color: var(--border) !important; color: var(--text) !important; }
+.react-flow__controls-button:hover { background: var(--surface-2) !important; }
+.react-flow__attribution { display: none; }
+.react-flow__minimap {
+  background: var(--surface) !important;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.react-flow__minimap svg { background: transparent; }
+/* React Flow 把 maskColor/nodeColor 寫成 inline style，不加 !important 蓋不掉——
+   預設亮灰遮罩(240,240,240)在深色主題會浮出一塊亮板(截圖驗過) */
+.react-flow__minimap-mask { fill: color-mix(in srgb, var(--surface-2) 72%, transparent) !important; }
+.react-flow__minimap-node { fill: color-mix(in srgb, var(--accent) 65%, var(--text-faint)) !important; }
+.react-flow__handle {
+  width: 13px !important;
+  height: 13px !important;
+  background: var(--handle-bg) !important;
+  border: 2.5px solid var(--handle-ring) !important;
+  box-shadow: var(--handle-glow);
+  transition: box-shadow 0.13s var(--ease), transform 0.13s var(--ease);
+}
+.react-flow__handle:hover { box-shadow: var(--handle-glow), 0 0 0 4px var(--accent-soft); transform: scale(1.12); }
+
+/* ── 連接線:發光流線(顏色/光暈依分支語意) ── */
+.react-flow__edge-path { transition: stroke 0.15s var(--ease); stroke-width: 2.2; }
+.react-flow__edge.edge-main .react-flow__edge-path {
+  stroke: var(--edge);
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 50%, transparent));
+}
+.react-flow__edge.edge-error .react-flow__edge-path {
+  stroke: #e0454c;
+  stroke-dasharray: 6 4;
+  opacity: 0.85;
+  filter: drop-shadow(0 0 6px rgba(224, 69, 76, 0.5));
+}
+.react-flow__edge.edge-ok .react-flow__edge-path {
+  stroke: #22b46a;
+  filter: drop-shadow(0 0 6px rgba(34, 180, 106, 0.5));
+}
+.react-flow__edge.selected .react-flow__edge-path { stroke: var(--accent) !important; }
+.react-flow__edge-textbg { fill: var(--edge-label-bg) !important; }
+.react-flow__edge-text { fill: var(--edge-label) !important; font-size: 11px !important; font-weight: 600; }
+
+/* 下拉選單(工具列「⋯」等):不透明度要夠,浮在節點上才讀得清楚 */
+.menu {
+  background: var(--menu-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+  min-width: 168px;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s var(--ease);
+}
+.menu-item:hover { background: var(--surface-2); }
+.menu-sep { height: 1px; background: var(--border); margin: 4px 6px; }
+
+/* 執行中的節點：光圈沿節點邊框跑動，比單純變色更看得出「正在跑」的動態感。
+   用 SVG rect + pathLength 正規化路徑長度、虛線等速位移——精準貼合實際矩形/圓角邊框，
+   不像先前用置中的 conic-gradient 旋轉再拿 mask 摳環：那是「以圓心為準的角度掃描」，
+   節點是寬扁矩形，角度掃描對應到邊框的實際弧長在四邊/四角完全不均，看起來會偏移、跳動、像壞掉。 */
+.wf-node-running {
+  position: relative;
+}
+.wf-running-ring {
+  /* 跟節點卡片「完全重疊」(inset:0)，SVG 內的 rect 用 100% 寬高 → 邊框剛好落在節點邊上、貼著走 */
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+.wf-running-dash {
+  fill: none;
+  stroke: var(--amber);
+  stroke-width: 2.5px;
+  vector-effect: non-scaling-stroke;
+  stroke-linecap: round;
+  stroke-dasharray: 16 84;
+  animation: wf-running-trace 1.5s linear infinite;
+}
+@keyframes wf-running-trace {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -100; }
+}
+
+/* 畫布上「已更新」通知：從上方滑入 + 淡入 */
+@keyframes wf-edit-toast-in {
+  from { opacity: 0; transform: translate(-50%, -12px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+.wf-edit-toast {
+  animation: wf-edit-toast-in 0.25s ease-out;
+}
+
+/* 執行中狀態列(畫布底部):滑入 */
+@keyframes wf-statusbar-in {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+.wf-statusbar { animation: wf-statusbar-in 0.22s ease-out; }
+
+/* ── 內容進場:載入後輕輕浮現(不是硬邦邦地跳出來)。列表/卡片用 inline animation-delay 做 stagger ── */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(9px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.rise-in { animation: rise-in 0.42s var(--ease) both; }
+
+/* 動效尊重系統設定:關掉動畫時,rise-in 一定要停在「可見」狀態,不能卡在 opacity:0(both 的初始幀) */
+@media (prefers-reduced-motion: reduce) {
+  .wf-running-dash { animation: none; }
+  .card-hover, .card-glow, .btn, .wf-node { transition: none; }
+  .rise-in { animation: none; opacity: 1; transform: none; }
+}

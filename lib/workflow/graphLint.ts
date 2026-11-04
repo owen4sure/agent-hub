@@ -1,0 +1,613 @@
+import { getNodeDef, NODE_DEFS } from "./registry";
+import { parseSwitchCases, SWITCH_FALLBACK_PORT } from "./nodes/switchCase";
+import { DATE_TOKENS } from "../relativeDate";
+import { MAX_REPEAT_STEPS_NESTING, nestingLimitMessage, parseRepeatSteps } from "./repeatNesting";
+import type { WorkflowNode, WorkflowEdge, ParamField } from "./types";
+
+/**
+ * 草稿可以暫時是空白的，卻絕不能把「還沒有任何工作要做」當成一條已能執行的流程。
+ * 這個判斷刻意不放進 lintGraph：建圖過程中的空白畫布仍合法；只有執行／自動測試入口要擋。
+ */
+export function hasExecutableSteps(nodes: WorkflowNode[]): boolean {
+  return nodes.some((node) => node.type !== "trigger");
+}
+
+/**
+ * 確定性的節點圖 lint(零模型、純規則)。
+ *
+ * 為什麼是整個建圖迴圈的核心：裡面的模型是可換的(Sonnet/Gemini/地端弱模型)，圖的正確性
+ * 不能押在「模型單次輸出夠聰明」上。弱模型會把 type 打成 excel_process(底線)、edge 指向
+ * 不存在的節點、number 欄填「申請日期」、select 填清單外的值、發明不存在的 {{變數}}——
+ * 這些全部能用確定性規則在「建圖當下」攔住並具體指出，餵回模型自我修正(見 buildWorkflow
+ * 的修正迴圈)；漏到執行期才炸，錯誤訊息模糊、又要花最貴的執行+AI修復去從零診斷。
+ *
+ * 回傳「給模型看的具體錯誤清單」：每條都講到哪個節點、哪個欄位、錯在哪、合法值是什麼——
+ * 弱模型需要「答案幾乎已經在錯誤訊息裡」的資訊密度才能一次改對。空陣列=通過。
+ */
+export function lintGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): string[] {
+  const errors: string[] = [];
+  const ids = new Set<string>();
+
+  // ── 節點本體 ──
+  for (const n of nodes) {
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(n.id)) {
+      errors.push(`節點 id「${String(n.id).slice(0, 80)}」格式不正確——只能用英數、-、_，長度 1–80。`);
+    }
+    if (ids.has(n.id)) errors.push(`節點 id "${n.id}" 重複了——每個節點的 id 必須唯一。`);
+    ids.add(n.id);
+    const def = getNodeDef(n.type);
+    if (!def) {
+      const suggestion = nearestType(n.type);
+      errors.push(
+        `節點 "${n.id}" 的 type "${n.type}" 不存在。可用型別：${Object.keys(NODE_DEFS).join("、")}` +
+          (suggestion ? `（你可能想用 "${suggestion}"）` : ""),
+      );
+      continue;
+    }
+    errors.push(...validateConfigTypes(n.id, n.config ?? {}, def.configSchema));
+    if (n.type === "custom-code" && !String(n.config?.code ?? "").trim() && !String(n.config?.intent ?? "").trim()) {
+      errors.push(`節點 "${n.id}"(自訂步驟)沒有白話 intent，也沒有可執行內容——至少要說清楚這一步要做什麼。`);
+    }
+    // 佔位符路徑攔截：模型愛寫「/Users/[使用者名稱]/Desktop/…」這種要人自己代換的教學式路徑，
+    // 但這個產品的使用者是不會改設定的新手——字面存進去的佔位符路徑永遠不會存在，監聽/讀檔
+    // 就靜默失效(真實踩過：新手實測 watchPath 被填成含 [使用者名稱] 的字面路徑)。這裡把它變成
+    // lint 錯誤餵回自我修正迴圈，模型會自己換成真實路徑(建圖 prompt 已注入這台電腦的實際家目錄)。
+    for (const [key, value] of Object.entries(n.config ?? {})) {
+      if (typeof value === "string" && /\[(?:使用者名稱|你的[^\]]{1,12}|USERNAME|username|user ?name|帳號名稱)\]/i.test(value)) {
+        errors.push(`節點 "${n.id}" 的 "${key}" 填了佔位符「${value.slice(0, 80)}」——要填這台電腦的真實路徑/值，不能留 [使用者名稱] 這種要人自己代換的寫法。`);
+      }
+    }
+  }
+
+  // ── 連線 ──
+  const nodeById = new Map(nodes.map((n) => [n.id, n]));
+  const edgeKeys = new Set<string>();
+  for (const e of edges) {
+    const edgeKey = `${e.from}\u0000${e.to}\u0000${e.fromPort ?? ""}`;
+    if (edgeKeys.has(edgeKey)) errors.push(`連線 ${e.from}→${e.to}${e.fromPort ? `(${e.fromPort})` : ""} 重複了——同一路徑只留一條。`);
+    edgeKeys.add(edgeKey);
+    if (!ids.has(e.from)) errors.push(`連線 ${e.from}→${e.to} 的起點 "${e.from}" 不是任何節點的 id。`);
+    if (!ids.has(e.to)) errors.push(`連線 ${e.from}→${e.to} 的終點 "${e.to}" 不是任何節點的 id。`);
+    if (e.from === e.to) errors.push(`連線 ${e.from}→${e.to} 自己連自己，不允許。`);
+    // 失敗分支(fromPort="error")：從任何「會做事」的節點拉出都合法(那步出錯就走這條 Plan B)，
+    // 但 trigger 不會失敗、拉錯是模型誤解，直接打回。
+    if (e.fromPort === "error" && nodeById.get(e.from)?.type === "trigger") {
+      errors.push(`連線 ${e.from}→${e.to} 標了 fromPort:"error"，但觸發節點不會失敗——失敗分支要從「可能出錯的那個步驟」拉出來。`);
+    }
+  }
+
+  // ── 一般節點／二路條件的出口契約 ──
+  // 引擎遇到 activePorts 時只跑 fromPort 有命中的線；if 的線若漏標，畫面看似有接、實際永遠不會走。
+  for (const n of nodes) {
+    const outs = edges.filter((edge) => edge.from === n.id);
+    if (n.type === "if-condition") {
+      for (const e of outs) {
+        if (e.fromPort !== "true" && e.fromPort !== "false" && e.fromPort !== "error") {
+          errors.push(
+            `條件分支 "${n.id}" 的出線 ${n.id}→${e.to} 必須標 "true"(成立)、"false"(不成立)或 "error"(出錯)，` +
+              `目前是「${e.fromPort ?? "(沒標)"}」。`,
+          );
+        }
+      }
+      continue;
+    }
+    if (n.type === "switch" || n.type === "wait-approval") continue;
+    for (const e of outs) {
+      if (n.type === "trigger" && e.fromPort) {
+        errors.push(`觸發節點 "${n.id}" 的出線不能標分支「${e.fromPort}」——觸發後只會直接往下走。`);
+      } else if (n.type !== "trigger" && e.fromPort && e.fromPort !== "error") {
+        errors.push(`節點 "${n.id}" 不是分支節點，出線只能是正常完成(不標 fromPort)或 "error"，不能標「${e.fromPort}」。`);
+      }
+    }
+  }
+
+  // ── 多路分流(switch)：出線的 fromPort 必須是分流選項之一(或「其他」)，沒標就不知道走哪條 ──
+  for (const n of nodes) {
+    if (n.type !== "switch") continue;
+    const cases = parseSwitchCases(String((n.config ?? {}).cases ?? ""));
+    if (cases.length === 0) {
+      errors.push(`節點 "${n.id}"(多路分流)的「分流選項」是空的——請填要分幾路，一行一個(例如：請假、報支、其他問題)。`);
+      continue;
+    }
+    const legal = new Set([...cases, SWITCH_FALLBACK_PORT, "error"]);
+    for (const e of edges.filter((ed) => ed.from === n.id)) {
+      if (!e.fromPort) {
+        errors.push(
+          `多路分流 "${n.id}" 的出線 ${n.id}→${e.to} 沒有標 fromPort——每條出線都要標走哪一路，` +
+            `合法值：${[...cases, SWITCH_FALLBACK_PORT].map((c) => `"${c}"`).join("、")}。`,
+        );
+      } else if (!legal.has(e.fromPort)) {
+        errors.push(
+          `多路分流 "${n.id}" 的出線標了 fromPort:"${e.fromPort}"，但分流選項裡沒有這一路。` +
+            `合法值：${[...cases, SWITCH_FALLBACK_PORT].map((c) => `"${c}"`).join("、")}(fromPort 要跟選項文字完全一致)。`,
+        );
+      }
+    }
+  }
+
+  // ── 等人簽核：出線要標 approved/rejected(核准走哪條、拒絕走哪條)，且至少要接 approved ──
+  for (const n of nodes) {
+    if (n.type !== "wait-approval") continue;
+    const outs = edges.filter((ed) => ed.from === n.id);
+    for (const e of outs) {
+      if (e.fromPort !== "approved" && e.fromPort !== "rejected" && e.fromPort !== "error") {
+        errors.push(
+          `等人簽核 "${n.id}" 的出線 ${n.id}→${e.to} 的 fromPort 是「${e.fromPort ?? "(沒標)"}」——` +
+            `簽核節點的出線只能標 "approved"(核准走這條) 或 "rejected"(拒絕走這條)。`,
+        );
+      }
+    }
+    if (outs.length > 0 && !outs.some((e) => e.fromPort === "approved")) {
+      errors.push(`等人簽核 "${n.id}" 沒有接 "approved"(核准後要做的事)的出線——簽核通過後流程會什麼都不做就結束。`);
+    }
+  }
+
+  // ── repeat-steps 內嵌圖也要完整驗證：它不是引擎眼中的獨立節點，漏驗會等到執行才爆 ──
+  // 以前這段只驗「第一層」內嵌步驟，而 repeatSteps.execute() 其實會遞迴執行任意深度的巢狀迴圈——
+  // 把 send-email 埋在第二層以下，lint 完全看不到、需求驗收也掃不到，執行期卻真的會寄出去(P0)。
+  // 現在改成遞迴驗到 MAX_REPEAT_STEPS_NESTING 為止，超過的直接報錯要求改結構(深度政策的單一來源
+  // 在 repeatNesting.ts，requirementCheck 與執行期閘門用的是同一份)。
+  const lintSteps = (parentPath: string, config: Record<string, unknown>, depth: number): void => {
+    const steps = parseRepeatSteps(config);
+    if (!steps || steps.length === 0) {
+      errors.push(`節點 "${parentPath}"(重複執行)的 steps 必須是非空的合法 JSON 陣列。`);
+      return;
+    }
+    if (depth > MAX_REPEAT_STEPS_NESTING) {
+      errors.push(nestingLimitMessage(parentPath));
+      return;
+    }
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      const path = `${parentPath}[步驟${i}]`;
+      const type = typeof step?.type === "string" ? step.type : "";
+      if (type === "wait-approval") {
+        errors.push(`節點 "${parentPath}"(重複執行)的內嵌步驟 ${path} 裡有 wait-approval——迴圈裡不能等人簽核。請把簽核節點放在迴圈外面(先簽核再進迴圈，或迴圈整理完資料後再簽核)。`);
+        continue;
+      }
+      const def = type ? getNodeDef(type) : undefined;
+      if (!def) {
+        errors.push(`節點 "${parentPath}" 的第 ${i + 1} 個內嵌步驟(${path}) type "${type || "(空)"}" 不存在。`);
+        continue;
+      }
+      if (!step.config || typeof step.config !== "object" || Array.isArray(step.config)) {
+        errors.push(`節點 "${parentPath}" 的第 ${i + 1} 個內嵌步驟(${path}) config 必須是物件。`);
+        continue;
+      }
+      const stepConfig = step.config as Record<string, unknown>;
+      errors.push(...validateConfigTypes(path, stepConfig, def.configSchema));
+      if (type === "custom-code" && !String(stepConfig.code ?? "").trim() && !String(stepConfig.intent ?? "").trim()) {
+        errors.push(`節點 "${parentPath}" 的第 ${i + 1} 個自訂步驟(${path})沒有白話 intent，清除外來程式碼後無法安全重新產生。`);
+      }
+      if (type === "repeat-steps") lintSteps(path, stepConfig, depth + 1);
+    }
+  };
+  for (const n of nodes) {
+    if (n.type !== "repeat-steps") continue;
+    lintSteps(n.id, n.config ?? {}, 1);
+  }
+
+  // ── 結構 ──
+  const triggerCount = nodes.filter((n) => n.type === "trigger").length;
+  if (nodes.length > 0 && triggerCount === 0) {
+    errors.push(`圖裡沒有 type "trigger" 的節點——每條流程必須有一個觸發起點。`);
+  } else if (triggerCount > 1) {
+    errors.push(`圖裡有 ${triggerCount} 個觸發節點——每條流程只能有一個明確起點，請合併成一個。`);
+  }
+  const cycle = findCycle(nodes, edges);
+  if (cycle) errors.push(`圖裡有環(${cycle.join("→")})——流程必須是由前往後的單向圖，不能繞圈。`);
+
+  // ── 可達性：除了 trigger,每個節點都必須「從 trigger 沿連線走得到」──
+  // 踩過的真實案例:模型漏接了「解析 → 條件」這一條邊,條件節點變成孤兒——引擎照樣執行它
+  // (排在保底順序裡),但它比上游先跑、變數全部拿不到、永遠走 false 分支,整條流程「全綠但全錯」。
+  // 這種圖必須在建圖當下打回去,不能靠執行期發現。
+  if (nodes.length > 1 && nodes.some((n) => n.type === "trigger")) {
+    const adj = new Map<string, string[]>();
+    for (const e of edges) adj.set(e.from, [...(adj.get(e.from) ?? []), e.to]);
+    const reachable = new Set<string>(nodes.filter((n) => n.type === "trigger").map((n) => n.id));
+    const queue = [...reachable];
+    while (queue.length) {
+      for (const next of adj.get(queue.shift()!) ?? []) {
+        if (!reachable.has(next)) { reachable.add(next); queue.push(next); }
+      }
+    }
+    for (const n of nodes) {
+      if (!reachable.has(n.id)) {
+        errors.push(
+          `節點 "${n.id}"(${n.label ?? n.type})沒有從觸發節點連過來的路——它會在錯誤的順序執行、拿不到上游資料。` +
+            `請補上缺的連線(例如它的上游節點 → "${n.id}")。`,
+        );
+      }
+    }
+  }
+
+  // ── {{節點id.欄位}} 引用:代號必須是「上游祖先」──
+  // 分開層(2026-08)讓 {{上游節點代號.欄位}} 成為合法寫法(同名欄位撞名時精準取值)。但代號指向
+  // 「不是自己上游」的節點仍要擋:那個值在執行到這裡時根本不存在(平行分支順序不保證/下游還沒跑),
+  // 執行期解析不到、條件永遠 false,流程全綠但走錯分支(踩過:模型發明 {{parse.result}})。
+  // {{item.欄位}} 是 repeat-steps 內部合法範圍；{{period.*}} 只能放在 triggerParams 的 derived
+  // default 裡，節點 config 執行期不認得它，必須改引用衍生欄位(如 {{filterStart}})。
+  {
+    const parentsOf = new Map<string, string[]>();
+    for (const e of edges) parentsOf.set(e.to, [...(parentsOf.get(e.to) ?? []), e.from]);
+    const ancMemo = new Map<string, Set<string>>();
+    const ancOf = (id: string): Set<string> => {
+      const hit = ancMemo.get(id);
+      if (hit) return hit;
+      const seen = new Set<string>();
+      const queue = [id];
+      while (queue.length) {
+        const cur = queue.pop()!;
+        for (const pid of parentsOf.get(cur) ?? []) if (!seen.has(pid)) { seen.add(pid); queue.push(pid); }
+      }
+      ancMemo.set(id, seen);
+      return seen;
+    };
+    for (const n of nodes) {
+      const cfgStr = JSON.stringify(n.config ?? {});
+      if (/\{\{\s*period\.[^}]+\}\}/.test(cfgStr)) {
+        errors.push(
+          `節點 "${n.id}" 直接引用了 {{period.*}}，執行時不會解析。` +
+            `請在 triggerParams 宣告 derived:true 的衍生欄位(default 才放 {{period.start}} 等)，節點改引用該欄位名(如 {{filterStart}})。`,
+        );
+      }
+      for (const m of cfgStr.matchAll(/\{\{\s*([A-Za-z0-9_-]+)\.([A-Za-z0-9_一-鿿-]+)\s*\}\}/g)) {
+        if (ids.has(m[1]) && !ancOf(n.id).has(m[1])) {
+          errors.push(
+            `節點 "${n.id}" 引用了 {{${m[1]}.${m[2]}}}——但「${m[1]}」不是它的上游節點,執行到這裡時那個值還不存在。` +
+              `{{節點代號.欄位}} 只能引用自己上游(祖先)節點的輸出;若要的是攤平欄位,直接寫 {{${m[2]}}}(前提:上游真的有輸出這個欄位)。`,
+          );
+        }
+      }
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * 所有執行來源共用的最後安全閘門。建圖／匯入時的 lint 只能證明「當時」正確；之後還可能經過
+ * 手動連線、版本還原或舊版資料升級。引擎真正要做副作用之前必須再驗一次，不能對壞圖採保底順序硬跑。
+ */
+export function assertRunnableGraph(nodes: WorkflowNode[], edges: WorkflowEdge[]): void {
+  const errors = lintGraph(nodes, edges);
+  if (errors.length > 0) {
+    throw new Error(`流程圖目前不能安全執行，請先修正：\n${errors.slice(0, 8).map((e) => `- ${e}`).join("\n")}`);
+  }
+}
+
+/** type 打錯時給最接近的合法型別(去掉 -_ 後比對，抓 excel_process/excelprocess 這類手滑) */
+function nearestType(type: string): string | null {
+  const norm = (s: string) => s.toLowerCase().replace(/[-_\s]/g, "");
+  const target = norm(type);
+  for (const t of Object.keys(NODE_DEFS)) {
+    if (norm(t) === target) return t;
+  }
+  return null;
+}
+
+/**
+ * config 欄位逐一對 schema 驗型別；值裡帶 {{}} 模板的留給執行期解析，不在這裡判。
+ * 這是「建圖 lint」與「套用 edits(applyNodeConfigEdits)」共用的同一份驗證——兩邊各寫一份遲早漂移。
+ */
+export function validateConfigTypes(nodeId: string, config: Record<string, unknown>, schema: ParamField[]): string[] {
+  const errors: string[] = [];
+  for (const f of schema) {
+    const v = (config ?? {})[f.key];
+    if (v === undefined || v === null || v === "") continue; // 空值走預設，合法
+    const s = String(v);
+    if (s.includes("{{")) continue; // 模板值執行期才解析得出來
+    if (f.type === "number" && !Number.isFinite(Number(s))) {
+      errors.push(
+        `節點 "${nodeId}" 的設定「${f.key}(${f.label})」型別是 number，但填了「${s.slice(0, 30)}」——` +
+          `要填數字（例如欄位位置填 1、2、3），不確定就整個留空用預設值。`,
+      );
+    }
+    if (f.type === "select" && f.options && f.options.length > 0) {
+      // options 支援 "value=顯示文字" 格式，比對時只看 value——但「只在真的是這個格式時」才切：
+      // if-condition 的運算子選項是字面的「==」「!=」「>=」「<=」，無腦 split("=") 會把它們切成
+      // 「(空字串)」「!」「>」「<」→ 每個用比較運算子的條件節點都被誤判違規，錯誤訊息還把切壞的
+      // 清單餵回給建圖 AI(實測:AI 直接反問使用者「你的選項清單是不是把=吃掉了」)。
+      // 規則：只有「=」前後都有內容才視為 value=label(index >0 且 <末尾)，否則整串就是 value。
+      const valueOf = (o: string) => {
+        const i = o.indexOf("=");
+        return i > 0 && i < o.length - 1 ? o.slice(0, i) : o;
+      };
+      const values = f.options.map(valueOf);
+      if (!values.includes(s)) {
+        errors.push(`節點 "${nodeId}" 的設定「${f.key}(${f.label})」只能填這些值之一：${values.join("、")}，但填了「${s.slice(0, 30)}」。`);
+      }
+    }
+  }
+  return errors;
+}
+
+/** DFS 找環，回傳環上的節點路徑(找不到回 null) */
+function findCycle(nodes: WorkflowNode[], edges: WorkflowEdge[]): string[] | null {
+  const out = new Map<string, string[]>();
+  for (const e of edges) out.set(e.from, [...(out.get(e.from) ?? []), e.to]);
+  const state = new Map<string, 1 | 2>(); // 1=走訪中 2=完成
+  const stack: string[] = [];
+  let cycle: string[] | null = null;
+  const dfs = (id: string) => {
+    if (cycle) return;
+    state.set(id, 1);
+    stack.push(id);
+    for (const next of out.get(id) ?? []) {
+      if (state.get(next) === 1) {
+        cycle = [...stack.slice(stack.indexOf(next)), next];
+        return;
+      }
+      if (!state.has(next)) dfs(next);
+    }
+    stack.pop();
+    state.set(id, 2);
+  };
+  for (const n of nodes) if (!state.has(n.id)) dfs(n.id);
+  return cycle;
+}
+
+/**
+ * 任何缺少或空字串的 config 欄位，補上該節點型別的預設值——防 AI 亂改/清空造成執行崩潰(如空選擇器)。
+ * 例外：schema 標了 allowEmpty 的欄位，「明確存成空字串」是有意義的設定(如找信節點的日期格式留空
+ * =改用純標題搜尋)，不能補回預設——不然那個欄位永遠無法被刻意清空(實測踩過：AI 想清空、系統回報
+ * 已套用、執行時卻默默補回預設值，使用者看到「(空)→(空)」的假修改)。
+ * 放在這裡(而不是 engine)讓修復端(graphRepair 的等於沒改偵測)跟執行端共用同一份語意。
+ */
+export function withSchemaDefaults(
+  config: Record<string, unknown>,
+  schema: { key: string; default?: string; allowEmpty?: boolean }[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...config };
+  for (const f of schema) {
+    const missing = out[f.key] === undefined || out[f.key] === null || (out[f.key] === "" && !f.allowEmpty);
+    if (missing && f.default !== undefined) out[f.key] = f.default;
+  }
+  return out;
+}
+
+export interface CustomCodeOutputAnalysis {
+  /** return 物件字面量裡明確以字面鍵名新增的欄位(展開/計算鍵不算，因為不是靜態可列舉的名稱) */
+  declaredFields: string[];
+}
+
+/** 從某個 return{...} 物件字面量的原始碼位置抽出它「這一層」的分句(逗號分隔，考慮巢狀 {}/[]/() 深度、字串跳脫)。回傳 null 代表括號沒能正常配對。 */
+function extractObjectLiteralSegments(code: string, openBraceIdx: number): string[] | null {
+  let depth = 0;
+  let end = -1;
+  for (let i = openBraceIdx; i < code.length; i++) {
+    const c = code[i];
+    if (c === "'" || c === '"' || c === "`") {
+      // 跳過字串/模板字面量整段內容，避免字串裡剛好出現的 { } 干擾括號配對深度
+      const quote = c;
+      i++;
+      while (i < code.length && code[i] !== quote) { if (code[i] === "\\") i++; i++; }
+      continue;
+    }
+    if (c === "{") depth++;
+    else if (c === "}") { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end < 0) return null; // 括號沒能正常配對，放棄(語法健檢理論上已擋過壞語法，這裡是保底)
+  const body = code.slice(openBraceIdx + 1, end);
+  const segments: string[] = [];
+  let seg = "";
+  let depth2 = 0;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === "'" || c === '"' || c === "`") {
+      const quote = c;
+      seg += c; i++;
+      while (i < body.length && body[i] !== quote) { seg += body[i]; if (body[i] === "\\") { i++; seg += body[i] ?? ""; } i++; }
+      if (i < body.length) seg += body[i];
+      continue;
+    }
+    if (c === "{" || c === "[" || c === "(") depth2++;
+    else if (c === "}" || c === "]" || c === ")") depth2--;
+    if (c === "," && depth2 === 0) { segments.push(seg); seg = ""; continue; }
+    seg += c;
+  }
+  if (seg.trim()) segments.push(seg);
+  return segments;
+}
+
+/**
+ * 對 custom-code 節點的程式碼做「純字串掃描」的輕量靜態分析(不是完整 JS parser，也不執行程式碼)，
+ * 抽出程式碼裡每一個 `return { ... }` 物件字面量的「這一層」明確具名欄位並聯集起來——這些是這個
+ * 節點自己「新增」的欄位。注意：engine.ts 執行期一律 `nodeOutputs.set(node.id, {...input,
+ * ...result.output})`(不管 custom-code 自己的 return 有沒有寫 `...ctx.input`)，上游欄位一定會
+ * 沿用不遺失，所以呼叫端(lintVarRefWarnings)不能只看這裡回傳的 declaredFields 就當作「這個節點
+ * 的完整輸出」，一定要再疊加它自己上游的可用欄位——這裡回傳的只是「新增」的部分。
+ *
+ * 為什麼是「所有 return」的聯集、不是只看最後一個：早期分支(如 if(!ok) return {error:'x'})
+ * 也是合法的執行路徑之一，只看主線的最後一個 return 會漏掉這些分支才有的欄位，讓下游引用它們
+ * 時被誤判成不存在(第四輪外部審查抓到：多個條件分支只看最後一個可能漏掉合法輸出)。
+ *
+ * 任何看起來不像能安全解析、或含有「展開了 ctx.input 以外的未知來源」(如 `return {...out}`，
+ * out 是本地變數，無法知道它實際有哪些欄位)或「計算鍵」(`[dynamicKey]: value`)的情況，一律回傳
+ * null——這代表「這裡沒有把握」，呼叫端要維持原本「無法列舉就不擋下游」的保守行為，不能因為
+ * 這個掃描器誤判而生出錯誤或不完整的欄位清單去擋住合法的下游引用(第四輪外部審查抓到：以前
+ * 把「展開未知變數」當成「沒有新增欄位」而非「無法判斷」，會讓下游的合法引用被誤判成不存在)。
+ */
+export function analyzeCustomCodeOutput(code: string): CustomCodeOutputAnalysis | null {
+  const returnMatches = [...code.matchAll(/\breturn\s*\{/g)];
+  if (returnMatches.length === 0) return null;
+  const declaredFields = new Set<string>();
+  for (const match of returnMatches) {
+    const braceStart = match.index! + match[0].length - 1; // 指向那個開括號 '{'
+    const segments = extractObjectLiteralSegments(code, braceStart);
+    if (segments === null) return null;
+    for (const rawSeg of segments) {
+      const s = rawSeg.trim();
+      if (!s) continue;
+      if (s.startsWith("...")) {
+        // ...ctx.input 是已知安全、契約規定的慣例寫法，呼叫端會另外處理上游欄位的沿用；
+        // 展開其他任何來源(本地變數、其他物件)都無法靜態得知它實際攤開了哪些欄位，
+        // 與其假裝「這個分支沒有新增欄位」，不如整體承認分析不出來，回退成不擋檢查。
+        if (/^\.\.\.\s*ctx\.input\b/.test(s)) continue;
+        return null;
+      }
+      if (s.startsWith("[")) return null; // 計算鍵(如 [dynamicKey]: value)，實際欄位名無法靜態得知
+      // 真實踩過的雷：JS 識別字合法包含中文字(這個codebase的 custom-code 大量用中文欄位名當
+      // 簡寫屬性，如 `return { A通路週, B通路週 }`)，只認 [A-Za-z0-9_$] 的話「A通路週」會在
+      // 「通」這個非 ASCII 字元前被截斷成「A」，兩個不同通路的欄位就會被誤判成同一個欄位名。
+      // 改用 \p{L}(任何語言的字母)+\p{Nd}(數字)的 Unicode 屬性比對。
+      const m = s.match(/^(?:"([^"]*)"|'([^']*)'|([\p{L}_$][\p{L}\p{Nd}_$]*))\s*:?/u);
+      const key = m?.[1] ?? m?.[2] ?? m?.[3];
+      if (key) declaredFields.add(key);
+    }
+  }
+  return { declaredFields: [...declaredFields] };
+}
+
+/** 從 outputs 宣告字串("attachmentPath(說明), filename(說明)")抽出欄位名 */
+function outputFieldNames(outputs: string | undefined): string[] {
+  if (!outputs) return [];
+  return outputs
+    .split(",")
+    .map((part) => part.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)/)?.[1])
+    .filter((x): x is string => Boolean(x));
+}
+
+/**
+ * 驗證 config 裡的 {{變數}} 引用「上游真的產得出來」。
+ * 只在「能完整列舉上游輸出」時才報——上游鏈裡有 custom-code(輸出欄位由 intent 決定、靜態列舉不了)
+ * 就跳過該節點的檢查。
+ * 注意這是**軟提醒不是硬錯誤**(不進 lintGraph)：llm-decide 的 prompt、template-text 的 template
+ * 合法地可能要字面 {{}}，當硬錯誤擋圖會把合法的圖修壞。呈現方式是附在 ready 訊息裡請使用者/模型留意，
+ * 執行期還有 cfgStr 警告 + autorun「髒綠燈不收工」雙保險。
+ */
+export function lintVarRefWarnings(
+  nodes: WorkflowNode[],
+  edges: WorkflowEdge[],
+  triggerParams?: ParamField[],
+  /** Webhook 等外部觸發由使用者明確描述的 JSON 欄位；只放行點名的 key，不把任意拼錯字都當合法。 */
+  knownTriggerInputKeys: Iterable<string> = [],
+): string[] {
+  const errors: string[] = [];
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const parents = new Map<string, string[]>();
+  for (const e of edges) parents.set(e.to, [...(parents.get(e.to) ?? []), e.from]);
+  // trigger 節點的靜態 outputs 是空的(triggerParams 是每條 workflow 動態宣告的，不屬於節點型別定義)，
+  // 但引擎會把它們塞進 ctx.input(見 engine.ts trigger 分支)——不算進 acc 的話，任何節點引用
+  // {{targetDate}} 這類週期性衍生欄位都會被誤判成「上游不會輸出」，每條週期性流程都會挨一次假警告。
+  const triggerParamKeys = new Set((triggerParams ?? []).map((p) => p.key));
+  for (const key of knownTriggerInputKeys) if (/^[A-Za-z_][A-Za-z0-9_.-]{0,99}$/.test(key)) triggerParamKeys.add(key);
+
+  // 每個節點的「可用欄位集合」= 所有(遞迴)上游節點的輸出欄位聯集(引擎會沿鏈自動往下傳)。
+  // null = 上游含 custom-code 等靜態列舉不了的來源，放棄檢查。
+  // 失敗分支的下游可以引用 {{error}}/{{errorStep}}(引擎在走 Plan B 時會把錯誤資訊塞進輸出)
+  const errorBranchTargets = new Set(edges.filter((e) => e.fromPort === "error").map((e) => e.to));
+  const memo = new Map<string, Set<string> | null>();
+  const availableFor = (id: string, seen: Set<string>): Set<string> | null => {
+    if (memo.has(id)) return memo.get(id)!;
+    if (seen.has(id)) return new Set(); // 有環(另一條 lint 會報)，別無限遞迴
+    seen.add(id);
+    const acc = new Set<string>();
+    if (errorBranchTargets.has(id)) { acc.add("error"); acc.add("errorStep"); }
+    for (const pid of parents.get(id) ?? []) {
+      const parent = byId.get(pid);
+      if (!parent) continue;
+      if (parent.type === "custom-code") {
+        // 2026-07 第三輪外部審查抓到的 P1：以前只要上游鏈裡有 custom-code 就整個放棄檢查，
+        // 下游引用了不存在的欄位也不會被抓到(全綠但語意錯誤)。現在先靜態掃描這個節點實際的
+        // return{...}物件字面量(見 analyzeCustomCodeOutput)取得它「新增」的欄位；只有掃描不出來
+        // 時才維持舊行為(放棄檢查)。engine.ts 執行期一律 {...input, ...result.output}(不管
+        // custom-code 自己的 return 是否寫了 ...ctx.input)，所以這個節點自己的上游欄位一定會
+        // 沿用，這裡永遠都要疊加它自己的可用欄位集合，不能只看這個節點宣告了什麼新欄位。
+        const analysis = analyzeCustomCodeOutput(String(parent.config?.code ?? ""));
+        if (!analysis) { memo.set(id, null); return null; }
+        for (const f of analysis.declaredFields) acc.add(f);
+        const up = availableFor(pid, seen);
+        if (up === null) { memo.set(id, null); return null; }
+        for (const f of up) acc.add(f);
+        continue; // custom-code 沒有 def.outputs/outputKey 這類靜態宣告，其餘共用邏輯不適用
+      }
+      if (parent.type === "trigger") {
+        for (const k of triggerParamKeys) acc.add(k); // 觸發參數(如期間衍生欄位)
+        // 監聽觸發執行時會注入 {{filePath}}/{{fileName}}(watchers.ts);手動執行時 RunForm 也會
+        // 對「有引用 filePath 的流程」補問測試檔——這兩個欄位是觸發層的事實變數,不認得的話
+        // 每條監聽型流程建圖都挨一次假警告(範本品質閘門實測抓到)。
+        acc.add("filePath");
+        acc.add("fileName");
+        // 收信/Telegram/LINE 觸發注入的事實變數同理——只在對應觸發有開時才算可用，
+        // 沒開就引用 {{body}}/{{message}} 仍然要警告(那是真的接錯)。
+        const cfg = parent.config ?? {};
+        if (cfg.mailWatch === "on") {
+          for (const k of ["from", "subject", "date", "body", "attachmentCount"]) acc.add(k);
+        }
+        if (cfg.telegramWatch === "on") {
+          for (const k of ["message", "chatId", "fromName", "messageId"]) acc.add(k);
+        }
+        if (cfg.lineWatch === "on") {
+          for (const k of ["message", "userId", "replyToken"]) acc.add(k);
+        }
+      }
+      const def = getNodeDef(parent.type);
+      for (const f of outputFieldNames(def?.outputs)) acc.add(f);
+      // llm-decide / template-text 的輸出欄位名放在 outputKey；set-variable 的放在 name(欄位名不同，別漏)
+      const dynKey = (parent.config ?? {}).outputKey;
+      if (typeof dynKey === "string" && dynKey.trim()) acc.add(dynKey.trim());
+      const nameKey = (parent.config ?? {}).name;
+      if (parent.type === "set-variable" && typeof nameKey === "string" && nameKey.trim()) acc.add(nameKey.trim());
+      const up = availableFor(pid, seen);
+      if (up === null) { memo.set(id, null); return null; }
+      for (const f of up) acc.add(f);
+    }
+    memo.set(id, acc);
+    return acc;
+  };
+
+  // 帳密欄位是執行期由設定頁提供的(cfgStr 會查 ctx.secrets)——{{webmailUrl}} 這類引用完全合法，
+  // 不認得的話會對測試過的預設圖發假警告。從每個節點宣告的 secretFields 蒐集整張圖的帳密 key。
+  const secretKeys = new Set<string>();
+  for (const n of nodes) {
+    const def = getNodeDef(n.type);
+    for (const f of def?.secretFields?.(n.config ?? {}) ?? []) secretKeys.add(f.key);
+  }
+
+  const dateTokenRe = new RegExp(`^(${DATE_TOKENS.join("|")})(-\\d+)?$`);
+  // 分開層引用 {{節點代號.欄位}}:代號是上游祖先節點就合法(欄位內容靜態列舉不了,不誤報也不硬猜)
+  const ancestorMemo = new Map<string, Set<string>>();
+  const ancestorIdsOf = (id: string): Set<string> => {
+    const hit = ancestorMemo.get(id);
+    if (hit) return hit;
+    const seen = new Set<string>();
+    const queue = [id];
+    while (queue.length) {
+      const cur = queue.pop()!;
+      for (const pid of parents.get(cur) ?? []) if (!seen.has(pid)) { seen.add(pid); queue.push(pid); }
+    }
+    ancestorMemo.set(id, seen);
+    return seen;
+  };
+  for (const n of nodes) {
+    const avail = availableFor(n.id, new Set());
+    if (avail === null) continue;
+    for (const [key, v] of Object.entries(n.config ?? {})) {
+      if (typeof v !== "string") continue;
+      // repeat-steps 的 steps 是一整包 JSON，裡面的 {{item}}/{{item.欄位}} 是迴圈內部自己的變數範圍
+      // (每次迭代才存在，不是這張圖的上游輸出)，用同一套「上游有沒有輸出這個欄位」去檢查一定會誤報。
+      if (n.type === "repeat-steps" && key === "steps") continue;
+      for (const m of v.matchAll(/\{\{\s*([^}]+)\s*\}\}/g)) {
+        const token = m[1].trim();
+        if (dateTokenRe.test(token)) continue; // 相對日期
+        if (token.startsWith("period.")) continue; // 期間衍生值
+        const head = token.split(".")[0];
+        if (avail.has(head)) continue; // 上游輸出(含 a.b 巢狀引用的頭)
+        if (token.includes(".") && ancestorIdsOf(n.id).has(head)) continue; // 分開層 {{節點代號.欄位}}
+        if (secretKeys.has(head)) continue; // 帳密欄位(執行期由設定頁提供)
+        // 帳密/觸發參數是執行期才知道的集合，這裡放行「常見命名」以外一律不猜——
+        // 但 llm-decide 的 prompt、template-text 的 template 本來就可能要字面 {{}}，只提醒不擋。
+        // 逐一把欄位名框上「」——這個清單的價值就是讓人分得清楚有哪幾個不同的欄位，
+        // 每個名字外面加引號後，白話過濾器(plainLanguage 的既有慣例)就不會再去动它，
+        // 不然好幾個不同欄位名字都會被同一句「前面步驟提供的資料」蓋掉、看起來像同一個東西。
+        errors.push(
+          `節點 "${n.id}" 的設定「${key}」引用了 {{${token}}}，但它的上游節點都不會輸出這個欄位` +
+            `（上游會輸出的欄位：${[...avail].map((f) => `「${f}」`).join("、") || "（沒有上游）"}）。` +
+            `若要引用上游資料請改成正確的欄位名；若要今天日期用 {{today}}；若這是要字面輸出的文字可忽略此條。`,
+        );
+      }
+    }
+  }
+  return errors;
+}

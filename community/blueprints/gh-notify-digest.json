@@ -1,0 +1,74 @@
+{
+  "id": "gh-notify-digest",
+  "category": "資訊摘要",
+  "icon": "🔔",
+  "name": "GitHub 通知匣定時彙整到 Slack",
+  "description": "排程打 GitHub 通知 API 抓你帳號的未讀通知(被 @、issue 有新回覆、PR 被指派…) → AI 整理成一則條列訊息 → 有通知才發 Slack,沒有就安靜;API 打不通走失敗分支發 Telegram。token 到 GitHub Settings → Developer settings → Personal access tokens 產生(勾 notifications 權限)。(改編自 n8n 社群範本庫 0966_HTTP_Discord_Import_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程,每小時)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "pull",
+      "type": "http-request",
+      "label": "抓未讀通知",
+      "config": {
+        "method": "GET",
+        "url": "https://api.github.com/notifications",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的GitHub token\", \"Accept\": \"application/vnd.github+json\", \"User-Agent\": \"agent-hub\"}",
+        "body": ""
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "digest",
+      "type": "llm-decide",
+      "label": "AI 整理成條列",
+      "config": {
+        "prompt": "這是 GitHub 通知 API 回的 JSON 陣列。把每則通知整理成一行「[原因] 標題(儲存庫名)」,原因用中文(被提及/有新回覆/被指派…);如果是空陣列 [],只回「無」:\n{{body}}",
+        "outputKey": "notifyList"
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "有未讀通知?",
+      "config": {
+        "left": "{{notifyList}}",
+        "op": "!=",
+        "right": "無"
+      },
+      "position": { "x": 780, "y": 120 }
+    },
+    {
+      "id": "ping",
+      "type": "slack-notify",
+      "label": "彙整發到 Slack",
+      "config": {
+        "message": "🔔 GitHub 未讀通知:\n{{notifyList}}"
+      },
+      "position": { "x": 1040, "y": 60 }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "API 打不通告警",
+      "config": {
+        "message": "⚠️ 抓 GitHub 通知失敗:{{error}}(token 是不是過期了?)"
+      },
+      "position": { "x": 520, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "pull" },
+    { "from": "pull", "to": "digest" },
+    { "from": "digest", "to": "gate" },
+    { "from": "gate", "to": "ping", "fromPort": "true" },
+    { "from": "pull", "to": "alert", "fromPort": "error" }
+  ]
+}

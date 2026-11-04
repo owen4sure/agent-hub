@@ -1,0 +1,584 @@
+import type { Workflow, WorkflowNode } from "./types";
+import { getNodeDef } from "./registry";
+import { parseSheetUrl } from "./nodes/googleSheet";
+import { humanizeTemplates, plainLanguage } from "./plainLanguage";
+import { nodeSummary } from "./nodeSummary";
+export { plainLanguage } from "./plainLanguage";
+
+export interface ExplainStep {
+  order: number;
+  id: string;
+  type: string;
+  icon: string;
+  label: string;
+  /** 這一步在做什麼的白話說明(從實際設定生出來，改了設定就會跟著變) */
+  text: string;
+  /** 這一步的關鍵設定，讓使用者判斷要不要改；每項是 [設定名, 目前的值] */
+  settings: [string, string][];
+}
+
+export interface WorkflowExplanation {
+  overview: string;
+  params: { label: string; value: string }[];
+  secrets: string[];
+  steps: ExplainStep[];
+}
+
+function str(config: Record<string, unknown>, key: string, fallback = ""): string {
+  const v = config[key];
+  return v === undefined || v === null || v === "" ? fallback : String(v);
+}
+
+/**
+ * 從 custom-code 產生的程式碼裡挖出「它在讀寫哪一份 Google 試算表、哪些分頁、用到哪些設定值」——
+ * 不然自訂步驟的說明只有一句模糊的用途,使用者有好幾條 workflow 時根本分不出誰改誰、要去哪改。
+ * 純唯讀字串比對,挖不到就回空(說明照常顯示,只是少了這幾行)。
+ */
+export function extractSheetHints(code: string): { sheets: string[]; tabs: string[]; secrets: string[] } {
+  const sheets = new Set<string>();
+  const tabs = new Set<string>();
+  const secrets = new Set<string>();
+  if (!code) return { sheets: [], tabs: [], secrets: [] };
+  // 試算表:網址或 spreadsheetId
+  for (const m of code.matchAll(/spreadsheets\/d\/([\w-]{20,})/g)) sheets.add(m[1]);
+  for (const m of code.matchAll(/spreadsheet_?[iI]d\s*[:=]\s*['"]([\w-]{20,})['"]/g)) sheets.add(m[1]);
+  // 分頁:getSheetByName("...")、sheet/sheetName/tab: "..." 這些字面
+  for (const m of code.matchAll(/getSheetByName\(\s*['"]([^'"]{1,60})['"]/g)) tabs.add(m[1]);
+  for (const m of code.matchAll(/\b(?:sheet|sheetName|tab|tabName|worksheet)\s*[:=]\s*['"]([^'"]{1,60})['"]/g)) tabs.add(m[1]);
+  // 用到哪些設定值(帳密/寫入網址):ctx.secrets.X 或 secrets["X"]
+  for (const m of code.matchAll(/secrets(?:\.([A-Za-z_]\w*)|\[\s*['"]([A-Za-z_]\w*)['"]\s*\])/g)) secrets.add(m[1] || m[2]);
+  return { sheets: [...sheets], tabs: [...tabs], secrets: [...secrets] };
+}
+
+/**
+ * 從 custom-code 產生的程式碼裡挖出「實際拿來比對的具體業務關鍵字」(哪一頁的標題文字、
+ * 哪個文字方塊、哪個分頁名稱)——真實踩過的落差：使用者反映「替換投影片圖表」這種節點的
+ * intent 只寫得出「找目標頁與最大 image 元素」這種泛稱，實際「用哪些文字判斷是哪一頁」
+ * 只存在於已經產生的程式碼裡，intent/label 都看不到，使用者原話「不然數量一多起來根本
+ * 不知道幹了什麼了」。
+ * 只抓「明確拿來當比對條件」的字面值(.includes()/===/宣告成全大寫常數)，不是任意字串——
+ * 直接抓全部字串字面值會把 log/錯誤訊息用字串接變數組出來的半句話也混進來(例如
+ * `'簡報共 ' + n + ' 頁'` 只抓得到無意義的「簡報共」)，比沒有說明更誤導人。只留含中文的
+ * 字面值：純技術/英文命名不是使用者要看的東西，且此時多半是網址/API 欄位名而不是業務關鍵字。
+ */
+export function extractCodeTargets(code: string): string[] {
+  if (!code) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const patterns = [
+    /\.includes\(\s*['"]([^'"]{2,30})['"]/g,
+    /===\s*['"]([^'"]{2,30})['"]/g,
+    /['"]([^'"]{2,30})['"]\s*===/g,
+    /\b(?:const|let)\s+[A-Z_][A-Z0-9_]*\s*=\s*['"]([^'"]{2,30})['"]/g,
+  ];
+  for (const re of patterns) {
+    for (const m of code.matchAll(re)) {
+      const s = m[1].trim().replace(/[：:]+$/, "");
+      if (!s || !/[一-鿿]/.test(s) || seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+    }
+  }
+  return out.slice(0, 8);
+}
+
+/**
+ * 把一個節點的實際設定翻成一句白話。集中在這裡(而不是散在 11 個節點檔)，
+ * 讓維護者一眼看完整套說明用語，也保證每個節點都有解釋。
+ */
+function explainNode(node: WorkflowNode, h: (v: string) => string): { text: string; settings: [string, string][] } {
+  const c = node.config ?? {};
+  // 讀設定並把裡面的 {{token}} 換成白話
+  const hstr = (key: string, fallback = "") => h(str(c, key, fallback));
+  switch (node.type) {
+    case "trigger": {
+      const watchPath = str(c, "watchPath").trim();
+      const pattern = str(c, "watchPattern").trim();
+      if (watchPath) {
+        return {
+          text: `流程的起點。監聽「${watchPath}」資料夾，有新檔案${pattern ? `(檔名含「${pattern}」)` : ""}丟進來就自動跑(也可手動執行、排程，或由其他服務通知啟動)。`,
+          settings: [["監聽資料夾", watchPath], ["檔名條件", pattern || "（任何檔案）"]],
+        };
+      }
+      if (str(c, "mailWatch").trim() === "on") {
+        const subject = str(c, "mailSubjectFilter").trim();
+        const from = str(c, "mailFromFilter").trim();
+        const folder = str(c, "mailFolder").trim() || "收件匣";
+        return {
+          text: `流程的起點。每分鐘檢查信箱(${folder})，收到${subject ? `主旨含「${subject}」` : ""}${subject && from ? "、" : ""}${from ? `寄件人含「${from}」` : ""}${!subject && !from ? "任何" : ""}的新信就自動跑；後面的步驟會自動取得信件標題、內容和附件。流程要「設為正式」才會開始收信；登入資料在設定頁填。`,
+          settings: [["主旨條件", subject || "（任何主旨）"], ["寄件人條件", from || "（任何人）"], ["信箱資料夾", folder]],
+        };
+      }
+      if (str(c, "telegramWatch").trim() === "on") {
+        const keyword = str(c, "telegramKeyword").trim();
+        return {
+          text: `流程的起點。傳${keyword ? `含「${keyword}」的` : ""}訊息給你的 Telegram 機器人就自動跑；後面的步驟會自動取得訊息內容。只接受你在設定頁綁定的帳號傳來的訊息；流程要「設為正式」才會開始接收。`,
+          settings: [["訊息條件", keyword || "（任何訊息）"]],
+        };
+      }
+      if (str(c, "lineWatch").trim() === "on") {
+        return {
+          text: "流程的起點。有人傳訊息給你的 LINE 官方帳號就自動跑；後面的步驟會自動取得訊息內容。到「觸發」面板依畫面指引完成 LINE 連接後即可啟用。",
+          settings: [],
+        };
+      }
+      return { text: "流程的起點。手動按「執行」、排程時間到，或其他服務通知時，就從這裡開始跑。自動啟動方式都在「觸發」面板，會有畫面指引。", settings: [] };
+    }
+
+    case "browser-login": {
+      const url = hstr("url", "登入頁");
+      return {
+        text: `打開瀏覽器連到「${url}」，用你在「設定」頁填的帳號密碼登入。若有圖形驗證碼，AI 會自動辨識，最多重試 3 次。`,
+        settings: [["登入網址", url], ["帳密來源", "設定頁的「登入帳號」與「登入密碼」"]],
+      };
+    }
+
+    case "find-email": {
+      const subject = str(c, "subjectContains");
+      const date = hstr("date", "指定日期");
+      return {
+        text: `在信箱裡找出日期是「${date}」${subject ? `、標題含「${subject}」` : ""} 的那封信並點開。`,
+        settings: [["信件日期", date], ["標題關鍵字", subject || "（未設，只用日期找）"]],
+      };
+    }
+
+    case "download-attachment": {
+      const name = str(c, "nameContains");
+      return {
+        text: name ? `下載這封信裡檔名含「${name}」的附件。` : "下載這封信的第一個附件。",
+        settings: [["附件檔名關鍵字", name || "（留空＝抓第一個）"]],
+      };
+    }
+
+    case "excel-process": {
+      const sheet = str(c, "sheet", "第一個分頁");
+      const start = hstr("filterStart", "區間開始");
+      const end = hstr("filterEnd", "區間結束");
+      const col = str(c, "highlightColumn", "指定欄");
+      const color = str(c, "highlight", "FFC000");
+      const colorName = color.toUpperCase().replace(/^#/, "") === "FFC000" ? "橘黃色" : "指定顏色";
+      const out = str(c, "outputName", "output");
+      return {
+        text: `打開下載的 Excel，切到「${sheet}」分頁，只留下日期在「${start}」到「${end}」之間的資料，把「${col}」這一欄標成${colorName}，另存成「${out}.xlsx」放到產出檔案。`,
+        settings: [
+          ["分頁", sheet],
+          ["篩選區間", `${start} ～ ${end}`],
+          ["標色的欄", col],
+          ["顏色", colorName],
+          ["輸出檔名", `${out}.xlsx`],
+        ],
+      };
+    }
+
+    case "http-request": {
+      const method = str(c, "method", "GET");
+      const url = hstr("url", "（未填網址）");
+      const action = method === "GET" ? "讀取" : method === "POST" ? "送出資料到" : `以「${method}」方式連線`;
+      return {
+        text: `${action}「${url}」，把對方回傳的內容交給下一步。`,
+        settings: [["要做的事", action], ["網址", url]],
+      };
+    }
+
+    case "pdf-read": {
+      const input = hstr("inputPath", "上游的檔案");
+      return {
+        text: `打開「${input}」這個 PDF，把裡面的文字抽出來給後面的步驟用。`,
+        settings: [["來源檔案", input]],
+      };
+    }
+
+    case "unzip": {
+      const input = hstr("inputPath", "上游的檔案");
+      const dirName = str(c, "outputDirName", "extracted");
+      return {
+        text: `解開「${input}」這個壓縮檔，裡面的檔案全部放到「${dirName}」資料夾，之後在「產出檔案」頁看得到。`,
+        settings: [["來源檔案", input], ["解壓縮資料夾", dirName]],
+      };
+    }
+
+    case "template-text": {
+      return {
+        text: "把文字範本中的預留位置換成前面步驟的實際資料，再把完成的文字交給後面使用。",
+        settings: [],
+      };
+    }
+
+    case "set-variable": {
+      const value = hstr("value");
+      return {
+        text: `先記住一項資料「${value || "（空）"}」，讓後面的步驟可以直接使用。`,
+        settings: [["要記住的內容", value || "（空）"]],
+      };
+    }
+
+    case "if-condition": {
+      const left = hstr("left");
+      const op = str(c, "op", "==");
+      const opText: Record<string, string> = { "==": "等於", "!=": "不等於", ">": "大於", ">=": "大於或等於", "<": "小於", "<=": "小於或等於", contains: "包含", "not-contains": "不包含" };
+      const right = hstr("right");
+      return {
+        text: `判斷「${left}」是否${opText[op] ?? "符合"}「${right}」：成立走「是」那條線，不成立走「否」那條線。`,
+        settings: [["條件", `${left} ${opText[op] ?? "符合"} ${right}`]],
+      };
+    }
+
+    case "switch": {
+      const value = hstr("value");
+      const cases = str(c, "cases")
+        .split(/[\n,，]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      return {
+        text: `依「${value || "上游的分類結果"}」分路走：${cases.join("、") || "（還沒設定選項）"}，都不符合就走「其他」那條線。`,
+        settings: [["分類依據", value || "（未設定）"], ["分幾路", cases.join("、") || "（未設定）"]],
+      };
+    }
+
+    case "wait-approval": {
+      const message = str(c, "message");
+      const hours = str(c, "timeoutHours", "72");
+      return {
+        text: `流程在這裡暫停，把內容發給簽核人(手機/信箱/桌面通知)，等真人按「核准」才走核准那條線、按「拒絕」走拒絕那條線；${hours} 小時沒人決定就停止並通知。`,
+        settings: [["要問簽核人的內容", message ? `${message.slice(0, 60)}${message.length > 60 ? "…" : ""}` : "（用預設訊息）"], ["簽核時限", `${hours} 小時`]],
+      };
+    }
+
+    case "wait": {
+      const secs = str(c, "seconds", "10");
+      return {
+        text: `等待 ${secs} 秒再繼續(給對方系統一點處理時間)。`,
+        settings: [["等待秒數", secs]],
+      };
+    }
+
+    case "run-workflow": {
+      const target = hstr("target", "另一條流程");
+      return {
+        text: `執行另一條流程「${target}」當作這一步，等它跑完把結果接回來繼續。`,
+        settings: [["要執行的流程", target]],
+      };
+    }
+
+    case "rss-read": {
+      const url = hstr("url");
+      return {
+        text: `讀取 RSS 訂閱源「${url || "（未設定）"}」的最新文章(標題/連結/摘要)，給後面的步驟用。`,
+        settings: [["訂閱源網址", url || "（未設定）"]],
+      };
+    }
+
+    case "llm-decide": {
+      const prompt = str(c, "prompt");
+      return {
+        text: `把資料交給 AI 判斷或整理${prompt ? `（請它：「${prompt.slice(0, 40)}${prompt.length > 40 ? "…" : ""}」）` : ""}，再把答案交給下一步。`,
+        settings: [],
+      };
+    }
+
+    case "custom-code": {
+      // intent 與 code 是給產碼器的執行規格，常含 rows/headers、欄位代號、throw、輸出名稱等，
+      // 即使經過 plainLanguage 仍會變成又長又難懂的半技術說明(實測: 抓出「YYYY」「MM」這種
+      // 格式碎片當成資料欄位)，不能直接顯示。但改用 nodeSummary() 的 4 種關鍵字分類一樣有問題:
+      // 分類太粗，同一條真實流程裡「判斷這次要更新哪一週」「開啟PPTX簡報並更新圖表」「執行週期
+      // 搬移歸檔並寫入新頭」等十幾個完全不同的步驟，只要 intent 裡提到「日期」兩個字，全部塌成
+      // 同一句「整理這次需要的日期與期間」——使用者說「看說明都還是不能確認是哪個」的真因就是這裡。
+      // 建圖時 AI 給每個 custom-code 節點取的 label 本來就是具體、白話、逐步不同的業務描述(標籤本身
+      // 就是最可靠的「這一步做什麼」來源，不必再從 intent 猜)；只有還沒被取過名字(仍是節點型別的
+      // 通用預設標籤)時才退回粗略分類。
+      const def = getNodeDef("custom-code");
+      const genericLabel = def?.label ?? "";
+      const labelPurpose = node.label.trim() && node.label.trim() !== genericLabel ? plainLanguage(node.label.trim(), {}) : "";
+      const purpose = labelPurpose || nodeSummary("custom-code", c);
+      // label 只講得出「替換投影片圖表」這種類別，講不出「換的是哪一頁」——那個具體到能
+      // 分辨「數量一多起來」時彼此差在哪的關鍵字，只存在於已經產生的程式碼裡(見上面
+      // extractCodeTargets 的說明)，這裡把它們也列出來，不再只靠 label 一句話交代整個步驟。
+      const codeTargets = extractCodeTargets(str(c, "code"));
+      const targetsPhrase = codeTargets.length ? `(程式碼裡會核對／找出：「${codeTargets.join("」「")}」)` : "";
+      return {
+        text: `${purpose}${targetsPhrase}。這一步會依已確認的規則處理資料；資料不完整或對不起來時會停下來提醒，不會自行猜測。想改規則時，直接在對話說你要改成什麼即可。`,
+        settings: [
+          ["這一步的目的", purpose],
+          ...(codeTargets.length ? ([["程式碼裡比對用的關鍵字", codeTargets.join("、")]] as [string, string][]) : []),
+        ],
+      };
+    }
+
+    case "repeat-steps": {
+      const itemsRef = hstr("items", "一份清單");
+      let stepLabels = "幾個步驟";
+      try {
+        const steps = JSON.parse(str(c, "steps", "[]")) as { type: string; label?: string }[];
+        if (Array.isArray(steps) && steps.length > 0) {
+          stepLabels = steps.map((s) => s.label || getNodeDef(s.type)?.label || s.type).join("→");
+        }
+      } catch { /* 解析失敗就用預設文字，不擋說明產生 */ }
+      return {
+        text: `對「${itemsRef}」裡的每一項，重複執行：${stepLabels}。全部跑完後彙整成一份清單。`,
+        settings: [["重複清單", itemsRef], ["每項步驟", stepLabels]],
+      };
+    }
+
+    case "read-file": {
+      const p = hstr("path", "上游的檔案");
+      return {
+        text: `讀取「${p}」的內容成文字(PDF/Word/Excel/PPT 會自動抽出文字)，給後面的步驟用。`,
+        settings: [["檔案路徑", p]],
+      };
+    }
+
+    case "write-file": {
+      const name = hstr("fileName", "output.txt");
+      const extra = str(c, "extraDir").trim();
+      return {
+        text: `把內容存成「${name}」放到產出檔案${extra ? `，並額外複製一份到「${extra}」` : ""}。`,
+        settings: [["檔名", name], ...(extra ? ([["額外存到", extra]] as [string, string][]) : [])],
+      };
+    }
+
+    case "web-page": {
+      const url = hstr("url", "（未填網址）");
+      return {
+        text: `打開「${url}」這個網頁，把內容抓成文字給後面的步驟用(不用登入的公開頁面)。`,
+        settings: [["網址", url]],
+      };
+    }
+
+    case "desktop-notify": {
+      const title = hstr("title", "通知");
+      return {
+        text: `在這台電腦跳一則桌面通知「${title}」。`,
+        settings: [["標題", title]],
+      };
+    }
+
+    case "send-email": {
+      const to = hstr("to").trim();
+      const subject = hstr("subject", "（未設主旨）");
+      const attach = hstr("attachPath").trim();
+      return {
+        text: `寄一封主旨「${subject}」的 email 給「${to || "自己(SMTP 帳號)"}」${attach ? `，附上「${attach}」` : ""}。SMTP 要先在設定頁串好。`,
+        settings: [["收件人", to || "（寄給自己）"], ["主旨", subject], ...(attach ? ([["附件", attach]] as [string, string][]) : [])],
+      };
+    }
+
+    case "email-read": {
+      const subject = hstr("subjectFilter").trim();
+      const from = hstr("fromFilter").trim();
+      const days = str(c, "sinceDays", "3").trim() || "3";
+      const folder = str(c, "folder").trim() || "收件匣";
+      return {
+        text: `直接連信箱(${folder})抓最近 ${days} 天內「最新一封」${subject ? `主旨含「${subject}」` : ""}${subject && from ? "、" : ""}${from ? `寄件人含「${from}」` : ""}${!subject && !from ? "的" : "的"}信(不用開瀏覽器)，信件內容會交給後面的步驟，附件也會自動保存。登入資料要先在設定頁填好。`,
+        settings: [["主旨條件", subject || "（任何主旨）"], ["寄件人條件", from || "（任何人）"], ["找最近幾天", `${days} 天`], ["信箱資料夾", folder]],
+      };
+    }
+
+    case "google-sheet-read": {
+      const url = hstr("sheetUrl", "（未貼網址）");
+      const sheet = hstr("sheetName").trim();
+      // 網址「不截斷」——之前截到 60 字剛好把試算表尾巴切掉,等於把「是哪一份」藏起來。
+      // 分頁在網址裡指定;用白話講「網址已指定哪一頁」,不出現 gid 這種術語。
+      const parsed = parseSheetUrl(str(c, "sheetUrl"));
+      const tabPhrase = sheet
+        ? `(只讀「${sheet}」分頁)`
+        : parsed && parsed.gid !== "0"
+          ? "(網址裡已指定要讀哪一個分頁)"
+          : "";
+      return {
+        text: `讀取這份 Google 試算表${tabPhrase}(要開「知道連結的任何人可檢視」)，第一列當欄位名，資料變成清單給後面的步驟用。`,
+        settings: [["Google 試算表網址", url], ...(sheet ? ([["讀哪個分頁", sheet]] as [string, string][]) : [])],
+      };
+    }
+
+    case "google-sheet-append": {
+      const sheet = str(c, "sheetName").trim();
+      const configured = Boolean(str(c, "scriptUrl").trim());
+      return {
+        text: `在 Google 試算表的${sheet ? `「${sheet}」分頁` : "第一個分頁"}最下面新增一列(各欄內容照設定依序填入)。寫入網址就在這個步驟裡，可直接修改或先做不寫資料的連線檢查。`,
+        settings: [["寫到哪個分頁", sheet || "第一個分頁"], ["寫入網址", configured ? "已保存在這個步驟" : "尚未填寫（請在這個步驟第一欄貼上）"]],
+      };
+    }
+
+    case "google-sheet-update": {
+      const sheet = hstr("sheetName", "（未指定）").trim();
+      const target = hstr("targetColumn", "（未指定）").trim();
+      const rows = hstr("rows", "（尚未設定）").trim();
+      const configured = Boolean(str(c, "scriptUrl").trim());
+      return {
+        text: `在 Google 試算表的「${sheet}」分頁，找到「${target}」這一欄，再依左側列名更新對應儲存格。它只改指定位置，不會在底下新增重複資料；寫入網址就在這個步驟裡。`,
+        settings: [
+          ["更新哪個分頁", sheet],
+          ["更新哪一欄", target],
+          ["依哪些列名填值", rows],
+          ["寫入網址", configured ? "已保存在這個步驟" : "尚未填寫（請在這個步驟第一欄貼上）"],
+        ],
+      };
+    }
+
+    case "read-image": {
+      const src = hstr("source", "上游的圖片");
+      return {
+        text: `把圖片(${src})交給 AI 看,依指示回答(讀出文字/描述內容/抽欄位),結果給後面的步驟用。`,
+        settings: [["圖片來源", src]],
+      };
+    }
+
+    case "slack-notify": {
+      const message = hstr("message", "（未設定訊息內容）");
+      const shown = message.length > 80 ? `${message.slice(0, 80)}…` : message;
+      return {
+        text: `把訊息傳到你在設定頁串接的 Slack 頻道：「${shown}」。`,
+        settings: [["訊息內容", message]],
+      };
+    }
+
+    // 以下 7 種節點型別之前完全沒有對應的 case，全部落到最後的 default，只顯示同一種節點型別
+    // 共用的靜態說明(NodeDefinition.description)，看不出「這一個步驟實際換了哪一頁、傳了什麼
+    // 訊息、寄給誰」——使用者原話：「像是替換投影片那種，我就不知道是換了哪些啊，我想要看到」，
+    // 查出來就是這個 default 缺口。跟前面 custom-code 是同一類問題，只是這次是「完全沒寫」不是
+    // 「寫得太粗」。
+
+    case "telegram-notify": {
+      const message = hstr("message", "（未設定訊息內容）");
+      const shown = message.length > 80 ? `${message.slice(0, 80)}…` : message;
+      return {
+        text: `把訊息傳到你在設定頁串接的 Telegram：「${shown}」。`,
+        settings: [["訊息內容", message]],
+      };
+    }
+
+    case "line-notify": {
+      const message = hstr("message", "（未設定訊息內容）");
+      const shown = message.length > 80 ? `${message.slice(0, 80)}…` : message;
+      const target = str(c, "target").trim();
+      return {
+        text: `把訊息傳到${target ? `「${h(target)}」` : "你在設定頁綁定的 LINE"}：「${shown}」。`,
+        settings: [["訊息內容", message], ["傳送對象", target ? h(target) : "（設定頁的 User ID）"]],
+      };
+    }
+
+    case "webmail-send": {
+      const to = hstr("to").trim();
+      const cc = hstr("cc").trim();
+      const subject = hstr("subject", "（未設主旨）");
+      const attach = hstr("attachPaths").trim();
+      const sig = str(c, "signature").trim();
+      return {
+        text: `用網頁信箱寄一封主旨「${subject}」的信給「${to || "（未填收件人）"}」${cc ? `，副本給「${cc}」` : ""}${attach ? `，附上「${attach}」` : ""}${sig ? `，附加簽名檔「${sig}」` : ""}。登入資料要先在設定頁填好。`,
+        settings: [
+          ["收件人", to || "（未填）"],
+          ...(cc ? ([["副本", cc]] as [string, string][]) : []),
+          ["主旨", subject],
+          ...(attach ? ([["附件", attach]] as [string, string][]) : []),
+        ],
+      };
+    }
+
+    case "google-slides-replace-image": {
+      const page = hstr("pageTitleContains", "（未指定頁面）");
+      const presentation = hstr("presentationUrl", "（未指定簡報）");
+      const image = hstr("imagePath", "上一步產生的圖片");
+      return {
+        text: `找到簡報裡標題含「${page}」的那一頁(必須剛好只有一張圖片，避免換錯)，把上面的圖換成「${image}」。`,
+        settings: [["要更新的簡報", presentation], ["用標題找哪一頁", page], ["新圖片來源", image]],
+      };
+    }
+
+    case "google-slides-refresh": {
+      const presentation = hstr("presentationUrl", "（未指定簡報）");
+      const spreadsheet = hstr("spreadsheetUrl", "（未指定試算表）");
+      const page = str(c, "pageTitleContains").trim();
+      return {
+        text: `直接更新「${presentation}」這份簡報裡、連到「${spreadsheet}」的圖表${page ? `(只更新標題含「${h(page)}」的那一頁)` : ""}。不用開瀏覽器找按鈕。`,
+        settings: [
+          ["要更新的簡報", presentation],
+          ["圖表資料來源試算表", spreadsheet],
+          ...(page ? ([["只更新哪一頁", h(page)]] as [string, string][]) : []),
+        ],
+      };
+    }
+
+    case "google-slides-create": {
+      const rawTitle = str(c, "title");
+      const templated = /\{\{\s*[^}]+\s*\}\}/.test(rawTitle);
+      const title = templated ? "依前面步驟的資料命名" : (rawTitle.trim() || "（未命名，執行時會用預設檔名）");
+      return {
+        text: `建立一份新的 Google 簡報，檔名「${title}」，內容依前一步整理好的投影片資料自動產生。`,
+        settings: [["新簡報檔名", title]],
+      };
+    }
+
+    case "excel-range-image": {
+      const input = hstr("inputPath", "上游的檔案");
+      const sheet = str(c, "sheet").trim();
+      const range = str(c, "range").trim() || "（未指定範圍）";
+      return {
+        text: `打開「${input}」${sheet ? `的「${h(sheet)}」分頁` : ""}，把「${range}」這個範圍畫成一張圖片，給後面的步驟用(例如換到簡報上)。`,
+        settings: [["來源檔案", input], ...(sheet ? ([["分頁", h(sheet)]] as [string, string][]) : []), ["範圍", range]],
+      };
+    }
+
+    default: {
+      const def = getNodeDef(node.type);
+      return { text: def?.description ?? "（這個步驟沒有額外說明）", settings: [] };
+    }
+  }
+}
+
+/** 依連線把節點排成執行順序(從沒有上游的節點開始，沿著線走)；有環或落單也不會漏掉 */
+export function orderNodes(wf: Workflow): WorkflowNode[] {
+  const byId = new Map(wf.nodes.map((n) => [n.id, n]));
+  const incoming = new Map<string, number>();
+  wf.nodes.forEach((n) => incoming.set(n.id, 0));
+  wf.edges.forEach((e) => incoming.set(e.to, (incoming.get(e.to) ?? 0) + 1));
+
+  const ordered: WorkflowNode[] = [];
+  const seen = new Set<string>();
+  // 起點：沒有上游的節點(通常是 trigger)，找不到就用第一個節點
+  const roots = wf.nodes.filter((n) => (incoming.get(n.id) ?? 0) === 0);
+  const queue = (roots.length ? roots : wf.nodes.slice(0, 1)).map((n) => n.id);
+  while (queue.length) {
+    const id = queue.shift()!;
+    if (seen.has(id)) continue;
+    const node = byId.get(id);
+    if (!node) continue;
+    seen.add(id);
+    ordered.push(node);
+    wf.edges.filter((e) => e.from === id).forEach((e) => { if (!seen.has(e.to)) queue.push(e.to); });
+  }
+  // 任何沒被連到的孤兒節點補在最後，確保不漏
+  wf.nodes.forEach((n) => { if (!seen.has(n.id)) ordered.push(n); });
+  return ordered;
+}
+
+/** 產生整個 workflow 的完整白話說明，讓使用者判斷要不要修改 */
+export function explainWorkflow(wf: Workflow): WorkflowExplanation {
+  const paramLabels = Object.fromEntries((wf.triggerParams ?? []).map((f) => [f.key, f.label]));
+  const h = humanizeTemplates(paramLabels);
+  const steps: ExplainStep[] = orderNodes(wf).map((node, i) => {
+    const def = getNodeDef(node.type);
+    const { text, settings } = explainNode(node, h);
+    return {
+      order: i + 1,
+      id: node.id,
+      type: node.type,
+      icon: def?.icon ?? "•",
+      label: plainLanguage(node.label, paramLabels),
+      text: plainLanguage(text, paramLabels),
+      settings: settings.map(([key, value]) => [plainLanguage(key, paramLabels), plainLanguage(value, paramLabels)]),
+    };
+  });
+
+  const params = (wf.triggerParams ?? [])
+    .filter((f) => !f.derived)
+    .map((f) => ({ label: f.label, value: f.default ? String(f.default) : "（執行時填）" }));
+
+  const secrets = (wf.requiresSecrets ?? []).map((s) => plainLanguage(s.label, paramLabels));
+
+  return {
+    overview: plainLanguage(wf.longDescription || wf.description || "這個流程還沒有整體說明。", paramLabels),
+    params,
+    secrets,
+    steps,
+  };
+}

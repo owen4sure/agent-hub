@@ -1,0 +1,126 @@
+{
+  "id": "int-sheet-anomaly",
+  "category": "監控告警",
+  "icon": "📈",
+  "name": "試算表有數字超標就抓出來寄信",
+  "description": "排程定時讀一張 Google 試算表(公開分享連結即可,免授權)→ 用自訂步驟篩出數值超過安全門檻的列 → 真的有異常才讓 AI 寫成白話警示 → 寄 email 給你。盯預算/用量/水位這類「平常沒事、超標才要看」的數字。讀不到表會走失敗分支發桌面通知。(改編自 n8n 社群範本庫 0830_Filter_Summarize_Send_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 150
+      }
+    },
+    {
+      "id": "read",
+      "type": "google-sheet-read",
+      "label": "讀試算表",
+      "config": {
+        "sheetUrl": "https://docs.google.com/spreadsheets/d/請換成你的試算表ID/edit",
+        "maxRows": "500"
+      },
+      "position": {
+        "x": 240,
+        "y": 150
+      }
+    },
+    {
+      "id": "flag",
+      "type": "custom-code",
+      "label": "篩出超標的列",
+      "config": {
+        "intent": "上游 google-sheet-read 會輸出 rows(每列是欄位名對應值的物件)。找出數值欄位超過安全門檻(門檻預設 100,可依實際需要調整)的列。輸出 flaggedCount(超標列數,數字)、flaggedText(把每筆超標的列整理成一行說明的多行文字,沒有就給空字串)。",
+        "code": ""
+      },
+      "position": {
+        "x": 480,
+        "y": 150
+      }
+    },
+    {
+      "id": "chk",
+      "type": "if-condition",
+      "label": "有超標的嗎?",
+      "config": {
+        "left": "{{flaggedCount}}",
+        "op": ">",
+        "right": "0"
+      },
+      "position": {
+        "x": 720,
+        "y": 150
+      }
+    },
+    {
+      "id": "msg",
+      "type": "llm-decide",
+      "label": "AI 寫成白話警示",
+      "config": {
+        "prompt": "下面是試算表裡數值超過門檻的資料。用白話寫一段簡短警示,點出哪幾筆超標、大概超出多少、建議先看哪一筆:\n\n{{flaggedText}}",
+        "outputKey": "alertText"
+      },
+      "position": {
+        "x": 960,
+        "y": 80
+      }
+    },
+    {
+      "id": "mail",
+      "type": "send-email",
+      "label": "寄異常通知",
+      "config": {
+        "subject": "📈 數值超標提醒({{today}})",
+        "body": "偵測到 {{flaggedCount}} 筆超標:\n\n{{alertText}}"
+      },
+      "position": {
+        "x": 1200,
+        "y": 80
+      }
+    },
+    {
+      "id": "alert",
+      "type": "desktop-notify",
+      "label": "讀不到表告警",
+      "config": {
+        "title": "數值監控失敗",
+        "message": "🆘 讀不到試算表:{{error}}"
+      },
+      "position": {
+        "x": 480,
+        "y": 330
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "read"
+    },
+    {
+      "from": "read",
+      "to": "flag"
+    },
+    {
+      "from": "flag",
+      "to": "chk"
+    },
+    {
+      "from": "chk",
+      "to": "msg",
+      "fromPort": "true"
+    },
+    {
+      "from": "msg",
+      "to": "mail"
+    },
+    {
+      "from": "read",
+      "to": "alert",
+      "fromPort": "error"
+    }
+  ]
+}

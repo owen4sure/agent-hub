@@ -1,0 +1,81 @@
+{
+  "id": "http-read-later",
+  "category": "整合串接",
+  "icon": "🔖",
+  "name": "丟個網址進來,自動存進 Notion 閱讀清單",
+  "description": "給你一個 Webhook 網址,從手機捷徑或瀏覽器把「想晚點看」的網址 POST 進來 → 自動抓網頁抽出標題 → 寫進你的 Notion 資料庫 → Telegram 回報收藏成功;抓不到頁面走失敗分支告警。Notion token 到 notion.so/my-integrations 建立整合取得,記得把資料庫分享給該整合、資料庫要有 Name(標題)與 URL(網址)兩個欄位。(改編自 n8n 社群範本庫 0048_HTTP_Htmlextract_Create_Webhook.json)",
+  "triggerParams": [
+    {
+      "key": "url",
+      "label": "要收藏的網址",
+      "type": "text",
+      "default": "https://example.com/article"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(Webhook 收網址)",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "fetch",
+      "type": "web-page",
+      "label": "抓那個網頁",
+      "config": {
+        "url": "{{url}}",
+        "maxChars": "8000"
+      },
+      "position": { "x": 260, "y": 120 }
+    },
+    {
+      "id": "title",
+      "type": "llm-decide",
+      "label": "AI 抽文章標題",
+      "config": {
+        "prompt": "從這個網頁抽出文章標題,只回標題文字本身(不要引號、不要說明):\n網頁標題欄:{{pageTitle}}\n內文開頭:{{pageText}}",
+        "outputKey": "readTitle"
+      },
+      "position": { "x": 520, "y": 120 }
+    },
+    {
+      "id": "save",
+      "type": "http-request",
+      "label": "寫進 Notion 資料庫",
+      "config": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/pages",
+        "headers": "{\"Authorization\": \"Bearer 請換成你的Notion整合token\", \"Notion-Version\": \"2022-06-28\", \"Content-Type\": \"application/json\"}",
+        "body": "{\"parent\": {\"database_id\": \"請換成你的資料庫ID\"}, \"properties\": {\"Name\": {\"title\": [{\"text\": {\"content\": \"{{readTitle}}\"}}]}, \"URL\": {\"url\": \"{{url}}\"}}}"
+      },
+      "position": { "x": 780, "y": 120 }
+    },
+    {
+      "id": "done",
+      "type": "telegram-notify",
+      "label": "回報收藏成功",
+      "config": {
+        "message": "🔖 已收進閱讀清單:{{readTitle}}\n{{url}}"
+      },
+      "position": { "x": 1040, "y": 120 }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "抓不到頁面告警",
+      "config": {
+        "message": "⚠️ 收藏失敗,抓不到這個頁面:{{error}}\n{{url}}"
+      },
+      "position": { "x": 520, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "fetch" },
+    { "from": "fetch", "to": "title" },
+    { "from": "title", "to": "save" },
+    { "from": "save", "to": "done" },
+    { "from": "fetch", "to": "alert", "fromPort": "error" }
+  ]
+}

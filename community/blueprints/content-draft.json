@@ -1,0 +1,72 @@
+{
+  "id": "content-draft",
+  "category": "內容產生",
+  "icon": "✍️",
+  "name": "從 RSS 靈感自動寫貼文草稿",
+  "description": "讀你關注領域的 RSS → AI 挑一則最有梗的寫成社群貼文草稿(含 hashtag) → 存成檔案等你過目——內容靈感永遠不斷糧。",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "rss",
+      "type": "rss-read",
+      "label": "讀 RSS 靈感",
+      "config": {
+        "url": "https://hnrss.org/frontpage",
+        "maxItems": "10"
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "draft",
+      "type": "llm-decide",
+      "label": "AI 寫貼文草稿",
+      "config": {
+        "prompt": "從這些文章挑一則最適合寫成社群貼文的,寫一篇 150 字內的繁中貼文草稿(口語、有觀點、結尾 2-3 個 hashtag):\n{{articlesText}}",
+        "outputKey": "draft"
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    },
+    {
+      "id": "save",
+      "type": "write-file",
+      "label": "存草稿",
+      "config": {
+        "fileName": "貼文草稿_{{today}}.txt",
+        "content": "{{draft}}"
+      },
+      "position": {
+        "x": 780,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "rss"
+    },
+    {
+      "from": "rss",
+      "to": "draft"
+    },
+    {
+      "from": "draft",
+      "to": "save"
+    }
+  ]
+}

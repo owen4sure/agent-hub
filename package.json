@@ -1,0 +1,86 @@
+{
+  "name": "agent-hub",
+  "version": "0.2.0",
+  "private": true,
+  "description": "本地自架的視覺化 workflow 自動化平台，用白話跟 AI 建立、修改、修復流程 (local-first AI workflow automation)",
+  "license": "MIT",
+  "keywords": [
+    "automation",
+    "workflow",
+    "ai",
+    "no-code",
+    "playwright",
+    "local-first"
+  ],
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1",
+    "prebuild": "node scripts/prebuild.mjs",
+    "build": "next build",
+    "start": "next start -H 127.0.0.1",
+    "lint": "eslint",
+    "test": "tsx --test \"lib/**/*.test.ts\"",
+    "doctor": "tsx scripts/doctor.ts",
+    "check:change-guard": "node scripts/change-guard.mjs",
+    "check:audit": "node scripts/audit-gate.mjs",
+    "restore:backup": "node scripts/restore-backup.mjs",
+    "key:export": "tsx scripts/vault-key.ts export",
+    "key:import": "tsx scripts/vault-key.ts import",
+    "verify:real-workflows": "node scripts/verify-real-workflows.mjs",
+    "postinstall": "playwright install chromium && node scripts/install-hooks.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/owen4sure/agent-hub.git"
+  },
+  "homepage": "https://github.com/owen4sure/agent-hub#readme",
+  "bugs": {
+    "url": "https://github.com/owen4sure/agent-hub/issues"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.11.1",
+    "adm-zip": "^0.6.0",
+    "better-sqlite3": "^12.11.1",
+    "exceljs": "^4.4.0",
+    "imapflow": "^1.4.7",
+    "mailparser": "^3.9.14",
+    "mammoth": "^1.11.0",
+    "next": "16.2.12",
+    "nodemailer": "^9.0.3",
+    "openai": "^6.45.0",
+    "pdf-parse": "^1.1.4",
+    "pdfjs-dist": "^6.1.200",
+    "playwright": "^1.61.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "tsx": "^4.23.0",
+    "word-extractor": "^1.0.4",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/adm-zip": "^0.5.8",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^20",
+    "@types/nodemailer": "^8.0.1",
+    "@types/pdf-parse": "^1.1.5",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "16.2.12",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  },
+  "overrides": {
+    "tar": "^7.5.16",
+    "postcss": "^8.5.25",
+    "sharp": "^0.35.3",
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
+  }
+}

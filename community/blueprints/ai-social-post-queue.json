@@ -1,0 +1,107 @@
+{
+  "id": "ai-social-post-queue",
+  "category": "行銷業務",
+  "icon": "📣",
+  "name": "試算表靈感庫自動寫貼文,Twitter 直接發",
+  "description": "在 Google 試算表維護一個貼文靈感庫(欄位:主題、平台、語氣;共用設成「知道連結的任何人可檢視」,網址貼進「讀靈感庫」節點) → 排程到點讀第一筆 → AI 依平台調性寫成貼文 → 平台是 Twitter 就打 API 直接發布並把發布紀錄寫回試算表;其他平台就把寫好的貼文傳到 Telegram 讓你複製手動貼。Twitter 的 Bearer Token 到 developer.x.com 建 App 後產生,換掉 header 裡的占位字串。(改編自 n8n 社群範本庫 0785_Openai_Twitter_Create.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程:每天 10:00)",
+      "config": {},
+      "position": { "x": 0, "y": 130 }
+    },
+    {
+      "id": "ideas",
+      "type": "google-sheet-read",
+      "label": "讀靈感庫",
+      "config": {
+        "sheetUrl": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit",
+        "maxRows": "50"
+      },
+      "position": { "x": 260, "y": 130 }
+    },
+    {
+      "id": "pick",
+      "type": "custom-code",
+      "label": "取第一筆靈感",
+      "config": {
+        "intent": "從 rows 陣列取第一筆(rows 每筆的欄位名是:主題、平台、語氣),輸出欄位 ideaTopic(主題文字)、ideaPlatform(平台文字)、ideaTone(語氣文字)。rows 是空陣列就 throw 錯誤,訊息寫「靈感庫沒有資料了,先去試算表補幾筆」。",
+        "code": ""
+      },
+      "position": { "x": 520, "y": 130 }
+    },
+    {
+      "id": "gen",
+      "type": "llm-decide",
+      "label": "AI 寫貼文",
+      "config": {
+        "prompt": "把靈感「{{ideaTopic}}」寫成一則要發在 {{ideaPlatform}} 的貼文,語氣:{{ideaTone}}。平台是 Twitter 就控制在 120 字以內並加 1~2 個相關 hashtag;其他平台 200 字以內、分 2~3 個短段。只回貼文本文,不要引號、不要說明。",
+        "outputKey": "postText"
+      },
+      "position": { "x": 780, "y": 130 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "平台是 Twitter?",
+      "config": {
+        "left": "{{ideaPlatform}}",
+        "op": "==",
+        "right": "Twitter"
+      },
+      "position": { "x": 1040, "y": 130 }
+    },
+    {
+      "id": "post",
+      "type": "http-request",
+      "label": "發布到 Twitter",
+      "config": {
+        "method": "POST",
+        "url": "https://api.twitter.com/2/tweets",
+        "headers": "{\"Content-Type\": \"application/json\", \"Authorization\": \"Bearer 請換成你的TwitterAPIToken\"}",
+        "body": "{\"text\": \"{{postText}}\"}"
+      },
+      "position": { "x": 1300, "y": 60 }
+    },
+    {
+      "id": "log",
+      "type": "google-sheet-append",
+      "label": "發布紀錄寫回試算表",
+      "config": {
+        "cells": "{{today}}\n{{ideaTopic}}\n{{postText}}\n已發布",
+        "sheetName": "發布紀錄"
+      },
+      "position": { "x": 1560, "y": 60 }
+    },
+    {
+      "id": "skip",
+      "type": "telegram-notify",
+      "label": "其他平台交給你手動貼",
+      "config": {
+        "message": "📣 這筆靈感的平台是 {{ideaPlatform}},不支援自動發布。貼文幫你寫好了,複製去貼:\n\n{{postText}}"
+      },
+      "position": { "x": 1300, "y": 240 }
+    },
+    {
+      "id": "err",
+      "type": "telegram-notify",
+      "label": "發布失敗告警",
+      "config": {
+        "message": "🆘 Twitter 發布失敗:{{error}}\n貼文內容先留著,修好再發:\n{{postText}}"
+      },
+      "position": { "x": 1300, "y": 400 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "ideas" },
+    { "from": "ideas", "to": "pick" },
+    { "from": "pick", "to": "gen" },
+    { "from": "gen", "to": "gate" },
+    { "from": "gate", "to": "post", "fromPort": "true" },
+    { "from": "post", "to": "log" },
+    { "from": "gate", "to": "skip", "fromPort": "false" },
+    { "from": "post", "to": "err", "fromPort": "error" }
+  ]
+}

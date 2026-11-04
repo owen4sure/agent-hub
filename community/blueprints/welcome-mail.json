@@ -1,0 +1,70 @@
+{
+  "id": "welcome-mail",
+  "category": "整合串接",
+  "icon": "🎉",
+  "name": "有人報名就寄歡迎信+登記名單",
+  "description": "分享報名表單連結,有人填就自動寄一封歡迎信給對方,並把名單登記進你的 Google 試算表。",
+  "triggerParams": [
+    {
+      "key": "name",
+      "label": "姓名",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "email",
+      "label": "Email",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(表單報名)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "mail",
+      "type": "send-email",
+      "label": "寄歡迎信",
+      "config": {
+        "to": "{{email}}",
+        "subject": "歡迎加入,{{name}}!",
+        "body": "{{name}} 你好:\n\n收到你的報名了,之後的通知都會寄到這個信箱。\n\n——自動發送於 {{today}}"
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "row",
+      "type": "google-sheet-append",
+      "label": "登記名單",
+      "config": {
+        "cells": "{{today}}, {{name}}, {{email}}",
+        "sheetName": ""
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "mail"
+    },
+    {
+      "from": "mail",
+      "to": "row"
+    }
+  ]
+}

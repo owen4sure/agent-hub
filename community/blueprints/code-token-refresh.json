@@ -1,0 +1,75 @@
+{
+  "id": "code-token-refresh",
+  "category": "開發者工具",
+  "icon": "🔑",
+  "name": "API 憑證快過期前自動換發並存檔",
+  "description": "很多服務的 access token 一小時就過期,手動換發遲早漏掉 → 排程(例如每 45 分鐘)拿 refresh token 去換一顆新的 access token → 換發成功就把回應存成 token 檔,其他流程或程式直接讀這個檔就永遠拿到有效憑證;換發失敗或連不上授權伺服器都會立刻告警,不會等到 API 全掛才發現。網址與欄位請換成你使用服務的 OAuth token endpoint。(改編自 n8n 社群範本庫 0630_Code_Webhook_Create_Scheduled.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程,每 45 分鐘)",
+      "config": {},
+      "position": { "x": 0, "y": 130 }
+    },
+    {
+      "id": "ask",
+      "type": "http-request",
+      "label": "用 refresh token 換新憑證",
+      "config": {
+        "method": "POST",
+        "url": "https://example.com/oauth/token",
+        "headers": "{\"Content-Type\": \"application/json\"}",
+        "body": "{\"grant_type\": \"refresh_token\", \"refresh_token\": \"請換成你的refresh token\", \"client_id\": \"請換成你的client id\", \"client_secret\": \"請換成你的client secret\"}"
+      },
+      "position": { "x": 260, "y": 130 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "換發成功?",
+      "config": {
+        "left": "{{status}}",
+        "op": "==",
+        "right": "200"
+      },
+      "position": { "x": 520, "y": 130 }
+    },
+    {
+      "id": "save",
+      "type": "write-file",
+      "label": "存成 token 檔",
+      "config": {
+        "fileName": "access-token.json",
+        "content": "{{body}}",
+        "extraDir": ""
+      },
+      "position": { "x": 780, "y": 60 }
+    },
+    {
+      "id": "fail",
+      "type": "telegram-notify",
+      "label": "換發被拒告警",
+      "config": {
+        "message": "🆘 憑證換發被授權伺服器拒絕(HTTP {{status}}):{{body}}\nrefresh token 可能已失效,請手動重新授權一次。"
+      },
+      "position": { "x": 780, "y": 220 }
+    },
+    {
+      "id": "err",
+      "type": "telegram-notify",
+      "label": "連線失敗告警",
+      "config": {
+        "message": "🆘 連不上授權伺服器({{error}}),這一輪憑證沒換到——下一輪排程會再試,連續看到這則訊息請檢查網路或服務狀態。"
+      },
+      "position": { "x": 260, "y": 320 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "ask" },
+    { "from": "ask", "to": "gate" },
+    { "from": "gate", "to": "save", "fromPort": "true" },
+    { "from": "gate", "to": "fail", "fromPort": "false" },
+    { "from": "ask", "to": "err", "fromPort": "error" }
+  ]
+}

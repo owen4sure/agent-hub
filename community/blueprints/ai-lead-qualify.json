@@ -1,0 +1,74 @@
+{
+  "id": "ai-lead-qualify",
+  "category": "行銷業務",
+  "icon": "🧲",
+  "name": "名單試算表 AI 逐筆評級,高意向立刻通知",
+  "description": "把收進來的名單放在 Google 試算表(欄位:姓名、信箱、公司、職稱、需求;共用設成「知道連結的任何人可檢視」,網址貼進「讀名單」節點) → 排程逐筆讓 AI 依「是不是決策者、是不是公司信箱、需求寫得具不具體」評高/中/低意向 → 每筆評級寫進試算表的「評級結果」分頁 → 最後把高意向名單整理成一則 Telegram 讓你優先跟進;讀不到試算表或評級中斷都走失敗分支告警。(改編自 n8n 社群範本庫 1177_Openai_GoogleSheets_Create_Triggered.json)",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(配排程:每天 09:00)",
+      "config": {},
+      "position": { "x": 0, "y": 130 }
+    },
+    {
+      "id": "read",
+      "type": "google-sheet-read",
+      "label": "讀名單",
+      "config": {
+        "sheetUrl": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit",
+        "maxRows": "100"
+      },
+      "position": { "x": 260, "y": 130 }
+    },
+    {
+      "id": "loop",
+      "type": "repeat-steps",
+      "label": "逐筆評級並寫回",
+      "config": {
+        "items": "{{rows}}",
+        "itemVar": "lead",
+        "steps": "[{\"type\": \"llm-decide\", \"label\": \"AI 評意向等級\", \"config\": {\"prompt\": \"依這筆名單判斷購買意向等級。標準:1) 職稱像決策者(創辦人/主管/負責人)→加分;2) 信箱是公司網域(不是 gmail、yahoo 這類免費信箱)→加分;3) 需求寫得具體(有情境、有時程)→加分。\\n例:「共同創辦人+公司信箱+下一季要導入」→ 高;「專員+gmail+先了解看看」→ 中;「學生+免費信箱+隨便填」→ 低。\\n\\n姓名:{{lead.姓名}}\\n信箱:{{lead.信箱}}\\n公司:{{lead.公司}}\\n職稱:{{lead.職稱}}\\n需求:{{lead.需求}}\", \"outputKey\": \"rating\", \"choices\": \"高,中,低\"}}, {\"type\": \"google-sheet-append\", \"label\": \"寫入評級結果\", \"config\": {\"cells\": \"{{lead.姓名}}\\n{{lead.信箱}}\\n{{lead.公司}}\\n{{rating}}\", \"sheetName\": \"評級結果\"}}]",
+        "outputKey": "ratings"
+      },
+      "position": { "x": 520, "y": 130 }
+    },
+    {
+      "id": "hot",
+      "type": "llm-decide",
+      "label": "挑出高意向名單",
+      "config": {
+        "prompt": "下面是名單評級結果(JSON 陣列,每筆有 lead 原始資料與 rating 評級)。把 rating 是「高」的每筆整理成一行「姓名|公司|信箱」,一筆一行;一筆都沒有就只回「這批沒有高意向名單」。只回清單本文。\n\n{{ratings}}",
+        "outputKey": "hotList"
+      },
+      "position": { "x": 780, "y": 130 }
+    },
+    {
+      "id": "tg",
+      "type": "telegram-notify",
+      "label": "通知優先跟進",
+      "config": {
+        "message": "🧲 名單評級完成(共 {{rowCount}} 筆,每筆結果已寫進試算表「評級結果」分頁)\n高意向優先跟進:\n{{hotList}}"
+      },
+      "position": { "x": 1040, "y": 130 }
+    },
+    {
+      "id": "alert",
+      "type": "telegram-notify",
+      "label": "跑不動告警",
+      "config": {
+        "message": "🆘 名單評級跑不了:{{error}}(卡在步驟 {{errorStep}}),請檢查試算表網址、共用權限與欄位名"
+      },
+      "position": { "x": 390, "y": 320 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "read" },
+    { "from": "read", "to": "loop" },
+    { "from": "loop", "to": "hot" },
+    { "from": "hot", "to": "tg" },
+    { "from": "read", "to": "alert", "fromPort": "error" },
+    { "from": "loop", "to": "alert", "fromPort": "error" }
+  ]
+}

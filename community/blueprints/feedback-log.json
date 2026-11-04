@@ -1,0 +1,74 @@
+{
+  "id": "feedback-log",
+  "category": "整合串接",
+  "icon": "📮",
+  "name": "意見回饋自動分類進試算表",
+  "description": "分享意見表單,收到回饋先讓 AI 判斷情緒(正面/負面/中性),連同內容一起記進試算表——負面的一眼就能篩出來。",
+  "triggerParams": [
+    {
+      "key": "name",
+      "label": "填寫人",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "feedback",
+      "label": "意見內容",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(表單)",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "mood",
+      "type": "llm-decide",
+      "label": "AI 判斷情緒",
+      "config": {
+        "prompt": "判斷這則意見的情緒:{{feedback}}。例:『超好用,幫大忙了』→正面;『等超久還壞掉,很失望』→負面;『請問有沒有深色模式』→中性。",
+        "outputKey": "mood",
+        "choices": "正面,負面,中性"
+      },
+      "position": {
+        "x": 260,
+        "y": 120
+      }
+    },
+    {
+      "id": "row",
+      "type": "google-sheet-append",
+      "label": "記進試算表",
+      "config": {
+        "cells": "{{today}}, {{name}}, {{mood}}, {{feedback}}",
+        "sheetName": ""
+      },
+      "position": {
+        "x": 520,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "t",
+      "to": "mood"
+    },
+    {
+      "from": "t",
+      "to": "row"
+    },
+    {
+      "from": "mood",
+      "to": "row"
+    }
+  ]
+}

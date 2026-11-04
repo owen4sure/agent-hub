@@ -1,0 +1,99 @@
+{
+  "id": "tg-seo-draft",
+  "category": "內容產生",
+  "icon": "✍️",
+  "name": "給主題,AI 寫好 SEO 文章直接進 WordPress 草稿",
+  "description": "丟一個主題進來(手動執行或接 Webhook)→ AI 先想吸引點閱的 SEO 標題 → 再寫成 WordPress 相容的 HTML 內文 → 打 WordPress REST API 建立「草稿」等你審稿 → 成功或被拒都發 Telegram 告訴你。把 example.com 換成你的站;Authorization 的占位這樣換:WordPress 後台 → 使用者 → 個人資料 → 「應用程式密碼」產生一組,把「帳號:密碼」做 Base64 後填入。(改編自 n8n 社群範本庫 1070_Telegram_Wordpress_Create_Webhook.json)",
+  "triggerParams": [
+    { "key": "topic", "label": "文章主題", "type": "textarea", "default": "" },
+    { "key": "keywords", "label": "要帶到的關鍵字(逗號分隔)", "type": "text", "default": "" }
+  ],
+  "nodes": [
+    {
+      "id": "t",
+      "type": "trigger",
+      "label": "開始(丟主題進來)",
+      "config": {},
+      "position": { "x": 0, "y": 130 }
+    },
+    {
+      "id": "title",
+      "type": "llm-decide",
+      "label": "AI 想 SEO 標題",
+      "config": {
+        "prompt": "為主題「{{topic}}」想一個吸引點閱的 SEO 文章標題:30 字以內、自然帶到關鍵字「{{keywords}}」、講出對讀者的具體好處、不要堆疊驚嘆號。只回標題文字本身,不要引號、不要其他說明。",
+        "outputKey": "postTitle"
+      },
+      "position": { "x": 260, "y": 130 }
+    },
+    {
+      "id": "write",
+      "type": "llm-decide",
+      "label": "AI 寫 HTML 內文",
+      "config": {
+        "prompt": "只輸出 HTML 本文,不要任何前後說明、不要 Markdown 圍欄。以「{{postTitle}}」為題,寫一篇 800~1200 字的部落格文章:主題是 {{topic}},自然融入關鍵字「{{keywords}}」。結構:開頭兩句直接點出讀者的痛點;用 <h2> 分 3~5 個小節、內文用 <p>、條列處用 <ul><li>;結尾一段行動呼籲。不要 <html> 或 <body> 外殼,從第一個 <p> 開始。",
+        "outputKey": "postHtml"
+      },
+      "position": { "x": 520, "y": 130 }
+    },
+    {
+      "id": "publish",
+      "type": "http-request",
+      "label": "建立 WordPress 草稿",
+      "config": {
+        "method": "POST",
+        "url": "https://example.com/wp-json/wp/v2/posts",
+        "headers": "{\"Content-Type\": \"application/json\", \"Authorization\": \"Basic 請換成你的應用程式密碼Base64\"}",
+        "body": "{\"title\": \"{{postTitle}}\", \"content\": \"{{postHtml}}\", \"status\": \"draft\"}"
+      },
+      "position": { "x": 780, "y": 130 }
+    },
+    {
+      "id": "gate",
+      "type": "if-condition",
+      "label": "建立成功?",
+      "config": {
+        "left": "{{status}}",
+        "op": "==",
+        "right": "201"
+      },
+      "position": { "x": 1040, "y": 130 }
+    },
+    {
+      "id": "ok",
+      "type": "telegram-notify",
+      "label": "通知去審稿",
+      "config": {
+        "message": "✍️ 草稿已進 WordPress:「{{postTitle}}」\n上後台看一眼,順眼就能直接發布"
+      },
+      "position": { "x": 1300, "y": 60 }
+    },
+    {
+      "id": "rej",
+      "type": "telegram-notify",
+      "label": "WordPress 不收告警",
+      "config": {
+        "message": "🆘 WordPress 拒絕了這篇({{status}}):{{body}}\n標題:{{postTitle}}(常見原因:應用程式密碼失效或帳號沒有發文權限)"
+      },
+      "position": { "x": 1300, "y": 240 }
+    },
+    {
+      "id": "err",
+      "type": "telegram-notify",
+      "label": "連不上告警",
+      "config": {
+        "message": "🆘 連不上 WordPress:{{error}}——文章有寫好,修好連線後重跑即可"
+      },
+      "position": { "x": 780, "y": 300 }
+    }
+  ],
+  "edges": [
+    { "from": "t", "to": "title" },
+    { "from": "title", "to": "write" },
+    { "from": "write", "to": "publish" },
+    { "from": "publish", "to": "gate" },
+    { "from": "gate", "to": "ok", "fromPort": "true" },
+    { "from": "gate", "to": "rej", "fromPort": "false" },
+    { "from": "publish", "to": "err", "fromPort": "error" }
+  ]
+}
